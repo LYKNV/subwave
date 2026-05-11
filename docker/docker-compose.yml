@@ -1,0 +1,63 @@
+# SUB/WAVE — orchestration (Mac local smoke-test variant)
+# Runs: Icecast (broadcast) → Liquidsoap (mixer) → Controller (brain)
+# Web UI runs separately (next.js dev/prod)
+#
+# Navidrome is remote (https://music.klair.co). Ollama runs on the Mac host.
+
+services:
+  # -------------------------------------------------------------------------
+  # ICECAST — the broadcast endpoint listeners connect to
+  # -------------------------------------------------------------------------
+  icecast:
+    image: moul/icecast:latest
+    container_name: sub-wave-icecast
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ICECAST_SOURCE_PASSWORD=${ICECAST_SOURCE_PASSWORD:-changeme}
+      - ICECAST_ADMIN_PASSWORD=${ICECAST_ADMIN_PASSWORD:-changeme}
+      - ICECAST_PASSWORD=${ICECAST_RELAY_PASSWORD:-changeme}
+      - ICECAST_HOSTNAME=localhost
+    volumes:
+      - ./icecast.xml:/etc/icecast2/icecast.xml:ro
+
+  # -------------------------------------------------------------------------
+  # LIQUIDSOAP — pulls from queue file, broadcasts to Icecast
+  # -------------------------------------------------------------------------
+  liquidsoap:
+    image: savonet/liquidsoap:v2.2.5
+    platform: linux/amd64
+    container_name: sub-wave-liquidsoap
+    restart: unless-stopped
+    depends_on:
+      - icecast
+    environment:
+      - ICECAST_SOURCE_PASSWORD=${ICECAST_SOURCE_PASSWORD:-changeme}
+    volumes:
+      - ../liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ../state:/var/sub-wave
+      - ../state/logs:/var/log/liquidsoap
+    command: liquidsoap /etc/liquidsoap/radio.liq
+
+  # -------------------------------------------------------------------------
+  # CONTROLLER — the AI DJ brain
+  # -------------------------------------------------------------------------
+  controller:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.controller
+    platform: linux/amd64
+    container_name: sub-wave-controller
+    restart: unless-stopped
+    depends_on:
+      - liquidsoap
+    ports:
+      - "4000:4000"
+    env_file:
+      - ../controller/.env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ../state:/var/sub-wave
+      - ../state/logs:/var/log/liquidsoap:ro

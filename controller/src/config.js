@@ -1,0 +1,42 @@
+// Centralised config — reads from env, with sensible defaults
+
+export const config = {
+  navidrome: {
+    url: process.env.NAVIDROME_URL || 'http://navidrome:4533',
+    user: process.env.NAVIDROME_USER || '',
+    password: process.env.NAVIDROME_PASS || '',
+    apiVersion: '1.16.1',
+    clientName: 'sub-wave',
+  },
+  ollama: {
+    url: process.env.OLLAMA_URL || 'http://x1pro.tail.ts.net:11434',
+    model: process.env.OLLAMA_MODEL || 'qwen2.5:7b',
+  },
+  piper: {
+    binary: process.env.PIPER_BIN || '/usr/local/bin/piper',
+    voice: process.env.PIPER_VOICE || '/opt/piper/voices/en_GB-alan-medium.onnx',
+    voiceConfig: process.env.PIPER_VOICE_CONFIG || '/opt/piper/voices/en_GB-alan-medium.onnx.json',
+    outDir: process.env.PIPER_OUT || '/var/sub-wave/voice',
+  },
+  liquidsoap: {
+    queueFile: '/var/sub-wave/next.txt',
+    sayFile: '/var/sub-wave/say.txt',
+    autoPlaylist: '/var/sub-wave/auto.m3u',
+    nowPlayingFile: '/var/sub-wave/now-playing.json',
+  },
+  weather: {
+    // Wolverhampton — your home location
+    lat: 52.5862,
+    lng: -2.1288,
+    locationName: 'Wolverhampton',
+  },
+  server: {
+    port: parseInt(process.env.PORT || '4000', 10),
+  },
+  show: {
+    // Define show clocks — what % of slots are music vs jingles vs DJ talk
+    autoQueueRefreshMinutes: 10,
+    djSegmentEveryMinutes: 20,
+    weatherUpdateEveryMinutes: 60,
+  },
+};

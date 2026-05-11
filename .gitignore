@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+
+# Next.js
+.next/
+out/
+
+# Runtime state — file-based IPC, TTS output, archives, logs
+state/voice/
+state/archive/
+state/logs/
+state/jingles/
+state/auto.m3u
+state/jingles.m3u
+state/next.txt
+state/say.txt
+state/now-playing.json
+state/emergency.mp3
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
