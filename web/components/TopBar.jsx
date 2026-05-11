@@ -1,15 +1,8 @@
 'use client';
 
-import { Settings, Radio } from 'lucide-react';
-import { useClock } from '../lib/hooks';
+import { Settings, Radio, Headphones } from 'lucide-react';
 
-export default function TopBar({ tunedIn, context, transmission, djName, onOpenSettings, tickerOn, onToggleTicker }) {
-  const clock = useClock();
-  const time = clock ? clock.toLocaleTimeString('en-GB', { hour12: false }) : '--:--:--';
-  const city = context?.weather?.locationName || context?.city;
-  const temp = context?.weather?.temp;
-  const cond = context?.weather?.condition;
-
+export default function TopBar({ tunedIn, transmission, djName, listeners, onOpenSettings, tickerOn, onToggleTicker }) {
   return (
     <div
       className="absolute top-0 left-0 right-0 flex items-baseline justify-between gap-3 z-20 px-4 py-4 sm:px-8 sm:py-6"
@@ -34,14 +27,17 @@ export default function TopBar({ tunedIn, context, transmission, djName, onOpenS
           <span style={{ color: tunedIn ? 'var(--accent)' : 'var(--muted)' }}>●</span>
           <span className="hidden sm:inline">{' '}{tunedIn ? 'on air' : 'off air'}</span>
         </span>
-        {(city || temp != null || cond) && (
-          <span className="hidden md:inline">
-            {[city, temp != null ? `${temp}°C` : null, cond].filter(Boolean).join(' · ')}
+        {listeners?.current != null && (
+          <span
+            className="whitespace-nowrap v3-tab-num inline-flex items-center gap-1.5"
+            style={{ color: listeners.current > 0 ? 'var(--ink)' : 'var(--muted)', fontWeight: 600 }}
+            title={`${listeners.current} listening · peak ${listeners.peak ?? 0}`}
+            aria-label={`${listeners.current} listening`}
+          >
+            <Headphones className="w-3.5 h-3.5" aria-hidden="true" />
+            {listeners.current}
           </span>
         )}
-        <span className="v3-tab-num whitespace-nowrap" style={{ color: 'var(--ink)', fontWeight: 600 }}>
-          {time}
-        </span>
         {onToggleTicker && (
           <button
             onClick={onToggleTicker}

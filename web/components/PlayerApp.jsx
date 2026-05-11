@@ -28,7 +28,7 @@ const DRAWER_TITLES = {
 };
 
 export default function PlayerApp({ contained = false }) {
-  const { nowPlaying, context, dj, state, elapsed, progress } = useStationFeed();
+  const { nowPlaying, context, dj, listeners, state, elapsed, progress } = useStationFeed();
   const { audioRef, tunedIn, volume, setVolume, tune } = usePlayer();
 
   const rootRef = useRef(null);
@@ -91,6 +91,7 @@ export default function PlayerApp({ contained = false }) {
         context={context}
         transmission={state.djLog?.length || 241}
         djName={dj?.name}
+        listeners={listeners}
         onOpenSettings={() => setSettingsOpen(true)}
         tickerOn={tickerOn}
         onToggleTicker={toggleTicker}

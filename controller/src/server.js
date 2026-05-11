@@ -86,17 +86,38 @@ function requireAdmin(req, res, next) {
 
 console.log(`[auth] admin gate ${ADMIN_AUTH_REQUIRED ? 'ENABLED' : 'disabled (set ADMIN_USER+ADMIN_PASS to enable)'}`);
 
+// Icecast listener count — small helper used by /now-playing. Cheap local
+// fetch with a hard 1.5s timeout so a slow Icecast can never wedge the
+// every-5s poll the UI does. Returns 0/0 on any failure.
+async function getListenerStats() {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 1500);
+    const r = await fetch('http://icecast:8000/status-json.xsl', { signal: ctrl.signal });
+    clearTimeout(timer);
+    const ic = (await r.json())?.icestats;
+    const src = Array.isArray(ic?.source) ? ic.source[0] : ic?.source;
+    return {
+      current: Number(src?.listeners || 0),
+      peak:    Number(src?.listener_peak || 0),
+    };
+  } catch {
+    return { current: 0, peak: 0 };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // GET /now-playing — current track + context snapshot
 // ---------------------------------------------------------------------------
 app.get('/now-playing', async (req, res) => {
   try {
-    const [nowPlaying, ctx] = await Promise.all([
+    const [nowPlaying, ctx, listeners] = await Promise.all([
       queue.getNowPlaying(),
       getFullContext(),
+      getListenerStats(),
     ]);
     const s = settings.get();
-    res.json({ nowPlaying, context: ctx, dj: { name: s.dj?.name } });
+    res.json({ nowPlaying, context: ctx, dj: { name: s.dj?.name }, listeners });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
