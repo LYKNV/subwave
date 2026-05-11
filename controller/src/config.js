@@ -21,6 +21,10 @@ export const config = {
   liquidsoap: {
     queueFile: '/var/sub-wave/next.txt',
     sayFile: '/var/sub-wave/say.txt',
+    // Separate channel for talk-over voice (auto-links, anything that should
+    // play OVER a track that's already started with light ducking instead of
+    // heavy ducking the music to 25%). Read by a second poll thread in radio.liq.
+    introFile: '/var/sub-wave/intro.txt',
     autoPlaylist: '/var/sub-wave/auto.m3u',
     nowPlayingFile: '/var/sub-wave/now-playing.json',
   },

@@ -94,12 +94,21 @@ class Queue {
   }
 
   // Speak something without queueing a track — for hourly time checks,
-  // weather updates, station IDs.
+  // weather updates, station IDs, and auto DJ links.
+  //
+  // Dispatches to one of two Liquidsoap voice channels based on kind:
+  //   - 'link' → intro.txt → intro_queue → LIGHT duck (talk-over feel: the
+  //              song that just started stays audible underneath the voice)
+  //   - everything else → say.txt → voice_queue → HEAVY duck (solo voice
+  //              dominates; used for station ID / hourly / weather)
   async announce(text, kind = 'announcement') {
     if (!text || !text.trim()) return;
     try {
       const wavPath = await speak(text);
-      await writeFile(config.liquidsoap.sayFile, wavPath);
+      const targetFile = kind === 'link'
+        ? config.liquidsoap.introFile
+        : config.liquidsoap.sayFile;
+      await writeFile(targetFile, wavPath);
       this.log(kind, text);
     } catch (err) {
       this.log('error', `Announce failed: ${err.message}`);

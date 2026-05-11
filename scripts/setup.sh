@@ -113,6 +113,22 @@ if [[ ! -f "$STATE_DIR/emergency.mp3" ]]; then
   fi
 fi
 
+# ---- 6. Studio bed ----------------------------------------------------------
+# Continuous low-level ambient loop that Liquidsoap mixes under the broadcast.
+# Masked by music, audible under ducked music when the DJ talks solo. Replace
+# state/bed.mp3 with your own ambient loop any time.
+if [[ ! -f "$STATE_DIR/bed.mp3" ]]; then
+  if command -v ffmpeg &>/dev/null; then
+    say "Generating bed.mp3 (60 s warm pink-noise studio bed)"
+    ffmpeg -hide_banner -loglevel error -y \
+      -f lavfi -i "anoisesrc=color=pink:duration=60:amplitude=0.4" \
+      -af "highpass=f=80,lowpass=f=700,volume=0.5" \
+      -codec:a libmp3lame -b:a 128k "$STATE_DIR/bed.mp3"
+  else
+    warn "ffmpeg not on PATH — skipping bed.mp3 (Liquidsoap will run without studio bed)"
+  fi
+fi
+
 cat <<EOF
 
 Setup complete.

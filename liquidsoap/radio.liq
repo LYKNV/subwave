@@ -126,7 +126,13 @@ music = crossfade(
 # Piper writes WAVs to /var/sub-wave/voice/, controller drops the path
 # into /var/sub-wave/say.txt to trigger playback.
 
+# Two voice channels:
+#   voice_queue — solo voice (station ID, hourly time, weather, listener-
+#                 request back-announce). Heavy duck so music drops out.
+#   intro_queue — talk-over voice (auto DJ links between tracks). Light duck
+#                 so the song you just queued stays audibly underneath.
 voice_queue = request.queue(id="voice_queue")
+intro_queue = request.queue(id="intro_queue")
 
 def poll_voice() =
   if file.exists("/var/sub-wave/say.txt") then
@@ -140,13 +146,90 @@ def poll_voice() =
 end
 thread.run(every=0.5, poll_voice)
 
-# Mix voice over music with sidechain ducking — music drops while DJ talks
-radio =
-  smooth_add(
-    p=0.25,        # how much music ducks (lower = more duck)
-    normal=music,
-    special=voice_queue
+def poll_intro() =
+  if file.exists("/var/sub-wave/intro.txt") then
+    contents = file.contents("/var/sub-wave/intro.txt")
+    file.remove("/var/sub-wave/intro.txt")
+    if contents != "" then
+      log("DJ talk-over: #{contents}")
+      ignore(intro_queue.push(request.create(contents)))
+    end
+  end
+end
+thread.run(every=0.5, poll_intro)
+
+# ---------------------------------------------------------------------------
+# MIC CHAIN — make Piper TTS sound like it's in a broadcast studio
+# ---------------------------------------------------------------------------
+# Piper outputs flat, dry speech. Real radio voices go through a hardware mic
+# chain: highpass → compressor → presence EQ → slap reverb → makeup gain.
+# This mirrors that in Liquidsoap so the DJ stops sounding like a TTS robot.
+#
+# All numbers are tuned for an en_GB-alan-medium-ish voice; tweak in place
+# and `docker compose up -d --build liquidsoap` to audition changes.
+
+# Mic chain applied identically to both voice channels. Defining this as a
+# function (rather than reusing a chain variable) avoids Liquidsoap's
+# "Early computation of source content-type" error — each call instantiates
+# fresh operator nodes for its argument.
+#
+# Skipped (this Liquidsoap build doesn't cooperate with them on a request.queue
+# source — "Early computation" error): HPF at 80 Hz and a parallel 3 kHz
+# presence shelf. Revisit when we upgrade Liquidsoap or wire in LADSPA.
+def mic_chain(s) =
+  # Broadcast-style compression — fast attack, gentle ratio. Tames Piper's
+  # peaks and brings the body of the voice forward without pumping.
+  s = compress(
+    attack=5.0,
+    release=120.0,
+    threshold=-18.0,
+    ratio=4.0,
+    knee=2.0,
+    gain=4.0,
+    s
   )
+  # Slap delay (~40ms, feedback in dB) — adds room so the voice doesn't sit
+  # dry on top of the music. Series only; echo sums dry+delayed internally.
+  s = echo(delay=0.04, feedback=-15.0, ping_pong=false, s)
+  s
+end
+
+voice = mic_chain(voice_queue)
+intro = mic_chain(intro_queue)
+
+# Mix voice over music with sidechain ducking.
+# Two stacked smooth_adds with different duck depths:
+#   - voice (solo segments) ducks music HEAVY to 25% — voice dominates
+#   - intro (talk-overs) ducks the result LIGHT to 55% — music stays audible
+# Stations IDs / hourly checks fire on `voice`; auto DJ links fire on `intro`.
+radio = smooth_add(p=0.25, normal=music, special=voice)
+radio = smooth_add(p=0.55, normal=radio, special=intro)
+
+# ---------------------------------------------------------------------------
+# STUDIO BED — continuous low-level ambient room tone (Phase 2)
+# ---------------------------------------------------------------------------
+# Masked by music when music is loud; becomes audible under ducked music
+# when the DJ talks. Stops solo voice segments from feeling like
+# dead-air-then-voice-then-dead-air. Tweak the bed weight if it's too
+# present (lower) or you can't hear it under voice (higher).
+# Replace state/bed.mp3 with any ambient loop — scripts/generate-bed.sh
+# renders a default warm pink-noise hum.
+
+bed_path = "/var/sub-wave/bed.mp3"
+
+radio =
+  if file.exists(bed_path) then
+    log("Loading studio bed from #{bed_path}")
+    bed = mksafe(single(id="bed", bed_path))
+    add(
+      normalize=false,
+      weights=[1.0, 0.18],   # bed sits ~15 dB below the broadcast mix
+      [radio, bed]
+    )
+  else
+    log("No bed.mp3 — skipping studio bed (run scripts/generate-bed.sh)")
+    radio
+  end
 
 # ---------------------------------------------------------------------------
 # JINGLES & STATION ID — every 30 mins, rotate a jingle in
@@ -175,8 +258,38 @@ radio = fallback(track_sensitive=false, [radio, emergency])
 # Blank detection — skip if more than 5s of silence
 radio = blank.skip(max_blank=5.0, radio)
 
-# Normalize loudness for consistent listener experience
+# ---------------------------------------------------------------------------
+# BROADCAST BUS — final glue so quiet and loud songs sit at the same level
+# ---------------------------------------------------------------------------
+# normalize → bus comp → ceiling limit.  This is what gives commercial radio
+# its "stable signal" feel: a quiet acoustic track and a loud rock track
+# arrive at the listener at the same perceived loudness, with peaks tamed
+# just under 0 dBFS so the Icecast MP3 encoder never clips.
+
+# 1. Long-term loudness normalisation (-14 LUFS-ish, matches streaming targets)
 radio = normalize(target=-14.0, radio)
+
+# 2. Bus compressor — gentle glue, almost transparent
+radio = compress(
+  attack=15.0,
+  release=250.0,
+  threshold=-12.0,
+  ratio=2.0,
+  knee=2.0,
+  gain=0.0,
+  radio
+)
+
+# 3. Brick-wall limit at -1 dBFS — last line of defence before the encoder
+radio = compress(
+  attack=1.0,
+  release=80.0,
+  threshold=-1.0,
+  ratio=20.0,
+  knee=0.5,
+  gain=0.0,
+  radio
+)
 
 # ---------------------------------------------------------------------------
 # METADATA — write current track info for the web UI

@@ -2,16 +2,16 @@
 
 
 - use sqlite instead of @state files, what are possibilities any benifits or losses?
-
+- create a landing page by embeding real player inside it , use all design skills we have use shadcn, lets create something very unique and never seen before
 
 # In progress
 
-- fix on mobile using chrome mcp tool skill
 - how tracks crossfade? any effects on crossfade?
 
 # Done
 
 - matrix like logs and djs transcript in bg of the player on hover or toggle
+- fix on mobile using chrome mcp tool skill
 - dark mode for web
 - change font primary and secondary
 - in settings
