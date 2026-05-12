@@ -10,7 +10,7 @@ import {
 } from '@clack/prompts';
 import pc from 'picocolors';
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -179,31 +179,93 @@ async function gatherEnv() {
   return { ...merged, ...answers };
 }
 
+function canWrite(path) {
+  try {
+    if (!existsSync(path)) {
+      mkdirSync(path, { recursive: true });
+    }
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function main() {
   console.clear();
-  intro(pc.bold(pc.cyan('SUB/WAVE')) + pc.dim(' — dev setup wizard'));
+  intro(pc.bold(pc.cyan('SUB/WAVE')) + pc.dim(' — setup wizard'));
+
+  const mode = guard(await select({
+    message: 'How are you running SUB/WAVE?',
+    options: [
+      {
+        value: 'dev',
+        label: 'Development (local hacking)',
+        hint: 'docker-compose.yml · web on host :3000 · state in ./state',
+      },
+      {
+        value: 'prod',
+        label: 'Production (server deploy)',
+        hint: 'docker-compose.prod.yml · Caddy on :4800 · state in /var/lib/subwave',
+      },
+    ],
+  }));
 
   await preflight();
+
+  let stateDir = resolve(ROOT, 'state');
+  if (mode === 'prod') {
+    stateDir = guard(await text({
+      message: 'STATE_DIR (shared volume for Icecast/Liquidsoap/Controller)',
+      placeholder: '/var/lib/subwave',
+      initialValue: '/var/lib/subwave',
+    }));
+    if (!canWrite(stateDir)) {
+      note(
+        [
+          `${stateDir} is not writable by this user.`,
+          '',
+          'Re-run setup.sh with sudo, then come back to this wizard:',
+          '',
+          pc.cyan(`  sudo STATE_DIR=${stateDir} ./scripts/setup.sh`),
+        ].join('\n'),
+        'Permissions',
+      );
+      bail('Resolve permissions and re-run `npm run setup`.');
+    }
+  }
 
   const env = await gatherEnv();
   writeEnv(CONTROLLER_ENV, env);
   note(`Wrote ${pc.dim('controller/.env')} (${PROMPT_KEYS.length} keys)`, 'Config');
 
+  const composeFile = mode === 'prod' ? 'docker-compose.prod.yml' : 'docker-compose.yml';
+  const composeArgs = ['compose', '-f', composeFile];
+  const setupEnv = mode === 'prod'
+    ? { ...process.env, STATE_DIR: stateDir }
+    : process.env;
+
   // 1. Bash setup: docker/.env, icecast.xml, emergency.mp3, bed.mp3.
   const s = spinner();
   s.start('Rendering icecast.xml + studio audio (scripts/setup.sh)');
-  const setupOk = runStream('bash', ['scripts/setup.sh'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  const setupOk = runStream('bash', ['scripts/setup.sh'], { stdio: ['ignore', 'pipe', 'pipe'], env: setupEnv });
   s.stop(setupOk ? 'Base config rendered' : pc.red('scripts/setup.sh failed'));
   if (!setupOk) bail('Check scripts/setup.sh output and rerun.');
 
   // 2. Docker stack.
-  s.start('Starting docker stack (icecast + liquidsoap + controller)');
-  const dockerOk = runCapture('docker', ['compose', 'up', '-d'], { cwd: DOCKER_DIR }).status === 0;
+  const stackLabel = mode === 'prod'
+    ? 'Building + starting prod stack (icecast + liquidsoap + controller + web + caddy)'
+    : 'Starting dev stack (icecast + liquidsoap + controller)';
+  s.start(stackLabel);
+  const upArgs = mode === 'prod'
+    ? [...composeArgs, 'up', '-d', '--build']
+    : [...composeArgs, 'up', '-d'];
+  const dockerOk = runCapture('docker', upArgs, { cwd: DOCKER_DIR, env: setupEnv }).status === 0;
   s.stop(dockerOk ? 'Docker stack up' : pc.red('docker compose up failed'));
-  if (!dockerOk) bail('Check `docker compose -f docker/docker-compose.yml logs` for details.');
+  if (!dockerOk) bail(`Check \`docker compose -f docker/${composeFile} logs\` for details.`);
 
-  // 3. Web deps.
-  if (!existsSync(resolve(WEB_DIR, 'node_modules'))) {
+  // 3. Web deps (dev only — prod runs web in a container).
+  if (mode === 'dev' && !existsSync(resolve(WEB_DIR, 'node_modules'))) {
     s.start('Installing web dependencies (npm install in web/)');
     const ok = runCapture('npm', ['install'], { cwd: WEB_DIR }).status === 0;
     s.stop(ok ? 'Web deps installed' : pc.red('npm install failed'));
@@ -223,32 +285,39 @@ export async function main() {
   if (wantsJingles) {
     s.start('Rendering jingles via controller container');
     const j = runCapture('bash', ['scripts/generate-jingles.sh'], {
-      env: { ...process.env, COMPOSE_FILE: 'docker/docker-compose.yml' },
+      env: { ...setupEnv, COMPOSE_FILE: `docker/${composeFile}` },
     });
     s.stop(j.status === 0 ? 'Jingles rendered' : pc.red('Jingle generation failed'));
     if (j.status !== 0) console.error(j.stderr || j.stdout);
   }
 
-  // 6. Final summary + optional web dev launch.
-  note(
-    [
-      `${pc.dim('Web:       ')} http://localhost:3000`,
-      `${pc.dim('Stream:    ')} http://localhost:8000/stream.mp3`,
-      `${pc.dim('Now playing')} http://localhost:4000/now-playing`,
-      `${pc.dim('Health:    ')} http://localhost:4000/health`,
-    ].join('\n'),
-    'Endpoints',
-  );
+  // 6. Final summary + optional web dev launch (dev only).
+  const endpoints = mode === 'prod'
+    ? [
+        `${pc.dim('Site:       ')} http://localhost:4800`,
+        `${pc.dim('Stream:     ')} http://localhost:4800/stream.mp3`,
+        `${pc.dim('Now playing:')} http://localhost:4800/api/now-playing`,
+        `${pc.dim('Health:     ')} http://localhost:4800/api/health`,
+      ]
+    : [
+        `${pc.dim('Web:        ')} http://localhost:3000`,
+        `${pc.dim('Stream:     ')} http://localhost:8000/stream.mp3`,
+        `${pc.dim('Now playing:')} http://localhost:4000/now-playing`,
+        `${pc.dim('Health:     ')} http://localhost:4000/health`,
+      ];
+  note(endpoints.join('\n'), 'Endpoints');
 
-  const webBusy = await portInUse(3000);
   let startWeb = false;
-  if (webBusy) {
-    note('Port 3000 already has a listener — skipping web dev launch.', 'Web');
-  } else {
-    startWeb = guard(await confirm({
-      message: 'Start web dev server on :3000 now (foreground, Ctrl-C to stop)?',
-      initialValue: true,
-    }));
+  if (mode === 'dev') {
+    const webBusy = await portInUse(3000);
+    if (webBusy) {
+      note('Port 3000 already has a listener — skipping web dev launch.', 'Web');
+    } else {
+      startWeb = guard(await confirm({
+        message: 'Start web dev server on :3000 now (foreground, Ctrl-C to stop)?',
+        initialValue: true,
+      }));
+    }
   }
 
   outro(pc.green('Setup complete.'));
@@ -256,7 +325,9 @@ export async function main() {
   if (startWeb) {
     const child = spawn('npm', ['run', 'dev'], { cwd: WEB_DIR, stdio: 'inherit' });
     child.on('exit', (code) => process.exit(code ?? 0));
-  } else {
+  } else if (mode === 'dev') {
     console.log(pc.dim('\nNext: `npm run dev:web` to start the UI, `npm run logs` to tail docker.'));
+  } else {
+    console.log(pc.dim(`\nNext: open http://localhost:4800 — verify with \`./scripts/health-check.sh\`.`));
   }
 }

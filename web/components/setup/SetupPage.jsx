@@ -52,85 +52,198 @@ export default function SetupPage() {
           </p>
         </section>
 
-        {/* ── Fast path: interactive dev wizard ──────────────────────────── */}
-        <section className="bs-section">
+        {/* ── Prerequisites ───────────────────────────────────────────────── */}
+        <section className="bs-section" id="prereqs">
+          <p className="bs-eyebrow">BEFORE YOU START</p>
+          <h2>Have these ready.</h2>
+          <p>
+            SUB/WAVE doesn't ship Navidrome or Ollama — it talks to yours. Get them
+            running first if they aren't already.
+          </p>
+          <ul className="bs-list">
+            <li><strong>Docker + Compose plugin</strong> — the stack ships as four (dev) or five (prod) containers.</li>
+            <li><strong>Node 20+</strong> — only for the <code className="bs-code-inline">npm run setup</code> wizard and the web dev server.</li>
+            <li>
+              <strong>Navidrome</strong> (or any Subsonic-API server) reachable from where the
+              stack runs. Note the URL, username, password.
+              <a href="https://www.navidrome.org/" target="_blank" rel="noreferrer" className="bs-link" style={{ marginLeft: 6, fontSize: 12 }}>navidrome.org ↗</a>
+            </li>
+            <li>
+              <strong>Ollama</strong> with a model that supports{' '}
+              <code className="bs-code-inline">format: json</code> (qwen2.5:7b, llama3.1:8b,
+              nemotron). Note the URL and model name.
+              <a href="https://ollama.com/" target="_blank" rel="noreferrer" className="bs-link" style={{ marginLeft: 6, fontSize: 12 }}>ollama.com ↗</a>
+            </li>
+            <li>
+              <strong>(Optional) ffmpeg</strong> — used by{' '}
+              <code className="bs-code-inline">scripts/setup.sh</code> to render the
+              emergency fallback and studio bed audio.
+            </li>
+          </ul>
+        </section>
+
+        {/* ── Path A: npm wizard ──────────────────────────────────────────── */}
+        <section className="bs-section" id="wizard">
           <div className="bs-callout">
-            <div className="bs-eyebrow">FAST PATH · LOCAL DEV</div>
-            <h2 style={{ margin: '4px 0 8px' }}>Just trying it out?</h2>
-            <p>
-              The repo ships an interactive setup wizard built on{' '}
-              <code className="bs-code-inline">@clack/prompts</code>. Requires Node 20+,
-              Docker, and (optionally) <code className="bs-code-inline">ffmpeg</code> for
-              emergency / studio-bed audio.
-            </p>
+            <div className="bs-eyebrow">PATH A · INTERACTIVE WIZARD</div>
+            <h2 style={{ margin: '4px 0 8px' }}>Answer a few questions, get a running stack.</h2>
+            <p>Interactive terminal wizard. Requires Node 20+ and Docker.</p>
             <CodeBlock>{`git clone https://github.com/perminder-klair/subwave.git
 cd subwave
 npm install
 npm run setup`}</CodeBlock>
             <p>
-              It prompts for your Navidrome and Ollama details, writes{' '}
-              <code className="bs-code-inline">controller/.env</code>, runs the bash
-              setup, brings up the dev docker stack, installs web deps, waits for the
-              controller to report on-air, optionally renders jingles, and optionally
-              launches <code className="bs-code-inline">next dev</code> on
-              {' '}<code className="bs-code-inline">:3000</code> in the foreground.
-              Re-running keeps existing values unless you ask to reconfigure.
+              First question: <em>dev or production?</em> Then prompts for Navidrome and
+              Ollama, runs <code className="bs-code-inline">scripts/setup.sh</code>, brings
+              up the right compose file, and renders jingles.
             </p>
+            <ul className="bs-list">
+              <li>
+                <strong>Dev</strong> — <code className="bs-code-inline">docker-compose.yml</code>,
+                state in <code className="bs-code-inline">./state</code>, optionally
+                launches <code className="bs-code-inline">next dev</code> on{' '}
+                <code className="bs-code-inline">:3000</code>.
+              </li>
+              <li>
+                <strong>Production</strong> —{' '}
+                <code className="bs-code-inline">docker-compose.prod.yml</code> with{' '}
+                <code className="bs-code-inline">--build</code>, Caddy on{' '}
+                <code className="bs-code-inline">:4800</code>, state in{' '}
+                <code className="bs-code-inline">/var/lib/subwave</code> (or wherever you
+                point <code className="bs-code-inline">STATE_DIR</code>). Re-run with sudo
+                if the state dir isn't writable.
+              </li>
+            </ul>
             <p style={{ fontSize: 12, color: 'var(--muted)' }}>
-              The wizard uses the dev compose file (no Caddy, no host TLS, web
-              dev server on <code className="bs-code-inline">:3000</code>). For a
-              public-facing deploy behind Caddy + Cloudflare, follow the
-              numbered production steps below.
+              Safe to re-run — existing env values are kept unless you ask to reconfigure.
             </p>
-            <p>Useful follow-up scripts:</p>
-            <CodeBlock>{`npm run dev:docker   # docker compose up -d
-npm run dev:web      # next dev on :3000
-npm run rebuild      # docker compose up -d --build (after src changes)
+          </div>
+        </section>
+
+        {/* ── Path B: agent skill ─────────────────────────────────────────── */}
+        <section className="bs-section" id="agent">
+          <div className="bs-callout">
+            <div className="bs-eyebrow">PATH B · AI CODING AGENT</div>
+            <h2 style={{ margin: '4px 0 8px' }}>One sentence in your coding agent.</h2>
+            <p>
+              The repo ships an agent skill that handles setup, deploy, and update — it
+              pings Navidrome and Ollama, boots the stack, generates jingles, and verifies
+              the stream is on-air. Works with{' '}
+              <strong style={{ color: 'var(--ink)' }}>Claude Code</strong>,{' '}
+              <strong style={{ color: 'var(--ink)' }}>Codex</strong>,{' '}
+              <strong style={{ color: 'var(--ink)' }}>Cursor</strong>, or anything else
+              that reads <code className="bs-code-inline">AGENTS.md</code>.
+            </p>
+            <p>
+              Clone the repo, open your agent in it, and say one of:
+            </p>
+            <CodeBlock>{`git clone https://github.com/perminder-klair/subwave.git
+cd subwave
+# then in your agent of choice, ask:
+# "set up subwave"
+# "deploy subwave"
+# "pull and restart"`}</CodeBlock>
+            <p style={{ fontSize: 12, color: 'var(--muted)' }}>
+              On updates the same skill detects which services actually changed and only
+              rebuilds those — Liquidsoap and the Controller <em>COPY</em> source at build
+              time, so a plain <code className="bs-code-inline">docker compose restart</code>
+              {' '}silently runs stale code. The skill won't make that mistake.
+            </p>
+          </div>
+        </section>
+
+        {/* ── Development workflow ────────────────────────────────────────── */}
+        <section className="bs-section" id="dev-mode">
+          <p className="bs-eyebrow">DEVELOPMENT WORKFLOW</p>
+          <h2>Hacking on SUB/WAVE.</h2>
+          <p>
+            Two compose files, two deployment shapes. Dev mode runs the radio backend in
+            Docker and the Next.js UI on the host with hot reload, so you can iterate on
+            the web without a rebuild.
+          </p>
+
+          <table className="bs-rebuild-table" style={{ marginTop: 12 }}>
+            <thead>
+              <tr>
+                <th>Compose file</th>
+                <th>What runs</th>
+                <th>State dir</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code className="bs-code-inline">docker/docker-compose.yml</code></td>
+                <td>icecast · liquidsoap · controller (web runs separately on host)</td>
+                <td><code className="bs-code-inline">./state</code></td>
+              </tr>
+              <tr>
+                <td><code className="bs-code-inline">docker/docker-compose.prod.yml</code></td>
+                <td>+ web (built image) + caddy edge</td>
+                <td><code className="bs-code-inline">${'{STATE_DIR:-/var/lib/subwave}'}</code></td>
+              </tr>
+            </tbody>
+          </table>
+
+          <h3 style={{ marginTop: 24 }}>Day-to-day commands</h3>
+          <p>
+            All wired into <code className="bs-code-inline">package.json</code> so you don't
+            have to remember the compose flags:
+          </p>
+          <CodeBlock>{`npm run setup        # interactive wizard (writes envs, brings the stack up)
+npm run dev          # alias for setup — same wizard
+npm run dev:docker   # docker compose up -d        (radio backend only)
+npm run dev:web      # next dev on :3000           (hot-reloaded UI)
+npm run rebuild      # docker compose up -d --build  (after controller/liquidsoap src changes)
 npm run logs         # tail docker logs
 npm run jingles      # render station idents via Piper
 npm run down         # stop the stack`}</CodeBlock>
+
+          <h3 style={{ marginTop: 24 }}>A typical dev session</h3>
+          <CodeBlock>{`# one-time, in two terminals:
+npm run dev:docker   # terminal 1: backend (Icecast, Liquidsoap, Controller)
+npm run dev:web      # terminal 2: Next.js on http://localhost:3000
+
+# editing web/** — saves are hot-reloaded, no docker action needed.
+# editing controller/src/** or liquidsoap/radio.liq:
+npm run rebuild      # rebuilds + recreates the affected containers`}</CodeBlock>
+
+          <div className="bs-callout" style={{ marginTop: 16 }}>
+            <div className="bs-eyebrow">THE ONE GOTCHA</div>
+            <p>
+              <strong>Code changes need a rebuild, not a restart.</strong> Both the
+              controller and Liquidsoap Dockerfiles <code className="bs-code-inline">COPY</code>
+              {' '}their source at build time — they don't bind-mount it. So{' '}
+              <code className="bs-code-inline">docker compose restart controller</code> will
+              cheerfully rerun the same baked-in code as before.{' '}
+              <code className="bs-code-inline">npm run rebuild</code> (or{' '}
+              <code className="bs-code-inline">docker compose up -d --build &lt;service&gt;</code>)
+              is what you want.
+            </p>
+            <p style={{ fontSize: 12, color: 'var(--muted)', margin: '8px 0 0' }}>
+              The web dev server (<code className="bs-code-inline">npm run dev:web</code>) is
+              exempt — Next.js hot-reloads, so edits to{' '}
+              <code className="bs-code-inline">web/**</code> show up instantly without
+              touching Docker.
+            </p>
           </div>
         </section>
 
-        <section className="bs-section">
-          <p className="bs-eyebrow">PRODUCTION</p>
-          <h2>Deploy on a server.</h2>
+        {/* ── Path C: Manual ──────────────────────────────────────────────── */}
+        <section className="bs-section" id="manual">
+          <p className="bs-eyebrow">PATH C · MANUAL</p>
+          <h2>Run the commands yourself.</h2>
           <p>
-            For a public-facing instance — Caddy on the edge, Cloudflare in front,
-            internal-only Icecast/Controller — follow the steps below.
+            Same outcome as Path A, just without the wizard wrapping it. Useful if you're
+            scripting around the install, want a non-standard layout, or just prefer
+            running each command by hand. The numbered steps below land you at the same
+            public-facing single-host deploy — Caddy on the edge, Cloudflare in front,
+            internal-only Icecast/Controller/Web.
           </p>
         </section>
 
-        {/* ── Step 1 ── prerequisites ─────────────────────────────────────── */}
+        {/* ── Step 1 ── clone ─────────────────────────────────────────────── */}
         <div className="bs-step">
           <div className="bs-step-num">01</div>
-          <div className="bs-step-body">
-            <h3>Have these ready</h3>
-            <p>
-              SUB/WAVE doesn't ship Navidrome or Ollama — it talks to yours. Get them
-              running first if they aren't already.
-            </p>
-            <ul className="bs-list">
-              <li><strong>Docker + Docker Compose</strong> — the stack ships as four containers.</li>
-              <li>
-                <strong>Navidrome</strong> (or any Subsonic-API server) reachable from where the
-                stack runs. Note the URL, username, password.
-                <a href="https://www.navidrome.org/" target="_blank" rel="noreferrer" className="bs-link" style={{ marginLeft: 6, fontSize: 12 }}>navidrome.org ↗</a>
-              </li>
-              <li>
-                <strong>Ollama</strong> with a model that supports{' '}
-                <code className="bs-code-inline">format: json</code> (qwen2.5:7b, llama3.1:8b,
-                nemotron). Note the URL and model name.
-                <a href="https://ollama.com/" target="_blank" rel="noreferrer" className="bs-link" style={{ marginLeft: 6, fontSize: 12 }}>ollama.com ↗</a>
-              </li>
-              <li><strong>A box to run on</strong> — a homelab Linux box, a VPS, a Mac. Tailscale or Cloudflare in front for sharing.</li>
-            </ul>
-          </div>
-        </div>
-
-        {/* ── Step 2 ── clone ─────────────────────────────────────────────── */}
-        <div className="bs-step">
-          <div className="bs-step-num">02</div>
           <div className="bs-step-body">
             <h3>Clone the repo</h3>
             <CodeBlock>{`git clone https://github.com/perminder-klair/subwave.git
@@ -138,9 +251,9 @@ cd subwave`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 3 ── controller .env ───────────────────────────────────── */}
+        {/* ── Step 2 ── controller .env ───────────────────────────────────── */}
         <div className="bs-step">
-          <div className="bs-step-num">03</div>
+          <div className="bs-step-num">02</div>
           <div className="bs-step-body">
             <h3>Tell the controller where your Navidrome and Ollama live</h3>
             <p>Copy the template and fill in your values:</p>
@@ -159,9 +272,9 @@ $EDITOR controller/.env`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 4 ── icecast/state ─────────────────────────────────────── */}
+        {/* ── Step 3 ── icecast/state ─────────────────────────────────────── */}
         <div className="bs-step">
-          <div className="bs-step-num">04</div>
+          <div className="bs-step-num">03</div>
           <div className="bs-step-body">
             <h3>Configure the broadcast layer</h3>
             <p>
@@ -180,9 +293,9 @@ $EDITOR controller/.env`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 5 ── boot ──────────────────────────────────────────────── */}
+        {/* ── Step 4 ── boot ──────────────────────────────────────────────── */}
         <div className="bs-step">
-          <div className="bs-step-num">05</div>
+          <div className="bs-step-num">04</div>
           <div className="bs-step-body">
             <h3>Boot the stack</h3>
             <CodeBlock>{`docker compose -f docker/docker-compose.prod.yml up -d --build`}</CodeBlock>
@@ -201,9 +314,9 @@ $EDITOR controller/.env`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 6 ── open ──────────────────────────────────────────────── */}
+        {/* ── Step 5 ── open ──────────────────────────────────────────────── */}
         <div className="bs-step">
-          <div className="bs-step-num">06</div>
+          <div className="bs-step-num">05</div>
           <div className="bs-step-body">
             <h3>Tune in</h3>
             <CodeBlock>{`open http://localhost:4800`}</CodeBlock>
@@ -222,9 +335,9 @@ $EDITOR controller/.env`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 7 ── verify ───────────────────────────────────────────── */}
+        {/* ── Step 6 ── verify ───────────────────────────────────────────── */}
         <div className="bs-step">
-          <div className="bs-step-num">07</div>
+          <div className="bs-step-num">06</div>
           <div className="bs-step-body">
             <h3>Verify the broadcast</h3>
             <p>
@@ -242,61 +355,54 @@ $EDITOR controller/.env`}</CodeBlock>
           </div>
         </div>
 
-        {/* ── Step 8 ── keep up to date ──────────────────────────────────── */}
-        <div className="bs-step">
-          <div className="bs-step-num">08</div>
-          <div className="bs-step-body">
-            <h3>Keep it up to date</h3>
-            <p>
-              Updates are <strong style={{ color: 'var(--ink)' }}>pull → rebuild only
-              what changed → recreate</strong>. Liquidsoap and the Controller{' '}
-              <em>COPY</em> source at build time, so{' '}
-              <code className="bs-code-inline">docker compose restart</code> does
-              {' '}<strong>not</strong> pick up code changes — you need{' '}
-              <code className="bs-code-inline">up -d --build &lt;service&gt;</code>.
-            </p>
+        {/* ── Updates ─────────────────────────────────────────────────────── */}
+        <section className="bs-section" id="updates">
+          <p className="bs-eyebrow">KEEPING IT UP TO DATE</p>
+          <h2>Pull, rebuild only what changed, recreate.</h2>
+          <p>
+            Liquidsoap and the Controller <em>COPY</em> source at build time, so{' '}
+            <code className="bs-code-inline">docker compose restart</code> does{' '}
+            <strong>not</strong> pick up code changes — you need{' '}
+            <code className="bs-code-inline">up -d --build &lt;service&gt;</code>.
+          </p>
 
-            <table className="bs-rebuild-table">
-              <thead>
-                <tr>
-                  <th>If this changed</th>
-                  <th>Rebuild</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr><td><code className="bs-code-inline">controller/src/**</code></td>          <td>controller</td></tr>
-                <tr><td><code className="bs-code-inline">liquidsoap/radio.liq</code></td>       <td>liquidsoap</td></tr>
-                <tr><td><code className="bs-code-inline">web/**</code></td>                     <td>web</td></tr>
-                <tr><td><code className="bs-code-inline">docker/Caddyfile</code></td>           <td>just <code className="bs-code-inline">restart caddy</code> (mounted)</td></tr>
-                <tr><td><code className="bs-code-inline">docker/docker-compose*.yml</code></td> <td><code className="bs-code-inline">up -d</code> (compose decides)</td></tr>
-                <tr><td>README / TODO / docs</td>                                               <td>nothing</td></tr>
-              </tbody>
-            </table>
+          <table className="bs-rebuild-table">
+            <thead>
+              <tr>
+                <th>If this changed</th>
+                <th>Rebuild</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td><code className="bs-code-inline">controller/src/**</code></td>          <td>controller</td></tr>
+              <tr><td><code className="bs-code-inline">liquidsoap/radio.liq</code></td>       <td>liquidsoap</td></tr>
+              <tr><td><code className="bs-code-inline">web/**</code></td>                     <td>web (prod) · hot-reload (dev)</td></tr>
+              <tr><td><code className="bs-code-inline">docker/Caddyfile</code></td>           <td>just <code className="bs-code-inline">restart caddy</code> (mounted)</td></tr>
+              <tr><td><code className="bs-code-inline">docker/docker-compose*.yml</code></td> <td><code className="bs-code-inline">up -d</code> (compose decides)</td></tr>
+              <tr><td>README / TODO / docs</td>                                               <td>nothing</td></tr>
+            </tbody>
+          </table>
 
-            <p>Typical manual deploy:</p>
-            <CodeBlock>{`git pull --ff-only
+          <p style={{ marginTop: 16 }}>Typical manual deploy:</p>
+          <CodeBlock>{`git pull --ff-only
 # rebuild only what changed (example: controller + web)
 docker compose -f docker/docker-compose.prod.yml up -d --build controller web
 # then verify
 ./scripts/health-check.sh`}</CodeBlock>
 
-            <div className="bs-callout">
-              <div className="bs-eyebrow">CLAUDE CODE USERS</div>
-              <p>
-                The repo ships a <code className="bs-code-inline">subwave-deploy</code> agent skill at{' '}
-                <code className="bs-code-inline">.claude/skills/subwave-deploy/</code>{' '}
-                that automates the whole "pull, detect changes, rebuild only
-                the affected services, verify health" loop. Just say{' '}
-                <em>"deploy subwave"</em> or <em>"pull and restart"</em> in a
-                Claude Code session running in the repo and it'll do the right
-                thing — including the bits that aren't obvious, like not using{' '}
-                <code className="bs-code-inline">restart</code> for source changes.
-              </p>
-            </div>
+          <div className="bs-callout">
+            <div className="bs-eyebrow">OR LET CLAUDE CODE DO IT</div>
+            <p>
+              The <code className="bs-code-inline">subwave-deploy</code> skill at{' '}
+              <code className="bs-code-inline">.claude/skills/subwave-deploy/</code>{' '}
+              automates the entire "pull, detect what changed, rebuild only the affected
+              services, verify health" loop. Open a Claude Code session in the repo and say
+              {' '}<em>"deploy subwave"</em> or <em>"pull and restart"</em>.
+            </p>
           </div>
-        </div>
+        </section>
 
-        {/* ── Footer note ─────────────────────────────────────────────────── */}
+        {/* ── Troubleshooting ─────────────────────────────────────────────── */}
         <section className="bs-section">
           <p className="bs-eyebrow">WHEN THINGS GO WRONG</p>
           <h2>Logs are the source of truth.</h2>
