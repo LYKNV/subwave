@@ -113,10 +113,25 @@ music = fallback(
   [dj_queue, auto_playlist]
 )
 
-# Smart crossfade — overlapping fade between tracks based on their loudness
+# DJ-style transition — outgoing track loses its highs during the crossfade
+# so songs blend like a real DJ mix instead of dissolving in parallel. By the
+# time the new track is at full volume, the old one is basically just bass
+# under it, which is how a hand-mixed transition actually sounds. Setting the
+# cutoff to 900 Hz gives a "filter kill" feel without sounding muddy.
+#
+# If this errors at startup ("Early computation of source content-type"),
+# revert by dropping the `transition=` argument from crossfade below.
+def dj_transition(a, b) =
+  a = filter.iir.butterworth.low(frequency=900.0, order=4, a)
+  add(normalize=false, [a, b])
+end
+
+# Smart crossfade — overlapping fade between tracks based on their loudness,
+# with a DJ-style high-roll-off on the outgoing track.
 music = crossfade(
   duration=!crossfade_duration,
   smart=true,
+  transition=dj_transition,
   music
 )
 
@@ -272,6 +287,11 @@ radio = blank.skip(max_blank=5.0, radio)
 
 # 1. Long-term loudness normalisation (-14 LUFS-ish, matches streaming targets)
 radio = normalize(target=-14.0, radio)
+
+# 1b. Subtle stereo width enhancement — makes the broadcast feel "bigger"
+# without breaking mono compatibility. Applied BEFORE the bus comp and limiter
+# so any side-channel boost still gets caught by the ceiling.
+radio = stereo.width(w=1.15, radio)
 
 # 2. Bus compressor — gentle glue, almost transparent
 radio = compress(
