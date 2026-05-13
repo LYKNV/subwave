@@ -114,23 +114,19 @@ music = fallback(
 )
 
 # ---------------------------------------------------------------------------
-# ENERGY-AWARE TRANSITION — fade length scales with incoming track loudness
+# CROSSFADE TRANSITION — equal-amplitude blend across the full cross window
 # ---------------------------------------------------------------------------
-# Crossfade behaviour adapts per-transition based on the incoming track's
-# average loudness (`b.db_level`, computed by Liquidsoap during the
-# crossfade window):
+# fade.out/fade.in span the ENTIRE cross() buffer so the two tracks curve
+# past each other at ~-6 dB midpoint and sum to ~unity throughout. If the
+# fade is shorter than the buffer, the outgoing track plays at full volume
+# while the incoming is ramping in (and vice versa at the tail), summing
+# to +6 dB and producing an audible "slap-back echo / doubling" feel on
+# every transition. Earlier per-transition energy scaling (fade_d = d * 0.5
+# for loud incoming, etc.) caused exactly that — see git log for context.
 #
-#   loud incoming  (>= -18 dB) → short fade — a banger crashes in instead
-#                                 of meandering through 4 s of overlap
-#   medium         (-25..-18)  → ~standard fade
-#   quiet/mellow   (<  -25)    → full crossfade — a sparse intro gets room
-#
-# All values stay <= the cross operator's buffered duration (set via
-# `crossfade_duration()`). Going beyond that truncates the fade tail
-# because cross only has so many seconds of overlap to work with.
-#
-# This restores the spirit of `smart=true` (loudness-aware behaviour) that
-# we lost when we put a custom transition in place.
+# If we ever want loudness-aware behaviour back, vary the cross BUFFER
+# length (e.g. via `override_duration`) rather than shrinking the fade
+# inside a fixed-width buffer.
 #
 # IMPORTANT: We use the low-level `cross` operator here, NOT the high-level
 # `crossfade` wrapper. `crossfade(default=…)` with `smart=false` silently
@@ -152,17 +148,8 @@ music = fallback(
 # its cutoff from a transition trigger. Parked until needed.
 def dj_transition(a, b) =
   d = crossfade_duration()
-
-  fade_d = if b.db_level >= -18.0 then d * 0.5   # snap into a loud track
-           elsif b.db_level >= -25.0 then d * 0.8
-           else d end                              # full overlap into a mellow one
-
-  a_source = fade.out(duration=fade_d, initial_metadata=a.metadata, a.source)
-  b_source = fade.in(duration=fade_d, initial_metadata=b.metadata, b.source)
-
-  log(label="dj_transition", level=3,
-      "out=#{a.db_level}dB in=#{b.db_level}dB → fade=#{fade_d}s")
-
+  a_source = fade.out(duration=d, initial_metadata=a.metadata, a.source)
+  b_source = fade.in(duration=d, initial_metadata=b.metadata, b.source)
   add(normalize=false, [a_source, b_source])
 end
 
