@@ -166,6 +166,14 @@ def dj_transition(a, b) =
   add(normalize=false, [a_source, b_source])
 end
 
+# Keep a handle on the PRE-cross music source so the on_metadata hook
+# (attached further down, where on_meta is defined) sees clean per-track
+# metadata events. Hooking the post-cross source fires twice per
+# transition — the custom dj_transition below builds fade.in/fade.out
+# with initial_metadata=, and the outgoing track wins, stranding the UI
+# one song behind until the next crossfade.
+music_meta = music
+
 music = cross(
   duration=crossfade_duration(),
   dj_transition,
@@ -417,10 +425,13 @@ def on_meta(m) =
   end
 end
 
-# on_metadata fires reliably on every metadata change, even across crossfades
-# and source switches (request queue → auto playlist). on_track gets swallowed
-# by crossfade transitions.
-music.on_metadata(on_meta)
+# Attach to the PRE-cross source (`music_meta`, captured above before the
+# cross wrap). Hooking the post-cross source fires twice per transition —
+# dj_transition's fade.in/fade.out both pass initial_metadata=, and the
+# outgoing track usually wins, freezing the UI one song behind.
+# on_metadata is used instead of on_track because on_track gets swallowed
+# by source switches (request queue → auto playlist).
+music_meta.on_metadata(on_meta)
 
 # ---------------------------------------------------------------------------
 # OUTPUT — broadcast to Icecast
