@@ -25,11 +25,12 @@ docker compose -f docker/docker-compose.prod.yml logs -f controller
 curl -X POST http://localhost/api/skip   # manual skip via Caddy
 ```
 
-**Code changes need a rebuild, not a restart.** Neither `controller` nor `liquidsoap` bind-mounts source — both Dockerfiles `COPY` at build time. `docker compose restart <service>` reruns the *same baked-in code*. For edits to actually take effect:
+**Controller source needs a rebuild, not a restart.** `controller` `COPY`s its source at build time, so `docker compose restart controller` reruns the *same baked-in code*. `liquidsoap` is different: `radio.liq` is bind-mounted (`../liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro` in both compose files), so editing it only needs a restart — `Dockerfile.liquidsoap` itself doesn't `COPY` the script.
 
 ```bash
 cd docker && docker compose up -d --build controller     # after any controller/src/** change
-cd docker && docker compose up -d --build liquidsoap     # after radio.liq or Dockerfile.liquidsoap change
+cd docker && docker compose restart liquidsoap           # after radio.liq edits — bind-mounted, no rebuild
+cd docker && docker compose up -d --build liquidsoap     # only after Dockerfile.liquidsoap changes
 ```
 
 `web` is a Next.js dev server in local mode (`npm run dev`), so it hot-reloads — no rebuild needed for UI changes during dev. Production builds the web image; treat it like the others there.

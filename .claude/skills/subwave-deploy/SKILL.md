@@ -222,7 +222,7 @@ Run through the diff and bucket files into actions. Mapping table (paths are rel
 | `controller/src/**`                       | rebuild + recreate `controller`           |
 | `controller/Dockerfile*`                  | rebuild + recreate `controller`           |
 | `controller/package*.json`                | rebuild + recreate `controller`           |
-| `liquidsoap/radio.liq`                    | rebuild + recreate `liquidsoap`           |
+| `liquidsoap/radio.liq`                    | `docker compose ... restart liquidsoap` — radio.liq is bind-mounted in both compose files, no rebuild needed |
 | `liquidsoap/Dockerfile*`                  | rebuild + recreate `liquidsoap`           |
 | `web/**` (prod stack)                     | rebuild + recreate `web`                  |
 | `web/**` (dev stack, separate `npm run dev`) | no docker action — hot-reloads in user's terminal |
