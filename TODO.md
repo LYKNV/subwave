@@ -1,3 +1,4 @@
 # TODO
 
-- voice options any other alternatives for tts?
+- Use Weather, News, Traffic, holidays as skills
+- move weather from source to skill
