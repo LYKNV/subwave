@@ -28,6 +28,9 @@ RUN groupadd -r next && useradd -r -g next next
 # Standalone output bundles only the runtime files Next.js needs.
 COPY --from=build --chown=next:next /app/.next/standalone ./
 COPY --from=build --chown=next:next /app/.next/static ./.next/static
+# `public/` is *not* included by the standalone trace — copy it explicitly so
+# the service worker (/sw.js) and any other static assets are served at root.
+COPY --from=build --chown=next:next /app/public ./public
 
 USER next
 EXPOSE 7700

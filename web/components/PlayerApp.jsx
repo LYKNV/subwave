@@ -16,6 +16,7 @@ import BoothDrawer from './drawers/BoothDrawer';
 import RequestDrawer from './drawers/RequestDrawer';
 import { useStationFeed } from '../hooks/useStationFeed';
 import { usePlayer } from '../hooks/usePlayer';
+import { useMediaSession } from '../hooks/useMediaSession';
 import { getStoredTheme, setTheme as persistTheme } from '../lib/theme';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || '/api';
@@ -30,6 +31,11 @@ const DRAWER_TITLES = {
 export default function PlayerApp({ contained = false }) {
   const { nowPlaying, context, dj, listeners, state, elapsed, progress } = useStationFeed();
   const { audioRef, tunedIn, volume, setVolume, tune } = usePlayer();
+
+  // Wire OS-level media controls (lock screen, headphones, car display).
+  // No onSkip on the public listener — a stray AirPods double-tap shouldn't
+  // skip the song for every other listener on the station.
+  useMediaSession({ tunedIn, nowPlaying, audioRef, onTune: tune });
 
   const rootRef = useRef(null);
   // Drawers/dialogs portal here when contained so they stay inside the frame.
