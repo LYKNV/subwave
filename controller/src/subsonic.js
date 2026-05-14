@@ -156,8 +156,13 @@ export function getCoverArtUrl(id, size = 512) {
 // protocol scheme so Liquidsoap's radio.liq routes the fetch through curl
 // instead of its built-in http.get.stream (which returns spurious 522s
 // against the Cloudflare-fronted Navidrome origin).
+//
+// format=raw asks Navidrome to stream the original file bytes (no transcode).
+// Library is AAC 256 kbps m4a from gamdl; without `raw`, Navidrome would
+// transcode to ~192 kbps MP3 on the way out, adding a lossy generation before
+// Liquidsoap's own MP3 re-encode. Liquidsoap decodes m4a/AAC via ffmpeg.
 export function getStreamUrl(songId) {
-  return `subhttp:${buildUrl('stream', { id: songId, format: 'mp3' })}`;
+  return `subhttp:${buildUrl('stream', { id: songId, format: 'raw' })}`;
 }
 
 // Returns the local file path if Navidrome and the controller share the music

@@ -343,35 +343,22 @@ radio = fallback(track_sensitive=false, [radio, emergency])
 radio = blank.skip(max_blank=5.0, radio)
 
 # ---------------------------------------------------------------------------
-# BROADCAST BUS — final glue so quiet and loud songs sit at the same level
+# BROADCAST BUS — masters preserved, brick-wall as the only safety
 # ---------------------------------------------------------------------------
-# normalize → bus comp → ceiling limit.  This is what gives commercial radio
-# its "stable signal" feel: a quiet acoustic track and a loud rock track
-# arrive at the listener at the same perceived loudness, with peaks tamed
-# just under 0 dBFS so the Icecast MP3 encoder never clips.
+# Goal: deliver the original masters as untouched as a streaming pipeline
+# allows. Earlier revisions had a -14 LUFS normaliser, a stereo widener, and
+# a bus compressor stacked here. All three reshaped the audio — the
+# normaliser pumped on dynamic material, the widener altered the stereo
+# image the engineers chose, and the bus comp was tickling dynamics on every
+# loud section. They're gone.
+#
+# The brick-wall limiter stays. MP3 encoding generates inter-sample peaks
+# that can exceed the source's peak by ~0.5–1 dB in the decoded waveform,
+# so without a -1 dBFS ceiling, modern masters (which peak at ~-0.3 dBFS TP)
+# can cause audible clipping in listeners' decoders. The limiter typically
+# does 0 dB of gain reduction on catalogue audio — it's a safety net, not a
+# tone tool.
 
-# 1. Long-term loudness normalisation (-14 LUFS-ish, matches streaming targets)
-radio = normalize(target=-14.0, radio)
-
-# 1b. Subtle stereo width enhancement — makes the broadcast feel "bigger"
-# without breaking mono compatibility. Applied BEFORE the bus comp and limiter
-# so any side-channel boost still gets caught by the ceiling. In Liquidsoap
-# 2.2 the `w` argument is positional (not labeled) and 0 is the identity;
-# positive values widen, negative narrow. 0.2 is a gentle nudge.
-radio = stereo.width(0.2, radio)
-
-# 2. Bus compressor — gentle glue, almost transparent
-radio = compress(
-  attack=15.0,
-  release=250.0,
-  threshold=-12.0,
-  ratio=2.0,
-  knee=2.0,
-  gain=0.0,
-  radio
-)
-
-# 3. Brick-wall limit at -1 dBFS — last line of defence before the encoder
 radio = compress(
   attack=1.0,
   release=80.0,
