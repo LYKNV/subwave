@@ -14,12 +14,12 @@ import { ToolLoopAgent, stepCountIs, Output } from 'ai';
 import { z } from 'zod';
 import * as subsonic from './subsonic.js';
 import * as library from './library.js';
-import * as dj from './llm/dj.js';
-import * as settings from './settings.js';
-import { languageModel, providerName } from './llm/provider.js';
-import { buildPickerTools } from './llm/tools.js';
-import { record } from './llm/log.js';
-import { getFullContext } from './context.js';
+import * as dj from '../llm/dj.js';
+import * as settings from '../settings.js';
+import { languageModel, providerName } from '../llm/provider.js';
+import { buildPickerTools } from '../llm/tools.js';
+import { record } from '../llm/log.js';
+import { getFullContext } from '../context.js';
 
 const CANDIDATE_CAP = 18;
 const HISTORY_DEPTH = 8;

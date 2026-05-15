@@ -8,8 +8,8 @@
 
 import { tool } from 'ai';
 import { z } from 'zod';
-import * as subsonic from '../subsonic.js';
-import * as library from '../library.js';
+import * as subsonic from '../music/subsonic.js';
+import * as library from '../music/library.js';
 
 function slim(s) {
   return {

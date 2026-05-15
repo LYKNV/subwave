@@ -18,8 +18,8 @@
 // level via dj-gate.shouldFire(skill.kind), so adding a new skill doesn't
 // need to know how quiet/moderate/aggressive maps to cron minutes.
 
-import { queue } from '../queue.js';
-import { shouldFire as gateAllows } from '../dj-gate.js';
+import { queue } from '../broadcast/queue.js';
+import { shouldFire as gateAllows } from '../broadcast/dj-gate.js';
 
 import weather from './weather.js';
 import news from './news.js';

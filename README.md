@@ -91,31 +91,26 @@ Real radio = one stream, synced listeners. That needs a server-side audio mixer.
 sub-wave/
 ├── controller/
 │   ├── src/
-│   │   ├── server.js          # Express API: public + admin-gated routes
+│   │   ├── server.js          # Express entry: middleware + route mounting
 │   │   ├── settings.js        # Durable settings (DJ persona/souls, mixer,
 │   │   │                      # weather, TTS routing) + renderDjPrompt
-│   │   ├── subsonic.js        # Navidrome client + annotate URI + cover art
-│   │   ├── ollama.js          # Request match, DJ scripts (random soul +
-│   │   │                      # angle per call), LLM picker
-│   │   ├── tts.js             # Engine dispatcher: picks Piper or Kokoro per
-│   │   │                      # voice-kind, falls back on failure
-│   │   ├── piper.js           # Piper TTS wrapper (default engine)
-│   │   ├── kokoro.js          # Kokoro TTS wrapper (persistent Python worker)
-│   │   ├── queue.js           # In-memory queue + watcher; freq-aware DJ links;
-│   │   │                      # recap/recent-tracks/recent-openers helpers
-│   │   ├── picker.js          # LLM picker; pulls from similar / mood lib /
-│   │   │                      # playlists / recent / frequent / similar-artist
-│   │   ├── library.js         # moods.json store
-│   │   ├── tag-library.js     # Standalone library tagger
-│   │   ├── scheduler.js       # auto.m3u refresh + freq-gated time/weather/ident
+│   │   ├── config.js          # Env-derived config (single source of truth)
 │   │   ├── context.js         # Time / weather / festival → dominantMood;
 │   │   │                      # getDateContext / getClockContext helpers
-│   │   ├── jingles.js         # Pre-rendered TTS stinger management
-│   │   ├── liquidsoap-control.js  # telnet → liquidsoap shutdown
-│   │   └── config.js
+│   │   ├── routes/            # Express routers by surface: public, request,
+│   │   │                      # settings, jingles, debug
+│   │   ├── middleware/        # cors, admin auth, request rate-limiting
+│   │   ├── music/             # subsonic client, moods.json store, LLM picker,
+│   │   │                      # standalone library tagger
+│   │   ├── broadcast/         # queue + watcher, scheduler, jingles, dj-gate,
+│   │   │                      # liquidsoap telnet control, tagger process
+│   │   ├── audio/             # TTS dispatcher + Piper / Kokoro engines
+│   │   ├── llm/               # AI SDK layer: provider registry, sdk
+│   │   │                      # primitives, DJ prompts, tools, speech, log
+│   │   └── skills/            # DJ skills (weather, news, traffic, facts)
 │   ├── scripts/
 │   │   └── kokoro_worker.py   # Long-lived Python worker (model resident)
-│   ├── package.json           # npm run tag → src/tag-library.js
+│   ├── package.json           # npm run tag → src/music/tag-library.js
 │   └── .env.example
 ├── web/                       # Next.js 15 App Router (PWA)
 │   ├── app/
@@ -467,8 +462,8 @@ State (`settings.json`, `moods.json`, voice WAVs, archives) is persisted in `./s
 
 Things you can change without touching code now live in the Settings dialog (DJ name, souls, mixer, TTS routing, weather, jingles). Everything below still requires editing source:
 
-- **Mood vocabulary** — `MOOD_VOCAB` in `controller/src/tag-library.js` (and the matching `mood` enum in the request-matcher's system prompt).
-- **Picker behaviour** — `PICKER_SYSTEM` in `controller/src/ollama.js` defines the selection criteria; per-source caps (`CAP_SIMILAR`, `CAP_MOOD_LIBRARY`, …) live at the top of `picker.js`.
+- **Mood vocabulary** — `MOOD_VOCAB` in `controller/src/music/tag-library.js` (and the matching `mood` enum in the request-matcher's system prompt).
+- **Picker behaviour** — `PICKER_SYSTEM` in `controller/src/llm/dj.js` defines the selection criteria; per-source caps (`CAP_SIMILAR`, `CAP_MOOD_LIBRARY`, …) live at the top of `controller/src/music/picker.js`.
 - **Show clock** — `getTimeContext()` in `controller/src/context.js` maps hour-of-day to mood/vibe; `getDateContext` / `getClockContext` expose day/season/commute flags to the DJ prompts.
 - **Festival calendar** — hardcoded list in `controller/src/context.js`.
 - **Bitrate / format** — `output.icecast(%mp3(bitrate=192, …))` in `liquidsoap/radio.liq`.

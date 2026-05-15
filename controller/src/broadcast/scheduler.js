@@ -6,15 +6,15 @@
 
 import cron from 'node-cron';
 import { writeFile } from 'node:fs/promises';
-import { config } from './config.js';
-import * as subsonic from './subsonic.js';
-import * as dj from './llm/dj.js';
-import * as library from './library.js';
-import { getFullContext } from './context.js';
+import { config } from '../config.js';
+import * as subsonic from '../music/subsonic.js';
+import * as dj from '../llm/dj.js';
+import * as library from '../music/library.js';
+import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
-import { cleanupOldVoices } from './tts.js';
+import { cleanupOldVoices } from '../audio/tts.js';
 import { shouldFire } from './dj-gate.js';
-import * as skillRegistry from './skills/_registry.js';
+import * as skillRegistry from '../skills/_registry.js';
 
 const TARGET_POOL = 30;
 const MOOD_WEIGHT = 12;          // up to this many mood-tagged tracks per pool

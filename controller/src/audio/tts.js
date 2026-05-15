@@ -6,8 +6,8 @@
 
 import * as piper from './piper.js';
 import * as kokoro from './kokoro.js';
-import * as cloud from './llm/speech.js';
-import * as settings from './settings.js';
+import * as cloud from '../llm/speech.js';
+import * as settings from '../settings.js';
 
 export const ENGINES = ['piper', 'kokoro', 'cloud'];
 
