@@ -291,6 +291,21 @@ export default function DebugPanel() {
             </Card>
           </div>
 
+          {/* ── DJ SESSION — the current run's chat history ─────────────── */}
+          {data.session && !data.session.error && (
+            <Card
+              title="DJ session"
+              sub={
+                `${data.session.kind}` +
+                (data.session.show ? ` · ${data.session.show.name}` : '') +
+                (data.session.persona ? ` · ${data.session.persona.name}` : '') +
+                ` · ${data.session.messages?.length ?? 0} turns`
+              }
+            >
+              <SessionChat session={data.session} />
+            </Card>
+          )}
+
           {/* ── DJ LOG (full width) ─────────────────────────────────────── */}
           <Card title="DJ log" sub={`${data.queue.djLogCount} total · last 30`}>
             <div style={{ display: 'grid', gap: 4, maxHeight: 288, overflowY: 'auto' }}>
@@ -353,6 +368,50 @@ function TtsRouting({ tts }) {
       )}
     </div>
   );
+}
+
+function SessionChat({ session }) {
+  const msgs = session.messages || [];
+  return (
+    <div style={{ display: 'grid', gap: 6, maxHeight: 360, overflowY: 'auto' }}>
+      {session.handoff && (
+        <div className="caption" style={{ fontStyle: 'italic' }}>
+          ↪ continuing from {session.handoff}
+        </div>
+      )}
+      {msgs.length === 0 && (
+        <span className="field-hint" style={{ fontStyle: 'italic' }}>no turns yet</span>
+      )}
+      {msgs.map((m, i) => (
+        <div
+          key={i}
+          style={{
+            display: 'grid', gridTemplateColumns: 'auto 64px 1fr', gap: 8,
+            alignItems: 'baseline', fontSize: 12,
+            padding: '3px 0',
+            borderBottom: i < msgs.length - 1 ? '1px dashed var(--separator-strong)' : 'none',
+          }}
+        >
+          <span className="mono-num" style={{ fontSize: 10, color: 'var(--muted)' }}>
+            {m.t ? new Date(m.t).toLocaleTimeString('en-GB', { hour12: false }) : '—'}
+          </span>
+          <span style={{
+            fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase',
+            color: roleColor(m.role),
+          }}>
+            {m.role}{m.kind ? `·${m.kind}` : ''}
+          </span>
+          <span style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{m.text}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function roleColor(role) {
+  if (role === 'dj' || role === 'segment') return 'var(--accent)';
+  if (role === 'track') return 'var(--ink)';
+  return 'var(--muted)';
 }
 
 function HealthCell({ label, status, v, sub }) {

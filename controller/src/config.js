@@ -37,6 +37,12 @@ export const config = {
     autoPlaylist: '/var/sub-wave/auto.m3u',
     nowPlayingFile: '/var/sub-wave/now-playing.json',
   },
+  session: {
+    // The live DJ session — a chat-history JSON the controller rewrites as
+    // tracks play and the DJ talks. Archived sessions land in `dir` on roll.
+    currentFile: '/var/sub-wave/session.json',
+    dir: '/var/sub-wave/sessions',
+  },
   weather: {
     // Wolverhampton — your home location
     lat: 52.5862,

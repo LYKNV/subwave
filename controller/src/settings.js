@@ -135,7 +135,11 @@ const DEFAULTS = {
     provider: 'ollama',
     model: '',
     apiKey: '',
-    pickerAgent: false,
+    // When on, the session DJ agent drives track-picking, links and listener
+    // requests as a tool-loop over the session chat history (broadcast/
+    // dj-agent.js). When off, the stateless pool picker runs instead — still
+    // inside a session, still logged, just without the conversational loop.
+    pickerAgent: true,
   },
   skills: {
     enabled: {},

@@ -8,6 +8,7 @@ import * as tts from '../audio/tts.js';
 import * as library from '../music/library.js';
 import { getFullContext } from '../context.js';
 import { queue } from '../broadcast/queue.js';
+import * as session from '../broadcast/session.js';
 import { requireAdmin } from '../middleware/auth.js';
 
 export const router = express.Router();
@@ -128,6 +129,13 @@ router.get('/debug', requireAdmin, async (req, res) => {
     out.context = { error: err.message };
   }
 
+  // 7b. Live DJ session — the current run's chat history.
+  try {
+    out.session = session.getSession();
+  } catch (err) {
+    out.session = { error: err.message };
+  }
+
   // 8. Config (redacted)
   out.config = {
     navidromeUrl: config.navidrome.url,
@@ -139,4 +147,32 @@ router.get('/debug', requireAdmin, async (req, res) => {
   };
 
   res.json(out);
+});
+
+// GET /sessions — archived session list, newest first. The live session is
+// served inline by /debug; this lists the rolled-off runs in state/sessions/.
+router.get('/sessions', requireAdmin, async (req, res) => {
+  try {
+    let names = [];
+    try {
+      names = (await readdir(config.session.dir)).filter(n => n.endsWith('.json'));
+    } catch { names = []; }
+    const entries = await Promise.all(names.map(async (name) => {
+      try {
+        const s = JSON.parse(await readFile(`${config.session.dir}/${name}`, 'utf8'));
+        return {
+          id: s.id, kind: s.kind, key: s.key,
+          startedAt: s.startedAt, endedAt: s.endedAt,
+          show: s.show?.name || null,
+          persona: s.persona?.name || null,
+          turns: Array.isArray(s.messages) ? s.messages.length : 0,
+        };
+      } catch { return null; }
+    }));
+    res.json({
+      sessions: entries.filter(Boolean).sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || '')),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });

@@ -12,6 +12,7 @@ import * as dj from '../llm/dj.js';
 import * as library from '../music/library.js';
 import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
+import * as session from './session.js';
 import { cleanupOldVoices } from '../audio/tts.js';
 import { shouldFire } from './dj-gate.js';
 import * as skillRegistry from '../skills/_registry.js';
@@ -149,6 +150,14 @@ export async function runHourlyCheck() {
 }
 
 async function hourlyCheck() {
+  // The top of the hour is the natural show boundary — roll the session here
+  // so a scheduled show starting/ending opens a fresh chat history even if no
+  // track happens to start right on the hour.
+  try {
+    await session.maybeRoll(await getFullContext());
+  } catch (err) {
+    queue.log('error', `Session roll failed: ${err.message}`);
+  }
   if (!shouldFire('hourly')) return;
   try {
     await runHourlyCheck();

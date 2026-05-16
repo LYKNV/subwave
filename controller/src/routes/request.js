@@ -7,6 +7,7 @@ import * as dj from '../llm/dj.js';
 import * as library from '../music/library.js';
 import { getFullContext } from '../context.js';
 import { queue } from '../broadcast/queue.js';
+import * as djAgent from '../broadcast/dj-agent.js';
 import {
   checkRateLimit, clientIp,
   REQUESTS_DISABLED, REQUEST_TEXT_MAX, REQUEST_NAME_MAX,
@@ -156,6 +157,26 @@ router.post('/request', async (req, res) => {
         track: { title: pick.title, artist: pick.artist },
         queuePosition: queue.upcoming.length,
       });
+    }
+
+    // Conversational DJ agent — when enabled it searches the library itself
+    // with the discovery tools and writes the intro, posting the request into
+    // the live session. On any failure, fall through to the stateless matcher
+    // cascade below so a request is never dropped.
+    try {
+      const agentCtx = await getFullContext();
+      const agentRes = await djAgent.runRequest(queue, agentCtx, { requester, text });
+      if (agentRes) {
+        queue.log('request', `agent resolved: ${agentRes.track.title} — ${agentRes.track.artist}`);
+        return res.json({
+          success: true,
+          ack: agentRes.ack,
+          track: agentRes.track,
+          queuePosition: queue.upcoming.length,
+        });
+      }
+    } catch (err) {
+      queue.log('error', `DJ agent request failed: ${err.message} — falling back`);
     }
 
     // 1. LLM matches intent — pass current track so vibe queries can be
