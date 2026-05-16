@@ -2,11 +2,11 @@
 //
 // Every model call in the controller resolves its model through here, so the
 // operator can switch providers (homelab Ollama ↔ Anthropic ↔ OpenAI ↔ Google
-// Gemini ↔ OpenRouter ↔ the Vercel AI Gateway) from the admin Settings UI
+// Gemini ↔ DeepSeek ↔ OpenRouter ↔ the Vercel AI Gateway) from the admin Settings UI
 // without a redeploy and without touching a single call site.
 //
 // The active provider/model lives in `settings.llm` (see settings.js):
-//   { provider:  'ollama' | 'anthropic' | 'openai' | 'google' | 'openrouter' | 'gateway',
+//   { provider:  'ollama' | 'anthropic' | 'openai' | 'google' | 'deepseek' | 'openrouter' | 'gateway',
 //     model:     string,   // empty → provider default
 //     apiKey:    string,   // empty → read the provider's env var
 //     ollamaUrl: string }  // empty → config.ollama.url default (Ollama only)
@@ -18,6 +18,7 @@ import { createOllama } from 'ollama-ai-provider-v2';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
+import { createDeepSeek } from '@ai-sdk/deepseek';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
 import { config } from '../config.js';
 import * as settings from '../settings.js';
@@ -43,6 +44,7 @@ function ollamaBaseUrl(cfg) {
 function resolveModelId(cfg) {
   if (cfg.model) return cfg.model;
   if (cfg.provider === 'ollama') return config.ollama.model;
+  if (cfg.provider === 'deepseek') return 'deepseek-v4-flash';
   throw new Error(
     `llm.provider is "${cfg.provider}" but llm.model is empty — set a model in Settings`
   );
@@ -71,6 +73,11 @@ export function languageModel() {
     }
     case 'google': {
       const provider = createGoogleGenerativeAI(cfg.apiKey ? { apiKey: cfg.apiKey } : {});
+      model = provider(id);
+      break;
+    }
+    case 'deepseek': {
+      const provider = createDeepSeek(cfg.apiKey ? { apiKey: cfg.apiKey } : {});
       model = provider(id);
       break;
     }

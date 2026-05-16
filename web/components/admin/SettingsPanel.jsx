@@ -20,6 +20,7 @@ const LLM_ENV_VARS = {
   anthropic: 'ANTHROPIC_API_KEY',
   openai: 'OPENAI_API_KEY',
   google: 'GOOGLE_GENERATIVE_AI_API_KEY',
+  deepseek: 'DEEPSEEK_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   gateway: 'AI_GATEWAY_API_KEY',
 };
@@ -647,7 +648,13 @@ function LlmSection({ data, form, setForm, busy, saveMsg, saveSettings }) {
               className="input"
               value={form.llm.model}
               onChange={e => setForm(f => ({ ...f, llm: { ...f.llm, model: e.target.value } }))}
-              placeholder={form.llm.provider === 'ollama' ? 'nemotron-3-super:cloud' : 'model id'}
+              placeholder={
+                form.llm.provider === 'ollama'
+                  ? 'nemotron-3-super:cloud'
+                  : form.llm.provider === 'deepseek'
+                    ? 'deepseek-v4-flash'
+                    : 'model id'
+              }
               style={{ maxWidth: 360 }}
             />
             <div className="field-hint">
@@ -659,7 +666,9 @@ function LlmSection({ data, form, setForm, busy, saveMsg, saveSettings }) {
                     ? 'OpenRouter model id, e.g. “google/gemini-2.5-flash”.'
                     : form.llm.provider === 'google'
                       ? 'Gemini model id, e.g. “gemini-2.5-flash”.'
-                      : 'Model id for the chosen provider — required.'}
+                      : form.llm.provider === 'deepseek'
+                        ? 'DeepSeek model id. Leave blank for the “deepseek-v4-flash” default.'
+                        : 'Model id for the chosen provider — required.'}
             </div>
           </div>
 

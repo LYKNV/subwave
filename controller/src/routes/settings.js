@@ -77,6 +77,7 @@ router.get('/settings', requireAdmin, async (req, res) => {
         ELEVENLABS_API_KEY: !!process.env.ELEVENLABS_API_KEY,
         ANTHROPIC_API_KEY: !!process.env.ANTHROPIC_API_KEY,
         GOOGLE_GENERATIVE_AI_API_KEY: !!process.env.GOOGLE_GENERATIVE_AI_API_KEY,
+        DEEPSEEK_API_KEY: !!process.env.DEEPSEEK_API_KEY,
         OPENROUTER_API_KEY: !!process.env.OPENROUTER_API_KEY,
         AI_GATEWAY_API_KEY: !!process.env.AI_GATEWAY_API_KEY,
       },
