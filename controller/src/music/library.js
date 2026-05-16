@@ -40,17 +40,56 @@ export function allTaggedIds() {
   return Object.keys(store.tracks);
 }
 
+// Musically-adjacent moods. The LLM tagger is told to tag by how a track
+// FEELS, so it rarely assigns time-of-day moods — `morning` ends up with 0
+// tracks, `evening` with 1 — which leaves the picker's mood source dark for
+// the ~7 morning hours a day that `dominantMood` is `morning`. When a
+// requested mood is sparsely tagged, songsByMood() widens the match to these
+// neighbours. The picker still hands the full candidate set to the LLM, which
+// curates against the real context; widening only deepens the pool.
+const MOOD_NEIGHBOURS = {
+  morning:     ['calm', 'focus', 'sunny'],
+  evening:     ['calm', 'reflective', 'romantic'],
+  night:       ['reflective', 'calm', 'romantic'],
+  driving:     ['energetic', 'focus'],
+  focus:       ['calm', 'reflective'],
+  energetic:   ['workout', 'celebratory'],
+  reflective:  ['calm', 'night'],
+  celebratory: ['festival', 'energetic'],
+  romantic:    ['calm', 'reflective'],
+  festival:    ['celebratory', 'cultural', 'spiritual'],
+  sunny:       ['energetic', 'calm'],
+  rainy:       ['calm', 'reflective'],
+};
+
+// Below this many exact matches, songsByMood() widens to adjacent moods.
+// 12 leaves comfortable margin above the picker's CAP_MOOD_LIBRARY (10).
+const MOOD_MIN_EXACT = 12;
+
 // Returns full song-shaped records (id + metadata + moods) for tracks tagged
-// with the requested mood.
+// with the requested mood. If that mood is sparsely tagged (< MOOD_MIN_EXACT
+// hits) the result is widened with musically-adjacent moods, exact matches
+// kept at the front, so the picker's mood source never goes dark — see
+// MOOD_NEIGHBOURS.
 export function songsByMood(mood) {
   if (!mood) return [];
-  const out = [];
+  const exact = [];
   for (const [id, t] of Object.entries(store.tracks)) {
-    if (t.moods?.includes(mood)) {
-      out.push({ id, ...t });
+    if (t.moods?.includes(mood)) exact.push({ id, ...t });
+  }
+  if (exact.length >= MOOD_MIN_EXACT) return exact;
+
+  const accept = new Set([mood, ...(MOOD_NEIGHBOURS[mood] || [])]);
+  const seen = new Set(exact.map(s => s.id));
+  const widened = [...exact];
+  for (const [id, t] of Object.entries(store.tracks)) {
+    if (seen.has(id)) continue;
+    if (t.moods?.some(m => accept.has(m))) {
+      widened.push({ id, ...t });
+      seen.add(id);
     }
   }
-  return out;
+  return widened;
 }
 
 export function stats() {
