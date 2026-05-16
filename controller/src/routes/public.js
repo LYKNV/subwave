@@ -5,6 +5,7 @@ import * as subsonic from '../music/subsonic.js';
 import * as settings from '../settings.js';
 import { getFullContext } from '../context.js';
 import { queue } from '../broadcast/queue.js';
+import * as session from '../broadcast/session.js';
 
 export const router = express.Router();
 
@@ -75,11 +76,13 @@ router.get('/now-playing', async (req, res) => {
     const activeShow = ctx.activeShow
       ? { name: ctx.activeShow.name, persona: ctx.activeShow.persona }
       : null;
+    const s = session.getSession();
     res.json({
       nowPlaying,
       context: ctx,
       dj: { name: persona?.name || 'Frequency', tagline: persona?.tagline || '' },
       activeShow,
+      session: s ? { id: s.id, kind: s.kind, startedAt: s.startedAt, show: s.show?.name || null } : null,
       listeners: stream.listeners,
       streamOnline: stream.online,
     });

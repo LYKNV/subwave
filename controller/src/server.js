@@ -7,6 +7,8 @@ import { config } from './config.js';
 import * as settings from './settings.js';
 import * as jingles from './broadcast/jingles.js';
 import { queue } from './broadcast/queue.js';
+import * as session from './broadcast/session.js';
+import { getFullContext } from './context.js';
 import { startScheduler } from './broadcast/scheduler.js';
 import { cors } from './middleware/cors.js';
 import { assertAdminConfigured } from './middleware/auth.js';
@@ -51,6 +53,16 @@ app.listen(config.server.port, async () => {
     console.log(`[settings] loaded. jingleRatio=${s.jingleRatio} crossfadeDuration=${s.crossfadeDuration} location=${s.weather.locationName}`);
   } catch (err) {
     console.error('[settings] load failed:', err.message);
+  }
+
+  // Open (or resume) the DJ session before the watcher starts dispatching
+  // track changes — the queue and scheduler append turns into it.
+  try {
+    const ctx = await getFullContext();
+    const s = await session.recover(ctx);
+    console.log(`[session] ${s.id} (${s.kind}/${s.key})`);
+  } catch (err) {
+    console.error('[session] init failed:', err.message);
   }
 
   queue.startWatcher();

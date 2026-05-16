@@ -1,25 +1,14 @@
-// LLM-as-DJ next-track selector. Two strategies:
+// LLM-as-DJ next-track selector — the "pool path".
 //
-//   • Pool path  (default) — the controller builds a balanced candidate pool
-//     from 7 Subsonic/library sources and asks the LLM to pick one. Cheap,
-//     deterministic, one model call. Works with any model.
-//
-//   • Agent path (settings.llm.pickerAgent) — a ToolLoopAgent is GIVEN the
-//     music-discovery tools and decides for itself what to search. More
-//     "DJ-like", but needs a model that handles multi-step tool calls well —
-//     hence it's opt-in. Any agent failure falls back to the pool path so a
-//     pick is never missed.
+// The controller builds a balanced candidate pool from 7 Subsonic/library
+// sources and asks the LLM to pick one. Cheap, deterministic, one model call,
+// works with any model. This is the stateless fallback used by the session DJ
+// agent (broadcast/dj-agent.js) whenever the conversational agent is disabled
+// or fails — so a pick is never missed.
 
-import { ToolLoopAgent, stepCountIs, Output } from 'ai';
-import { z } from 'zod';
 import * as subsonic from './subsonic.js';
 import * as library from './library.js';
 import * as dj from '../llm/dj.js';
-import * as settings from '../settings.js';
-import { languageModel, providerName } from '../llm/provider.js';
-import { buildPickerTools } from '../llm/tools.js';
-import { record, recordPick } from '../llm/log.js';
-import { getFullContext } from '../context.js';
 
 const CANDIDATE_CAP = 18;
 const HISTORY_DEPTH = 8;
@@ -199,10 +188,11 @@ function summariseRecent(queue) {
 }
 
 // ---------------------------------------------------------------------------
-// Pool path — build a candidate pool, ask the LLM to choose one.
+// Pool path — build a candidate pool, ask the LLM to choose one. Returns
+// { song, reason, source } or null. Used by broadcast/dj-agent.js.
 // ---------------------------------------------------------------------------
 
-async function pickViaPool(queue, ctx) {
+export async function pickViaPool(queue, ctx) {
   const recentIds = queue.recentlyPlayedIds(25);
   const currentTrack = queue.current?.track || null;
   const { candidates, sources } = await buildCandidates(ctx.dominantMood, recentIds, currentTrack);
@@ -251,129 +241,4 @@ async function pickViaPool(queue, ctx) {
   }
 
   return { song: chosen, reason: pickRaw.reason || null, source: chosen._source };
-}
-
-// ---------------------------------------------------------------------------
-// Agent path — give the model the discovery tools and let it choose.
-// ---------------------------------------------------------------------------
-
-const AGENT_INSTRUCTIONS = `You are the DJ for SUB/WAVE, a personal internet radio station.
-Your job: choose the single best NEXT track to play.
-
-You have tools to explore the music library. Use 2 to 4 tool calls to gather
-candidates, then choose ONE track. Strategy:
-- similarSongs (seeded with the current song id) keeps the flow going.
-- tracksByMood matches the room's dominant mood.
-- starredSongs / recentlyAdded / randomSongs add variety.
-
-${dj.PICKER_CRITERIA}
-
-The final track id MUST be one that a tool actually returned. Do not invent ids.
-Respond with a JSON object only — no prose, no markdown:
-{ "id": "<exact id a tool returned>", "reason": "<one short sentence>" }`;
-
-const AGENT_PICK_SCHEMA = z.object({
-  id: z.string().describe('the exact song id, as returned by a tool call'),
-  reason: z.string().describe('one short sentence on why this track'),
-});
-
-async function pickViaAgent(queue, ctx) {
-  const recentIds = queue.recentlyPlayedIds(25);
-  const currentTrack = queue.current?.track || null;
-  const { tools, seen } = buildPickerTools({ recentIds });
-
-  const agent = new ToolLoopAgent({
-    model: languageModel(),
-    instructions: AGENT_INSTRUCTIONS,
-    tools,
-    // Generous cap: each tool call + the final structured output are steps.
-    stopWhen: stepCountIs(8),
-    output: Output.object({ schema: AGENT_PICK_SCHEMA }),
-    temperature: 0.6,
-  });
-
-  const brief = JSON.stringify({
-    now: {
-      time: ctx.time?.period,
-      vibe: ctx.time?.vibe,
-      mood: ctx.dominantMood,
-      weather: ctx.weather?.condition,
-      festival: ctx.festival?.name,
-    },
-    currentSongId: currentTrack?.id || null,
-    currentSong: currentTrack ? `${currentTrack.title} — ${currentTrack.artist}` : null,
-    recentPlays: summariseRecent(queue),
-  }, null, 2);
-
-  const started = Date.now();
-  let result;
-  try {
-    result = await agent.generate({ prompt: brief });
-  } catch (err) {
-    record({
-      kind: 'pickerAgent', ok: false, ms: Date.now() - started,
-      via: 'ai-sdk', user: brief, error: err.message, t: new Date().toISOString(),
-    });
-    throw err;
-  }
-
-  const pick = result.output;
-  const steps = result.steps?.length ?? 0;
-  record({
-    kind: 'pickerAgent', ok: true, ms: Date.now() - started,
-    via: 'ai-sdk', user: brief,
-    response: `steps=${steps} pick=${pick?.id} — ${pick?.reason || ''}`,
-    t: new Date().toISOString(),
-  });
-
-  const song = pick?.id ? seen.get(pick.id) : null;
-  if (!song) {
-    queue.log('error', `picker agent returned unknown id ${pick?.id}`);
-    return null;
-  }
-  queue.log('picker', `agent pick after ${steps} steps from ${seen.size} explored`);
-  return { song, reason: pick.reason || null, source: 'agent' };
-}
-
-// ---------------------------------------------------------------------------
-// Public entry — dispatch to agent or pool, with the pool as a safety net.
-// ---------------------------------------------------------------------------
-
-export async function pickNext(queue) {
-  const ctx = await getFullContext();
-
-  if (settings.get().llm?.pickerAgent) {
-    try {
-      const result = await pickViaAgent(queue, ctx);
-      if (result) return result;
-      queue.log('picker', 'agent produced no pick — falling back to pool');
-    } catch (err) {
-      queue.log('error', `picker agent failed (${providerName()}): ${err.message} — falling back to pool`);
-    }
-  }
-
-  return pickViaPool(queue, ctx);
-}
-
-// Pick + enqueue. Fire-and-forget from the watcher.
-export async function pickAndEnqueue(queue) {
-  const result = await pickNext(queue);
-  if (!result) return;
-  const { song, reason, source } = result;
-  queue.log('ai-pick', `${song.title} — ${song.artist}`, { reason, source });
-  recordPick({ song, reason, source });
-  await queue.push({
-    track: {
-      id: song.id,
-      title: song.title,
-      artist: song.artist,
-      album: song.album,
-      year: song.year,
-      genre: song.genre,
-    },
-    requestedBy: null,
-    intent: reason || 'ai pick',
-    introScript: null,        // no spoken intro for auto-picks (keeps the flow musical)
-    aiPicked: true,
-  });
 }

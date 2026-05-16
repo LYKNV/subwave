@@ -7,7 +7,7 @@
 // Both resolve their model through llm/provider.js, so switching providers in
 // Settings reroutes every call with no change here or at the call sites.
 
-import { generateText, Output } from 'ai';
+import { generateText, Output, stepCountIs, ToolLoopAgent } from 'ai';
 import { languageModel, activeModelLabel } from './provider.js';
 import { record } from './log.js';
 
@@ -153,4 +153,55 @@ export async function djObject({
     user: prompt, error: lastErr.message, t: new Date().toISOString(),
   });
   throw lastErr;
+}
+
+// Conversational tool-loop with structured output — the primitive behind the
+// session DJ agent (broadcast/dj-agent.js). A ToolLoopAgent is given the
+// music-discovery tools and a step cap, fed a `messages` array (the session
+// chat window) instead of a single prompt, and returns a schema-validated
+// final object. Throws on failure so the caller can fall back to a stateless
+// path.
+export async function djAgent({
+  system,
+  messages,
+  tools,
+  schema,
+  maxSteps = 8,
+  temperature = 0.6,
+  kind = 'sdk.djAgent',
+}) {
+  const started = Date.now();
+  const lastUser = [...(messages || [])].reverse().find(m => m.role === 'user');
+  try {
+    const agent = new ToolLoopAgent({
+      model: languageModel(),
+      instructions: system,
+      tools,
+      stopWhen: stepCountIs(maxSteps),
+      temperature,
+      ...(schema ? { output: Output.object({ schema }) } : {}),
+    });
+    const result = await agent.generate({ messages });
+    const steps = result.steps?.length ?? 0;
+    const object = schema ? result.output : stripThinking(result.text);
+    record({
+      kind, ok: true, ms: Date.now() - started,
+      model: activeModelLabel(),
+      sampling: { temperature },
+      via: 'ai-sdk:agent',
+      systemPreview: system?.slice(0, 200),
+      user: typeof lastUser?.content === 'string' ? lastUser.content : '',
+      response: `steps=${steps} ${JSON.stringify(object).slice(0, 480)}`,
+      t: new Date().toISOString(),
+    });
+    return { object, steps };
+  } catch (err) {
+    record({
+      kind, ok: false, ms: Date.now() - started,
+      model: activeModelLabel(), via: 'ai-sdk:agent',
+      user: typeof lastUser?.content === 'string' ? lastUser.content : '',
+      error: err.message, t: new Date().toISOString(),
+    });
+    throw err;
+  }
 }

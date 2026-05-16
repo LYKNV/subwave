@@ -5,9 +5,9 @@
 import { writeFile, readFile } from 'node:fs/promises';
 import { config } from '../config.js';
 import * as subsonic from '../music/subsonic.js';
-import * as dj from '../llm/dj.js';
 import { speak } from '../audio/tts.js';
-import { pickAndEnqueue } from '../music/picker.js';
+import * as djAgent from './dj-agent.js';
+import * as session from './session.js';
 import { getFullContext } from '../context.js';
 import * as settings from '../settings.js';
 
@@ -36,7 +36,6 @@ class Queue {
     this.autoPick = true;      // toggle: should we ask Ollama for next track when idle
     this.autoLink = true;      // toggle: random DJ links between auto tracks
     this.tracksUntilLink = pickLinkInterval();
-    this.linkBusy = false;
   }
 
   log(kind, message, meta = {}) {
@@ -182,6 +181,7 @@ class Queue {
         : config.liquidsoap.sayFile;
       await writeFile(targetFile, wavPath);
       this.log(kind, text);
+      session.appendTurn({ role: 'segment', kind, text });
     } catch (err) {
       this.log('error', `Announce failed: ${err.message}`);
     }
@@ -233,45 +233,40 @@ class Queue {
       this.log('playing', `${np.title} — ${np.artist}`, { source: 'auto' });
     }
 
-    // Random DJ link between auto tracks. Listener requests are skipped entirely —
-    // they already get a bespoke intro and shouldn't count toward the gap.
-    const isAutonomous = this.current.source === 'auto' || this.current.source === 'ai';
-    if (this.autoLink && isAutonomous) {
-      this.tracksUntilLink--;
-      if (this.tracksUntilLink <= 0 && this.history[0] && !this.linkBusy) {
-        this.tracksUntilLink = pickLinkInterval();
-        this.linkBusy = true;
-        const previous = this.history[0].track;
-        const current = this.current.track;
-        (async () => {
-          try {
-            const ctx = await getFullContext();
-            const script = await dj.generateLink({
-              previous,
-              current,
-              context: ctx,
-              recap: this.getDjRecap(),
-              recentTracks: this.getRecentTracks(),
-              recentOpeners: this.getRecentOpeners(),
-            });
-            await this.announce(script, 'link');
-          } catch (err) {
-            this.log('error', `DJ link failed: ${err.message}`);
-          } finally {
-            this.linkBusy = false;
-          }
-        })();
-      }
-    }
+    // Record the play into the live session's chat history.
+    session.appendTurn({
+      role: 'track', kind: 'play',
+      text: `▶ "${this.current.track.title}" by ${this.current.track.artist || 'unknown'}`,
+      meta: { source: this.current.source, requestedBy: this.current.requestedBy || null },
+    });
 
-    // Auto-DJ: if nothing is queued, ask the LLM to pick the next track.
-    // Fire-and-forget — by the time the current track ends, the pick should
-    // already be in Liquidsoap's dj_queue, so there's no gap.
+    // Auto-DJ: when nothing is queued, hand a "track started" event to the
+    // session DJ agent — it picks the next track and, on the link cadence,
+    // writes a between-track link to air over what just started. Fire-and-
+    // forget: the pick lands in Liquidsoap's dj_queue before this track ends.
+    // Listener requests bring their own intro and don't count toward the gap.
+    const isAutonomous = this.current.source === 'auto' || this.current.source === 'ai';
     if (this.autoPick && this.upcoming.length === 0 && !this.pickerBusy) {
+      let wantLink = false;
+      if (this.autoLink && isAutonomous && this.history[0]) {
+        this.tracksUntilLink--;
+        if (this.tracksUntilLink <= 0) {
+          this.tracksUntilLink = pickLinkInterval();
+          wantLink = true;
+        }
+      }
       this.pickerBusy = true;
-      pickAndEnqueue(this)
-        .catch(err => this.log('error', `picker failed: ${err.message}`))
-        .finally(() => { this.pickerBusy = false; });
+      (async () => {
+        try {
+          const ctx = await getFullContext();
+          await session.maybeRoll(ctx);
+          await djAgent.runTrackEvent(this, ctx, { wantLink });
+        } catch (err) {
+          this.log('error', `DJ track event failed: ${err.message}`);
+        } finally {
+          this.pickerBusy = false;
+        }
+      })();
     }
   }
 

@@ -7,6 +7,8 @@ import * as dj from '../llm/dj.js';
 import * as library from '../music/library.js';
 import { getFullContext } from '../context.js';
 import { queue } from '../broadcast/queue.js';
+import * as djAgent from '../broadcast/dj-agent.js';
+import * as session from '../broadcast/session.js';
 import {
   checkRateLimit, clientIp,
   REQUESTS_DISABLED, REQUEST_TEXT_MAX, REQUEST_NAME_MAX,
@@ -108,6 +110,24 @@ router.post('/request', async (req, res) => {
   try {
     queue.log('request', `${requester}: "${text}"`);
 
+    // Roll the session if a show/mood boundary has passed since the last
+    // track change, then post the request as a single `event` turn. Doing it
+    // here — before any resolution path — means the agent, the "more like
+    // this" shortcut and the stateless cascade all share one event turn, so
+    // the session never carries an orphan event with no DJ reply.
+    try {
+      const reqCtx = await getFullContext();
+      await session.maybeRoll(reqCtx);
+      const cur = queue.current?.track || null;
+      session.appendTurn({
+        role: 'event', kind: 'request',
+        text: `Listener "${requester}" requests: "${text}"`
+          + (cur ? ` (currently playing "${cur.title}" by ${cur.artist})` : ''),
+      });
+    } catch (err) {
+      queue.log('error', `Session update for request failed: ${err.message}`);
+    }
+
     // 0. "more like this" — never let it through the generic search path,
     // it's a meta-instruction about the current track, not a query. Pick
     // another song by the current/last artist and skip the LLM match.
@@ -150,12 +170,37 @@ router.post('/request', async (req, res) => {
         intent: 'more_like_this',
         introScript,
       });
+      session.appendTurn({
+        role: 'dj', kind: 'request',
+        text: introScript || `More from ${refArtist}, coming up.`,
+        meta: { trackId: pick.id, requester },
+      });
       return res.json({
         success: true,
         ack: `More from ${refArtist}, coming up.`,
         track: { title: pick.title, artist: pick.artist },
         queuePosition: queue.upcoming.length,
       });
+    }
+
+    // Conversational DJ agent — when enabled it searches the library itself
+    // with the discovery tools and writes the intro, posting the request into
+    // the live session. On any failure, fall through to the stateless matcher
+    // cascade below so a request is never dropped.
+    try {
+      const agentCtx = await getFullContext();
+      const agentRes = await djAgent.runRequest(queue, agentCtx, { requester, text });
+      if (agentRes) {
+        queue.log('request', `agent resolved: ${agentRes.track.title} — ${agentRes.track.artist}`);
+        return res.json({
+          success: true,
+          ack: agentRes.ack,
+          track: agentRes.track,
+          queuePosition: queue.upcoming.length,
+        });
+      }
+    } catch (err) {
+      queue.log('error', `DJ agent request failed: ${err.message} — falling back`);
     }
 
     // 1. LLM matches intent — pass current track so vibe queries can be
@@ -328,6 +373,11 @@ router.post('/request', async (req, res) => {
       requestedBy: requester,
       intent: matched.intent,
       introScript,
+    });
+    session.appendTurn({
+      role: 'dj', kind: 'request',
+      text: introScript || matched.ack || `Queued "${pick.title}".`,
+      meta: { trackId: pick.id, requester },
     });
 
     res.json({
