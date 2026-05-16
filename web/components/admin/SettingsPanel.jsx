@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import { fmtSize } from '../../lib/format';
 import { useAdminAuth } from '../../lib/adminAuth';
-import { CLOUD_VOICES } from '../../lib/cloudVoices';
+import { CLOUD_VOICES, CLOUD_MODELS } from '../../lib/cloudVoices';
 import { V3AlertDialog } from '../ui/alert-dialog';
 import { Card, Btn, Pill, Eyebrow, Seg, Metric } from './ui';
 
@@ -530,7 +530,14 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }) {
                 const voice = provVoices.some(pv => pv.id === f.tts.cloud.voice.trim())
                   ? f.tts.cloud.voice
                   : (provVoices[0]?.id || f.tts.cloud.voice);
-                return { ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, enabled: true, provider: v, voice } } };
+                // Model ids are provider-specific too — an OpenAI id is invalid
+                // against ElevenLabs. Keep the current model only if it's known
+                // for the new provider, else fall back to its default.
+                const provModels = CLOUD_MODELS[v] || [];
+                const model = provModels.includes(f.tts.cloud.model.trim())
+                  ? f.tts.cloud.model
+                  : (provModels[0] || f.tts.cloud.model);
+                return { ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, enabled: true, provider: v, voice, model } } };
               })}
             />
             {!form.tts.cloud.enabled && (
@@ -546,7 +553,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }) {
                     className="input"
                     value={form.tts.cloud.model}
                     onChange={e => setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, model: e.target.value } } }))}
-                    placeholder="gpt-4o-mini-tts"
+                    placeholder={CLOUD_MODELS[form.tts.cloud.provider]?.[0] || 'gpt-4o-mini-tts'}
                   />
                   <div className="field-hint">e.g. “gpt-4o-mini-tts” (OpenAI) or “eleven_flash_v2_5” (ElevenLabs).</div>
                 </div>

@@ -28,3 +28,13 @@ export const CLOUD_VOICES = {
     { id: 'yoZ06aMxZJJ28mfd3POQ', label: 'Sam' },
   ],
 };
+
+// Common TTS model ids per cloud provider. The Model field is free text (any
+// provider model is accepted), but this list drives the default when an
+// operator switches provider — a model id is provider-specific, so an OpenAI
+// id like "gpt-4o-mini-tts" is invalid against ElevenLabs and vice versa.
+// First entry is the per-provider default.
+export const CLOUD_MODELS = {
+  openai: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
+  elevenlabs: ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_turbo_v2_5'],
+};
