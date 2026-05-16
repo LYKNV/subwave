@@ -141,79 +141,33 @@ export default function DebugPanel() {
             </Card>
           )}
 
-          {/* ── ROW 2 — LLM + LIQUIDSOAP ────────────────────────────────── */}
-          <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1.2fr', gap: 16 }}>
-            <Card
-              title="LLM recent calls"
-              sub={`${data.llm?.recentCalls?.length ?? 0} · ${data.llm?.provider || '—'} / ${data.llm?.activeModel || '—'}`}
-              style={{ display: 'flex', flexDirection: 'column', height: 360 }}
-              bodyStyle={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
-            >
-              <div style={{ display: 'grid', gap: 6, flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                {(data.llm?.recentCalls?.length ?? 0) === 0 && (
-                  <span className="field-hint" style={{ fontStyle: 'italic' }}>no calls yet</span>
-                )}
-                {(data.llm?.recentCalls || []).map((c, i) => (
-                  <details key={i} style={{
-                    border: '1px solid var(--separator-strong)',
-                    background: i === 0 ? 'var(--ink-softer)' : 'transparent',
-                  }}>
-                    <summary style={{
-                      display: 'grid', gridTemplateColumns: 'auto 1fr auto auto', gap: 10,
-                      padding: '8px 10px', alignItems: 'center', cursor: 'pointer',
-                    }}>
-                      <span style={{ color: c.ok ? 'var(--accent)' : 'var(--danger)', fontWeight: 700 }}>
-                        {c.ok ? '✓' : '✗'}
-                      </span>
-                      <span style={{ fontSize: 12 }}>{c.kind}</span>
-                      <span className="mono-num" style={{ fontSize: 11, color: 'var(--muted)' }}>{c.ms}ms</span>
-                      <span className="mono-num" style={{ fontSize: 10, color: 'var(--muted)' }}>
-                        {c.t ? new Date(c.t).toLocaleTimeString('en-GB', { hour12: false }) : '—'}
-                      </span>
-                    </summary>
-                    <div style={{ padding: '4px 10px 10px', display: 'grid', gap: 4, fontSize: 11 }}>
-                      {c.user && <CallField label="user">{c.user}</CallField>}
-                      {c.systemPreview && <CallField label="system…">{c.systemPreview}…</CallField>}
-                      {c.system && <CallField label="system">{c.system}</CallField>}
-                      {Array.isArray(c.messages) && c.messages.length > 0 && (
-                        <CallField label="messages">{fmtMessages(c.messages)}</CallField>
-                      )}
-                      {Array.isArray(c.toolCalls) && c.toolCalls.length > 0 && (
-                        <CallField label="tools">{fmtToolCalls(c.toolCalls)}</CallField>
-                      )}
-                      {c.steps != null && <CallField label="steps">{String(c.steps)}</CallField>}
-                      {c.response && <CallField label="response">{c.response}</CallField>}
-                      {c.error && <CallField label="error" tone="err">{c.error}</CallField>}
-                    </div>
-                  </details>
-                ))}
-              </div>
-            </Card>
+          {/* ── LLM RECENT CALLS (full width) ───────────────────────────── */}
+          <LlmCalls llm={data.llm} />
 
-            <Card
-              title="Liquidsoap log"
-              sub="last 100 lines"
-              style={{ display: 'flex', flexDirection: 'column', height: 360 }}
-              bodyStyle={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
-              right={
-                <label style={{
-                  display: 'flex', alignItems: 'center', gap: 6, fontSize: 10,
-                  color: 'var(--muted)', letterSpacing: '0.18em', textTransform: 'uppercase',
-                }}>
-                  <input
-                    type="checkbox"
-                    checked={autoScroll}
-                    onChange={e => setAutoScroll(e.target.checked)}
-                  />
-                  auto-scroll
-                </label>
-              }
-            >
-              <pre ref={logRef} className="term" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-                {data.liquidsoapLog || '— no log —'}
-              </pre>
-            </Card>
-          </div>
+          {/* ── LIQUIDSOAP LOG (full width) ─────────────────────────────── */}
+          <Card
+            title="Liquidsoap log"
+            sub="last 100 lines"
+            style={{ display: 'flex', flexDirection: 'column', height: 440 }}
+            bodyStyle={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}
+            right={
+              <label style={{
+                display: 'flex', alignItems: 'center', gap: 6, fontSize: 10,
+                color: 'var(--muted)', letterSpacing: '0.18em', textTransform: 'uppercase',
+              }}>
+                <input
+                  type="checkbox"
+                  checked={autoScroll}
+                  onChange={e => setAutoScroll(e.target.checked)}
+                />
+                auto-scroll
+              </label>
+            }
+          >
+            <pre ref={logRef} className="term" style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+              {data.liquidsoapLog || '— no log —'}
+            </pre>
+          </Card>
 
           {/* ── ROW 3 — STATE DIR + VOICE WAVS + LIBRARY ────────────────── */}
           <div className="stack-mobile" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1.2fr', gap: 16 }}>
@@ -510,46 +464,237 @@ function FilesTable({ files }) {
   );
 }
 
-function CallField({ label, children, tone }) {
+// One-line preview of a longer value, for collapsed section summaries.
+function oneLine(s, n = 110) {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+}
+
+// A collapsible labelled field inside an LLM call. Collapsed by default with a
+// one-line preview in the summary, so a call can be scanned without expanding
+// every field — the whole point of the browsable layout.
+function CallSection({ label, count, preview, tone, children }) {
   return (
-    <div style={{ display: 'flex', gap: 8 }}>
-      <span className="caption" style={{ flex: 'none', width: 64 }}>{label}</span>
-      <span style={{
+    <details style={{
+      border: '1px solid var(--separator-strong)', background: 'var(--bg)',
+    }}>
+      <summary style={{
+        display: 'flex', gap: 8, alignItems: 'baseline',
+        padding: '5px 8px', cursor: 'pointer',
+      }}>
+        <span className="caption" style={{
+          flex: 'none', color: tone === 'err' ? 'var(--danger)' : undefined,
+        }}>
+          {label}{count != null ? ` · ${count}` : ''}
+        </span>
+        {preview && (
+          <span style={{
+            fontSize: 11, color: 'var(--muted)', minWidth: 0,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {preview}
+          </span>
+        )}
+      </summary>
+      <div style={{
+        padding: '6px 10px 10px', fontSize: 11,
         whiteSpace: 'pre-wrap', wordBreak: 'break-word',
         color: tone === 'err' ? 'var(--danger)' : 'var(--ink)',
       }}>
         {children}
-      </span>
+      </div>
+    </details>
+  );
+}
+
+// The agent's message window — one block per turn, role-chipped.
+function MessageList({ messages }) {
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {messages.map((m, i) => {
+        const body = typeof m.content === 'string'
+          ? m.content
+          : JSON.stringify(m.content, null, 2);
+        return (
+          <div key={i} style={{ borderLeft: '2px solid var(--separator-strong)', paddingLeft: 8 }}>
+            <span style={{
+              fontSize: 9, letterSpacing: '0.12em', textTransform: 'uppercase',
+              color: m.role === 'assistant' ? 'var(--accent)' : 'var(--muted)',
+            }}>
+              {m.role}
+            </span>
+            <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{body}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-// The agent tool-loop trail — one numbered line per call: name, args, and a
-// short result preview so a pick's reasoning path is readable at a glance.
-function fmtToolCalls(calls) {
-  return calls
-    .map((c, i) => {
-      const args = c.args ? JSON.stringify(c.args) : '';
-      let result = '';
-      if (c.result != null) {
-        const r = typeof c.result === 'string' ? c.result : JSON.stringify(c.result);
-        result = `\n   → ${r.length > 240 ? `${r.slice(0, 240)}…` : r}`;
-      }
-      return `${i + 1}. ${c.name}(${args})${result}`;
-    })
-    .join('\n');
+// The agent tool-loop trail — each call its own collapsible row with args and
+// a result block, so the picker's reasoning path can be drilled into.
+function ToolList({ calls }) {
+  return (
+    <div style={{ display: 'grid', gap: 4 }}>
+      {calls.map((t, i) => {
+        const result = t.result == null
+          ? null
+          : (typeof t.result === 'string' ? t.result : JSON.stringify(t.result, null, 2));
+        return (
+          <details key={i} style={{
+            border: '1px solid var(--separator-strong)', background: 'var(--card-bg)',
+          }}>
+            <summary style={{
+              display: 'flex', gap: 8, alignItems: 'baseline',
+              padding: '4px 8px', cursor: 'pointer',
+            }}>
+              <span className="mono-num" style={{ color: 'var(--muted)' }}>{i + 1}</span>
+              <span style={{ fontWeight: 700 }}>{t.name}</span>
+              <span style={{
+                fontSize: 11, color: 'var(--muted)', minWidth: 0,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {oneLine(t.args ? JSON.stringify(t.args) : '', 90)}
+              </span>
+            </summary>
+            <div style={{ padding: '4px 10px 8px', display: 'grid', gap: 4, fontSize: 11 }}>
+              <span className="caption">args</span>
+              <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit' }}>
+                {JSON.stringify(t.args ?? {}, null, 2)}
+              </pre>
+              {result != null && (
+                <>
+                  <span className="caption">result</span>
+                  <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontFamily: 'inherit' }}>
+                    {result}
+                  </pre>
+                </>
+              )}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
 }
 
-// The full messages window sent to the agent — one block per turn.
-function fmtMessages(messages) {
-  return messages
-    .map((m) => {
-      const body = typeof m.content === 'string'
-        ? m.content
-        : JSON.stringify(m.content);
-      return `[${m.role}] ${body}`;
-    })
-    .join('\n\n');
+function FilterChip({ active, onClick, children }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        fontSize: 10, letterSpacing: '0.08em', textTransform: 'uppercase',
+        padding: '3px 8px', cursor: 'pointer',
+        border: '1px solid var(--separator-strong)',
+        background: active ? 'var(--accent)' : 'transparent',
+        color: active ? 'var(--bg)' : 'var(--muted)',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Full-width LLM recent-calls browser: kind-filter chips, per-call collapse,
+// and per-field collapsible sections so each call can be drilled into cleanly.
+function LlmCalls({ llm }) {
+  const calls = llm?.recentCalls || [];
+  const [filter, setFilter] = useState('all');
+  const kinds = Array.from(new Set(calls.map(c => c.kind).filter(Boolean)));
+  const shown = filter === 'all' ? calls : calls.filter(c => c.kind === filter);
+  return (
+    <Card
+      title="LLM recent calls"
+      sub={`${calls.length} calls · ${llm?.provider || '—'} / ${llm?.activeModel || '—'}`}
+      right={
+        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          <FilterChip active={filter === 'all'} onClick={() => setFilter('all')}>
+            all {calls.length}
+          </FilterChip>
+          {kinds.map(k => (
+            <FilterChip key={k} active={filter === k} onClick={() => setFilter(k)}>
+              {k} {calls.filter(c => c.kind === k).length}
+            </FilterChip>
+          ))}
+        </div>
+      }
+    >
+      <div style={{ display: 'grid', gap: 6, maxHeight: 600, overflowY: 'auto' }}>
+        {shown.length === 0 && (
+          <span className="field-hint" style={{ fontStyle: 'italic' }}>
+            {calls.length === 0 ? 'no calls yet' : 'no calls match this filter'}
+          </span>
+        )}
+        {shown.map((c, i) => (
+          <details key={i} style={{
+            border: '1px solid var(--separator-strong)',
+            background: i === 0 && filter === 'all' ? 'var(--ink-softer)' : 'transparent',
+          }}>
+            <summary style={{
+              display: 'grid',
+              gridTemplateColumns: 'auto 1fr auto auto auto',
+              gap: 10, padding: '8px 10px', alignItems: 'center', cursor: 'pointer',
+            }}>
+              <span style={{ color: c.ok ? 'var(--accent)' : 'var(--danger)', fontWeight: 700 }}>
+                {c.ok ? '✓' : '✗'}
+              </span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>{c.kind}</span>
+              <span className="caption" style={{ fontSize: 10 }}>
+                {c.toolCalls?.length ? `🔧 ${c.toolCalls.length}` : ''}
+                {c.steps != null ? `${c.toolCalls?.length ? ' · ' : ''}${c.steps} steps` : ''}
+              </span>
+              <span className="mono-num" style={{ fontSize: 11, color: 'var(--muted)' }}>{c.ms}ms</span>
+              <span className="mono-num" style={{ fontSize: 10, color: 'var(--muted)' }}>
+                {c.t ? new Date(c.t).toLocaleTimeString('en-GB', { hour12: false }) : '—'}
+              </span>
+            </summary>
+            <div style={{ padding: '4px 10px 10px', display: 'grid', gap: 4 }}>
+              <div className="caption" style={{ fontSize: 9 }}>
+                {c.model || '—'}{c.via ? ` · ${c.via}` : ''}
+              </div>
+              {c.error && (
+                <CallSection label="error" tone="err" preview={oneLine(c.error)}>
+                  {c.error}
+                </CallSection>
+              )}
+              {c.user && (
+                <CallSection label="user" preview={oneLine(c.user)}>{c.user}</CallSection>
+              )}
+              {(c.system || c.systemPreview) && (
+                <CallSection label="system" preview={oneLine(c.system || c.systemPreview)}>
+                  {c.system || `${c.systemPreview}…`}
+                </CallSection>
+              )}
+              {Array.isArray(c.messages) && c.messages.length > 0 && (
+                <CallSection
+                  label="messages"
+                  count={c.messages.length}
+                  preview={oneLine(c.messages[c.messages.length - 1]?.content)}
+                >
+                  <MessageList messages={c.messages} />
+                </CallSection>
+              )}
+              {Array.isArray(c.toolCalls) && c.toolCalls.length > 0 && (
+                <CallSection
+                  label="tools"
+                  count={c.toolCalls.length}
+                  preview={c.toolCalls.map(t => t.name).join(' → ')}
+                >
+                  <ToolList calls={c.toolCalls} />
+                </CallSection>
+              )}
+              {c.response && (
+                <CallSection label="response" preview={oneLine(c.response)}>
+                  {c.response}
+                </CallSection>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 function fmtListeners(icecast) {
