@@ -61,9 +61,12 @@ router.get('/debug', requireAdmin, async (req, res) => {
     out.icecast = { error: err.message };
   }
 
-  // 4. Liquidsoap log tail
+  // 4. Liquidsoap log tail — Liquidsoap writes radio.log into the shared
+  // state dir's logs/ subfolder (see radio.liq + the liquidsoap volume
+  // mount), which the controller sees via the /var/sub-wave state mount.
+  // Reading it here means no extra controller-side log mount is needed.
   try {
-    const log = await readFile('/var/log/liquidsoap/radio.log', 'utf8');
+    const log = await readFile('/var/sub-wave/logs/radio.log', 'utf8');
     out.liquidsoapLog = log.split('\n').slice(-100).join('\n');
   } catch (err) {
     out.liquidsoapLog = `error: ${err.message}`;

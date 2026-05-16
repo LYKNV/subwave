@@ -74,4 +74,3 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ../state:/var/sub-wave
-      - ../state/logs:/var/log/liquidsoap:ro

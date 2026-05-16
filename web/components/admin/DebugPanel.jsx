@@ -206,7 +206,12 @@ export default function DebugPanel() {
               <FilesTable files={data.stateFiles} />
             </Card>
 
-            <Card title="DJ voice WAVs" sub={`${data.voiceFiles?.length ?? 0} files`} bodyStyle={{ height: 240, overflowY: 'auto' }}>
+            <Card
+              title="DJ voice WAVs"
+              sub={`${data.voiceFiles?.length ?? 0} files`}
+              style={{ display: 'flex', flexDirection: 'column' }}
+              bodyStyle={{ flex: 1, minHeight: 240, overflowY: 'auto' }}
+            >
               <FilesTable files={data.voiceFiles} />
             </Card>
 
