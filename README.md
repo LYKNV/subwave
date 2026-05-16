@@ -173,15 +173,15 @@ sub-wave/
 │   ├── setup.mjs              # Interactive setup wizard (@clack/prompts)
 │   ├── setup.sh               # Idempotent, no-sudo: state dirs, .env, emergency.mp3
 │   ├── generate-jingles.sh    # Render default station idents via Piper
-│   ├── generate-bed.sh        # Render warm pink-noise studio bed loop
 │   ├── health-check.sh        # On-air probe
 │   └── update.sh              # Prod: git pull + rebuild + rolling recreate
+├── sounds/                    # Version-controlled audio, mounted read-only at /sounds
+│   ├── emergency.mp3          # Dead-air safety net
+│   └── bed.mp3                # Continuous low-level studio bed
 └── state/                     # Bind-mounted shared volume
     ├── settings.json          # Persona roster, shows, skills, mixer, TTS routing
     ├── auto.m3u               # Fallback playlist, refreshed every 60 min by default
     ├── jingles.m3u + jingles/ # Pre-recorded TTS stingers
-    ├── emergency.mp3          # Pink-noise safety net
-    ├── bed.mp3                # Continuous low-level studio bed (optional)
     ├── now-playing.json       # Written by Liquidsoap on every track change
     ├── moods.json             # LLM-tagged library (after running `npm run tag`)
     ├── liquidsoap_*.txt       # Tiny settings files Liquidsoap re-reads on start

@@ -254,10 +254,10 @@ intro = mic_chain(intro_queue)
 # bed along with the music when the DJ talks — otherwise the bed stays loud
 # under the voice and competes with it. Tweak the bed weight if it's too
 # present (lower) or inaudible under music (higher).
-# Replace state/bed.mp3 with any ambient loop — scripts/generate-bed.sh
-# renders a default warm pink-noise hum.
+# Replace sounds/bed.mp3 with any ambient loop — the repo ships one, and
+# scripts/setup.sh renders a warm pink-noise fallback if it's ever missing.
 
-bed_path = "/var/sub-wave/bed.mp3"
+bed_path = "/sounds/bed.mp3"
 
 music_bus =
   if file.exists(bed_path) then
@@ -269,7 +269,7 @@ music_bus =
       [music, bed]
     )
   else
-    log("No bed.mp3 — skipping studio bed (run scripts/generate-bed.sh)")
+    log("No bed.mp3 — skipping studio bed (expected at /sounds/bed.mp3)")
     music
   end
 
@@ -336,7 +336,7 @@ radio = rotate(
 # ---------------------------------------------------------------------------
 
 # If the source dies, play a static "technical difficulties" loop
-emergency = single("/var/sub-wave/emergency.mp3")
+emergency = single("/sounds/emergency.mp3")
 radio = fallback(track_sensitive=false, [radio, emergency])
 
 # Blank detection — skip if more than 5s of silence

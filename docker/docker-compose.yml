@@ -46,6 +46,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ../liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ../sounds:/sounds:ro
       - ../state:/var/sub-wave
       - ../state/logs:/var/log/liquidsoap
     command: liquidsoap /etc/liquidsoap/radio.liq

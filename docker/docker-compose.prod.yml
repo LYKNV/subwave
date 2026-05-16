@@ -68,6 +68,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ../liquidsoap/radio.liq:/etc/liquidsoap/radio.liq:ro
+      - ../sounds:/sounds:ro
       - *state-mount
       - ${STATE_DIR:-../state}/logs:/var/log/liquidsoap
     command: liquidsoap /etc/liquidsoap/radio.liq
