@@ -40,8 +40,10 @@ export default {
   cooldownMs: 60 * 60 * 1000,
 
   // Env key this skill needs. `ready()` is surfaced in the skill catalogue so
-  // the admin UI can warn when the key is missing.
+  // the admin UI can warn when the key is missing. `keyUrl` lets the admin UI
+  // link the operator straight to where the key is issued.
   requiresKey: 'SEARCH_API_KEY',
+  keyUrl: 'https://app.tavily.com/home',
   ready() { return !!config.search.apiKey; },
 
   async fetchData() {

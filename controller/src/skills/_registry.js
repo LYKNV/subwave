@@ -61,6 +61,8 @@ export function skillCatalog() {
     // `requiresKey` names that key so the admin UI can tell the operator.
     ready: typeof s.ready === 'function' ? !!s.ready() : true,
     requiresKey: s.requiresKey || null,
+    // Where the operator obtains `requiresKey`, if the skill names a source.
+    keyUrl: s.keyUrl || null,
   }));
 }
 

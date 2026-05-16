@@ -22,6 +22,32 @@ function cooldownLabel(ms) {
   return `${h} h cooldown`;
 }
 
+// Styling for an inline "get your API key here" link.
+const keyLinkStyle = {
+  color: 'var(--accent)',
+  fontWeight: 700,
+  textDecoration: 'underline',
+  textUnderlineOffset: 2,
+  textDecorationThickness: 1.5,
+};
+
+// Renders a skill description, turning the "<Provider> API key" phrase into a
+// link to where that key is issued (skill.keyUrl). Plain text when no keyUrl.
+function SkillDescription({ text, keyUrl }) {
+  const desc = text || 'No description.';
+  const m = keyUrl ? desc.match(/[A-Z][\w-]* API key/) : null;
+  if (!m) return desc;
+  return (
+    <>
+      {desc.slice(0, m.index)}
+      <a href={keyUrl} target="_blank" rel="noreferrer" style={keyLinkStyle}>
+        {m[0]}
+      </a>
+      {desc.slice(m.index + m[0].length)}
+    </>
+  );
+}
+
 export default function SkillsPanel() {
   const { adminFetch, needsAuth, hydrated } = useAdminAuth();
   const [skills, setSkills] = useState(null);
@@ -143,13 +169,21 @@ export default function SkillsPanel() {
                 This skill needs the <code>{s.requiresKey || 'required API key'}</code> environment
                 variable set in <code>controller/.env</code>. Until then it stays inert and never
                 fires autonomously — even when enabled.
+                {s.keyUrl && (
+                  <>
+                    {' '}
+                    <a href={s.keyUrl} target="_blank" rel="noreferrer" style={keyLinkStyle}>
+                      Get a key here
+                    </a>.
+                  </>
+                )}
               </V3Alert>
             </div>
           )}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 16, alignItems: 'center' }}>
             <div>
               <div style={{ fontSize: 12, color: 'var(--muted)', lineHeight: 1.6 }}>
-                {s.description || 'No description.'}
+                <SkillDescription text={s.description} keyUrl={s.keyUrl} />
               </div>
               <div style={{ marginTop: 8, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                 <Pill style={{ fontSize: 8 }}>{cooldownLabel(s.cooldownMs)}</Pill>
