@@ -300,7 +300,9 @@ music_bus =
 # Heavy duck for request intros / station IDs / hourly / weather.
 # duration = fade time into/out of the duck. p is a getter (curly braces).
 ducked = smooth_add(
-  duration=0.5,
+  duration=0.8,     # gentle fade; the controller prepends ~0.8s of silent
+                    # lead-in to voice WAVs so this dip completes before the
+                    # DJ actually starts talking, and ramps back up after.
   p={0.15},         # music drops to 15% (~-16 dB) while voice plays
   normal=music_bus,
   special=voice
@@ -309,7 +311,7 @@ ducked = smooth_add(
 # Light duck on top for talk-over links — leaves the song you just queued
 # audible under the DJ's voice.
 radio = smooth_add(
-  duration=0.5,
+  duration=0.8,     # see note on the heavy-duck layer above — same lead-in
   p={0.30},         # music drops to 30% (~-10 dB) while intro plays
   normal=ducked,
   special=intro

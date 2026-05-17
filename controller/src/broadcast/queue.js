@@ -7,6 +7,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import * as subsonic from '../music/subsonic.js';
 import { speak } from '../audio/tts.js';
+import { padWavLeadIn } from '../audio/wav.js';
 import * as djAgent from './dj-agent.js';
 import * as session from './session.js';
 import { getFullContext } from '../context.js';
@@ -198,6 +199,7 @@ class Queue {
         if (item.introScript) {
           try {
             const wavPath = await speak(item.introScript, { kind: 'dj-speak' });
+            await padLeadIn(wavPath);
             await writeFile(config.liquidsoap.sayFile, wavPath);
             this.log('dj-speak', item.introScript);
             await sleep(250);
@@ -232,6 +234,7 @@ class Queue {
     if (!text || !text.trim()) return;
     try {
       const wavPath = await speak(text, { kind });
+      await padLeadIn(wavPath);
       const targetFile = kind === 'link'
         ? config.liquidsoap.introFile
         : config.liquidsoap.sayFile;
@@ -405,6 +408,17 @@ class Queue {
 
 function sleep(ms) {
   return new Promise(r => setTimeout(r, ms));
+}
+
+// Prepend the silent lead-in so the music ducks before the DJ speaks.
+// Defensive: a padding failure must never stop a segment from airing —
+// worst case the voice plays without the early dip.
+async function padLeadIn(wavPath) {
+  try {
+    await padWavLeadIn(wavPath, config.voice.leadInMs);
+  } catch (err) {
+    console.error(`[queue] WAV lead-in pad failed: ${err.message}`);
+  }
 }
 
 const VOICE_KINDS = new Set(['dj-speak', 'link', 'station-id', 'hourly-check', 'weather', 'news', 'traffic', 'random-facts', 'web-search']);
