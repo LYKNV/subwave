@@ -81,8 +81,8 @@ export default function TopBar({ tunedIn, context, djName, activeShow, listeners
             title={theme === 'dark' ? 'Light mode' : 'Dark mode'}
           >
             {theme === 'dark'
-              ? <Sun className="w-3.5 h-3.5" />
-              : <Moon className="w-3.5 h-3.5" />}
+              ? <Sun className="w-3.5 h-3.5" aria-hidden="true" />
+              : <Moon className="w-3.5 h-3.5" aria-hidden="true" />}
           </button>
         )}
       </div>
