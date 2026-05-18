@@ -101,6 +101,15 @@ export default function Faq() {
           &ldquo;something&rsquo;s broken&rdquo; into a specific, visible cause. More on it
           in <Link href="/manual/admin" className="bs-link">Admin &amp; Settings</Link>.
         </p>
+        <p>
+          For a deeper look there is also <strong>subwave-log-analysis</strong>, a bundled
+          skill used through Claude Code. Where the Debug page shows the live moment, this
+          reads the station&rsquo;s full event log over time and reports back on how it
+          has been behaving — how often it calls the music library, why the picker keeps
+          favouring certain artists, whether the library pool is too narrow, and any
+          runtime anomalies. It is the tool for &ldquo;the station works, but something
+          feels off&rdquo; rather than an outright break.
+        </p>
       </section>
     </ManualPage>
   );
