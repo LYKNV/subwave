@@ -218,7 +218,8 @@ export async function agenticTick(ctx) {
   tickBusy = true;
   try {
     const tools = buildSegmentTools(ctx, segmentState, caps);
-    const sfxCatalog = await sfx.catalog();
+    // Empty catalogue when SFX are disabled — the agent is never offered effects.
+    const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
     const { object } = await djAgent({
       system: directorSystem(persona, caps, freq, sfxCatalog),
       messages: [{ role: 'user', content: buildSituation(ctx) }],
@@ -298,7 +299,8 @@ export async function runCapability(which, ctx) {
 
   const persona = settings.getEffectivePersona(new Date());
   const tools = buildSegmentTools(ctx, segmentState, [cap]);
-  const sfxCatalog = await sfx.catalog();
+  // Empty catalogue when SFX are disabled — the agent is never offered effects.
+  const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
   const { object } = await djAgent({
     system: forcedSystem(persona, cap, sfxCatalog),
     messages: [{ role: 'user', content: buildSituation(ctx, { forced: true }) }],

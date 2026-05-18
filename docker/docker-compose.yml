@@ -69,6 +69,9 @@ services:
       # derives every state file path from this; native dev (npm run dev)
       # has no STATE_DIR and falls back to the repo-local state/ dir.
       - STATE_DIR=/var/sub-wave
+      # In-container path of the repo-bundled static audio mount below.
+      # ensureDefaults() copies the default sound effects from here.
+      - SOUNDS_DIR=/sounds
     depends_on:
       - liquidsoap
     ports:
@@ -79,3 +82,4 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - ../state:/var/sub-wave
+      - ../sounds:/sounds:ro

@@ -11,6 +11,13 @@ import { dirname, resolve } from 'node:path';
 export const STATE_DIR = process.env.STATE_DIR
   || resolve(dirname(fileURLToPath(import.meta.url)), '../../state');
 
+// Repo-bundled static audio (studio bed, emergency clip, default sound
+// effects). In Docker the compose files mount <repo>/sounds → /sounds and
+// pass SOUNDS_DIR=/sounds. Native dev falls back to the repo-local sounds/
+// dir resolved relative to this file (controller/src/config.js → ../../sounds).
+export const SOUNDS_DIR = process.env.SOUNDS_DIR
+  || resolve(dirname(fileURLToPath(import.meta.url)), '../../sounds');
+
 // TTS speech-rate multiplier: 1.0 = normal pace, lower = slower, higher =
 // faster. TTS_SPEED is the cross-engine default; each engine can be tuned
 // independently with its own var (PIPER_SPEED / KOKORO_SPEED / CLOUD_TTS_SPEED).
@@ -22,6 +29,7 @@ export const config = {
   // Absolute path to the shared state dir — modules build their own file
   // paths from this rather than hardcoding /var/sub-wave.
   stateDir: STATE_DIR,
+  soundsDir: SOUNDS_DIR,
   navidrome: {
     url: process.env.NAVIDROME_URL || 'http://navidrome:4533',
     user: process.env.NAVIDROME_USER || '',

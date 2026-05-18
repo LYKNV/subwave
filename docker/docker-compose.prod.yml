@@ -99,12 +99,16 @@ services:
       # every state file path from this. Note this is distinct from the
       # host-side STATE_DIR used to interpolate the mount source above.
       - STATE_DIR=/var/sub-wave
+      # In-container path of the repo-bundled static audio mount below.
+      # ensureDefaults() copies the default sound effects from here.
+      - SOUNDS_DIR=/sounds
     env_file:
       - ../controller/.env
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - *state-mount
+      - ../sounds:/sounds:ro
 
   # -------------------------------------------------------------------------
   # WEB — Next.js listener UI

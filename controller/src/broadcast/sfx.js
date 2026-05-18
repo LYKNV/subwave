@@ -9,12 +9,15 @@
 // plays an effect on demand (controller writes its path to sfx.txt), it does
 // not rotate them on a playlist.
 
-import { readFile, writeFile, unlink, mkdir, stat } from 'node:fs/promises';
-import { STATE_DIR } from '../config.js';
+import { readFile, writeFile, unlink, mkdir, stat, copyFile } from 'node:fs/promises';
+import { STATE_DIR, SOUNDS_DIR } from '../config.js';
 import { generateSfx, isConfigured } from '../audio/sfx-gen.js';
 
 const DIR = `${STATE_DIR}/sfx`;
 const META = `${STATE_DIR}/sfx.json`;
+// Repo-bundled default effects, rendered once and committed (sounds/sfx/).
+// ensureDefaults() copies these in so a fresh boot needs no ElevenLabs key.
+const BUNDLE_DIR = `${SOUNDS_DIR}/sfx`;
 
 // Built-in starter set — rendered on first boot when ElevenLabs is configured.
 const DEFAULT_SFX = [
@@ -155,24 +158,55 @@ export async function remove(name) {
   return { ok: true };
 }
 
-// Called from server.js startup. Renders any missing built-in effects when
-// ElevenLabs is configured; a no-op when it isn't — the library simply stays
-// empty and the feature is invisible to the agent. Idempotent.
-export async function ensureDefaults() {
-  if (!isConfigured()) {
-    console.log('[sfx] ElevenLabs not configured — skipping default sound effects');
-    return;
+// Install one built-in effect into state/sfx/ + the sidecar. Prefers the
+// repo-bundled audio (sounds/sfx/<name>.mp3) — a plain copy, no API call;
+// falls back to ElevenLabs generation only when no bundled file exists.
+// Returns true if the effect ended up installed.
+async function installDefault(def, meta) {
+  const file = `${def.name}.mp3`;
+  const bundled = `${BUNDLE_DIR}/${file}`;
+
+  if (await statOrNull(bundled)) {
+    await copyFile(bundled, `${DIR}/${file}`);
+    console.log(`[sfx] installed bundled default effect → ${def.name}`);
+  } else if (isConfigured()) {
+    await generateSfx(def.prompt, { durationSec: def.durationSec, outPath: `${DIR}/${file}` });
+    console.log(`[sfx] generated default effect → ${def.name}`);
+  } else {
+    return false;
   }
+
+  meta.items[def.name] = {
+    name: def.name,
+    description: (def.description || '').trim(),
+    prompt: (def.prompt || '').trim(),
+    durationSec: Number(def.durationSec) || null,
+    file,
+    builtin: true,
+    createdAt: new Date().toISOString(),
+  };
+  return true;
+}
+
+// Called from server.js startup. Installs any missing built-in effects,
+// preferring the repo-bundled audio so a fresh boot needs no ElevenLabs key.
+// When neither a bundled file nor a key is available the library stays empty
+// and the feature is invisible to the agent. Idempotent.
+export async function ensureDefaults() {
   await mkdir(DIR, { recursive: true });
   const meta = await loadMeta();
+  let installed = 0;
   for (const def of DEFAULT_SFX) {
     const existing = meta.items[def.name];
     if (existing && (await statOrNull(`${DIR}/${existing.file}`))) continue;
     try {
-      await create({ ...def, builtin: true });
-      console.log(`[sfx] generated default effect → ${def.name}`);
+      if (await installDefault(def, meta)) installed++;
     } catch (err) {
-      console.error(`[sfx] default "${def.name}" generation failed:`, err.message);
+      console.error(`[sfx] default "${def.name}" install failed:`, err.message);
     }
+  }
+  if (installed) await saveMeta(meta);
+  if (!Object.keys(meta.items).length) {
+    console.log('[sfx] no default sound effects available (no bundled files, no ElevenLabs key)');
   }
 }

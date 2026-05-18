@@ -49,6 +49,7 @@ router.get('/settings', requireAdmin, async (req, res) => {
         schedule: s.schedule,
         tts: s.tts,
         llm: s.llm,
+        sfx: s.sfx,
       },
       defaults: {
         // The built-in prompt template — the UI shows this when djPrompt is "".

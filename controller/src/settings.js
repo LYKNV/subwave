@@ -171,6 +171,12 @@ const DEFAULTS = {
   skills: {
     enabled: {},
   },
+  // Sound-effects library. When disabled, the segment-director agent is never
+  // shown the effect catalogue, so it stops garnishing spoken breaks with
+  // stingers. The library files themselves stay on disk either way.
+  sfx: {
+    enabled: true,
+  },
 };
 
 const BOUNDS = {
@@ -364,6 +370,11 @@ export async function load() {
       enabled: Object.fromEntries(
         Object.entries(stored.skills?.enabled || {}).filter(([, v]) => typeof v === 'boolean')
       ),
+    },
+    sfx: {
+      enabled: typeof stored.sfx?.enabled === 'boolean'
+        ? stored.sfx.enabled
+        : DEFAULTS.sfx.enabled,
     },
   };
   return cache;
@@ -654,6 +665,12 @@ export async function update(patch) {
         }
         next.skills.enabled[name] = on;
       }
+    }
+  }
+  if ('sfx' in patch) {
+    const sx = patch.sfx || {};
+    if (sx.enabled !== undefined) {
+      next.sfx.enabled = !!sx.enabled;
     }
   }
 
