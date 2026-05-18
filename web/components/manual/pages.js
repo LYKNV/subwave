@@ -8,5 +8,6 @@ export const MANUAL_PAGES = [
   { href: '/manual/shortcuts', label: 'Keyboard Shortcuts' },
   { href: '/manual/dj', label: 'How the DJ Works' },
   { href: '/manual/admin', label: 'Admin & Settings' },
+  { href: '/manual/llm', label: 'Models & Tokens' },
   { href: '/manual/mcp', label: 'Agent Access' },
 ];

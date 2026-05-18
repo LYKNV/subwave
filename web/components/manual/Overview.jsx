@@ -28,6 +28,11 @@ const GUIDE = [
     blurb: 'For the operator — signing in, tuning the DJ, scheduling shows, and managing jingles.',
   },
   {
+    href: '/manual/llm',
+    label: 'Models & Tokens',
+    blurb: 'Tune the station for a small local model or a large hosted one — trading richness against token cost.',
+  },
+  {
     href: '/manual/mcp',
     label: 'Agent Access',
     blurb: 'Let an AI agent read the station and request tracks over the MCP server.',
