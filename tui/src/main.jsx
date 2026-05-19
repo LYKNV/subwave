@@ -30,25 +30,16 @@ const cli = meow(`
 
 const config = resolveConfig(cli.flags);
 
-// Hide the cursor so it doesn't strobe over the UI. Ink renders inline (no
-// alt screen) — putting the TUI in an alt screen scrambled the layout in
-// testing, so we live with inline rendering and instead minimise redraws by
-// removing the per-second elapsed tick (see useStationFeed / NowPlaying).
-const HIDE_CURSOR = '\x1b[?25l';
-const SHOW_CURSOR = '\x1b[?25h';
+// Full-screen TUI: ask Ink for the alternate screen buffer and incremental
+// rendering. Incremental rendering only repaints lines that changed, which
+// is what keeps the animated spectrum from flickering the whole frame on
+// every tick. maxFps caps the update rate so a 80 ms animation interval
+// doesn't pile up renders. Cursor is hidden via Ink's own machinery (Ink 7
+// uses cli-cursor) — no manual ANSI escape juggling needed.
+const ink = render(<App config={config} />, {
+  alternateScreen: true,
+  incrementalRendering: true,
+  maxFps: 30,
+});
 
-let restored = false;
-function restoreCursor() {
-  if (restored) return;
-  restored = true;
-  process.stdout.write(SHOW_CURSOR);
-}
-
-process.stdout.write(HIDE_CURSOR);
-process.on('exit', restoreCursor);
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
-  process.on(sig, () => { restoreCursor(); process.exit(0); });
-}
-
-const ink = render(<App config={config} />);
-ink.waitUntilExit().finally(restoreCursor);
+await ink.waitUntilExit();

@@ -1,28 +1,81 @@
 import React from 'react';
 import { Box, Text } from 'ink';
+import { c, glyph } from '../theme.js';
+import { fmtClock } from '../lib/format.js';
 
-// Queue + history, from GET /state. upcoming/history items are flat
-// { title, artist, requestedBy } records.
-export default function Timeline({ upcoming = [], history = [] }) {
-  if (!upcoming.length && !history.length) {
-    return <Text dimColor>Nothing played yet — the DJ is on autopilot. Request a track to jump the line.</Text>;
+// Winamp Playlist Editor — up-next, the now-playing carat row in the
+// middle, then recently-played below a separator. /state's upcoming and
+// history lists both *exclude* the current track, so we splice a
+// synthetic carat row from `nowPlaying` between them.
+//
+// Track numbers in cyan; requestedBy in Winamp-purple (accent magenta).
+// Durations are only shown where the data exists — /state doesn't carry
+// durations for upcoming/history items, only for nowPlaying.
+export default function Timeline({ upcoming = [], history = [], nowPlaying }) {
+  const empty = !upcoming.length && !history.length && !nowPlaying;
+  if (empty) {
+    return (
+      <Box flexDirection="column" alignItems="center" paddingY={1}>
+        <Text color={c.title}>* * *  P R E S S   3   T O   R E Q U E S T  * * *</Text>
+        <Text dimColor>nothing played yet — the DJ is on autopilot</Text>
+      </Box>
+    );
   }
+  const up = upcoming.slice(0, 4);
+  const hist = history.slice(0, 4);
+  // Carat row index = number of upcoming rows above it.
+  let idx = 0;
   return (
     <Box flexDirection="column">
-      {upcoming.length > 0 && <Text dimColor>UP NEXT</Text>}
-      {upcoming.slice(0, 4).map((t, i) => (
-        <Text key={`u${i}`}>
-          <Text color="cyan">{String(i + 1).padStart(2, '0')} </Text>
-          {t.title} <Text dimColor>— {t.artist}</Text>
-          {t.requestedBy ? <Text color="yellow"> ✦ {t.requestedBy}</Text> : null}
-        </Text>
-      ))}
-      {history.length > 0 && (
-        <Box marginTop={upcoming.length ? 1 : 0}><Text dimColor>RECENTLY PLAYED</Text></Box>
+      {up.length > 0 && <Text color={c.lcdDim}>UP NEXT</Text>}
+      {up.map((t, i) => {
+        idx += 1;
+        return <Row key={`u${i}`} n={idx} track={t} />;
+      })}
+
+      {nowPlaying ? (
+        <>
+          {up.length > 0 ? null : <Text color={c.lcdDim}>NOW PLAYING</Text>}
+          <Row
+            n={idx + 1}
+            track={nowPlaying}
+            carat
+            duration={nowPlaying.duration ? fmtClock(nowPlaying.duration) : null}
+          />
+        </>
+      ) : null}
+
+      {hist.length > 0 && (
+        <Box marginTop={up.length || nowPlaying ? 1 : 0}>
+          <Text color={c.lcdDim}>──── RECENTLY PLAYED ────</Text>
+        </Box>
       )}
-      {history.slice(0, 4).map((t, i) => (
-        <Text key={`h${i}`} dimColor>·  {t.title} — {t.artist}</Text>
-      ))}
+      {hist.map((t, i) => <HistRow key={`h${i}`} track={t} />)}
     </Box>
+  );
+}
+
+function Row({ n, track, carat = false, duration = null }) {
+  return (
+    <Text>
+      <Text color={carat ? c.title : c.chrome}>{carat ? `${glyph.carat} ` : '  '}</Text>
+      <Text color={c.bitrate}>{String(n).padStart(2, '0')}. </Text>
+      <Text bold={carat}>{track.title || 'Unknown'}</Text>
+      <Text dimColor> — {track.artist || ''}</Text>
+      {carat ? <Text color={c.lcdDim}>  {glyph.shimL} now {glyph.shimR}</Text> : null}
+      {track.requestedBy
+        ? <Text color={c.accent}>  {glyph.request} {track.requestedBy}</Text>
+        : null}
+      {duration ? <Text color={c.lcdDim}>  {duration}</Text> : null}
+    </Text>
+  );
+}
+
+function HistRow({ track }) {
+  return (
+    <Text dimColor>
+      ·  {track.title} — {track.artist}
+      {track.requestedBy ? `  ✦ ${track.requestedBy}` : ''}
+    </Text>
   );
 }

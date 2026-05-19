@@ -57,3 +57,7 @@ In the request panel, `Enter` advances fields and sends; `Esc` closes it.
   terminal image protocols are inconsistent. A progress bar stands in.
 - The JSX modules under `src/` are transformed at import time by the `tsx`
   loader, so there is no build step.
+- The classic-Winamp visuals are intentionally **static** (no animation
+  tick) to avoid frame-flash in Ink — the marquee and faux spectrum
+  refresh on the 5s station-feed poll, in lockstep with the elapsed
+  clock. The Winamp palette + glyphs live in `src/theme.js`.

@@ -1,13 +1,15 @@
 import React, { useState } from 'react';
 import { Box, Text } from 'ink';
 import TextInput from 'ink-text-input';
+import { c, glyph } from '../theme.js';
 
-// Listener request form. Submits to POST /request, then polls GET /request/:id
-// for the booth's outcome — same flow as the web RequestDrawer.
+// Listener request form, dressed as a Winamp "Add URL" dialog. Submits to
+// POST /request, then polls GET /request/:id for the booth's outcome —
+// same flow as the web RequestDrawer.
 //
 // Field order: name → request text → submit on Enter. While this panel is
-// mounted, App suppresses its own shortcuts (except Esc), so the TextInputs
-// own the keyboard.
+// mounted, App suppresses its own shortcuts (except Esc), so the
+// TextInputs own the keyboard.
 export default function RequestForm({ apiUrl }) {
   const [field, setField] = useState('name');   // name | text | sent
   const [name, setName] = useState('');
@@ -61,13 +63,15 @@ export default function RequestForm({ apiUrl }) {
   };
 
   const statusColor = status
-    ? { ok: 'green', error: 'red', pending: 'yellow' }[status.kind]
+    ? { ok: c.ok, error: c.danger, pending: c.warn }[status.kind]
     : undefined;
+  const focusTextField = field === 'text';
 
   return (
     <Box flexDirection="column">
       <Box>
-        <Text dimColor>name  </Text>
+        <Text color={c.chrome}>CALLSIGN  </Text>
+        <Text color={c.chrome}>[ </Text>
         <TextInput
           value={name}
           onChange={setName}
@@ -75,21 +79,32 @@ export default function RequestForm({ apiUrl }) {
           placeholder="anon"
           onSubmit={() => setField('text')}
         />
+        <Text color={c.chrome}> ]</Text>
       </Box>
       <Box>
-        <Text dimColor>track </Text>
+        <Text color={c.chrome}>URL/PATH  </Text>
+        <Text color={c.chrome}>[ </Text>
         <TextInput
           value={text}
           onChange={setText}
-          focus={field === 'text'}
+          focus={focusTextField}
           placeholder="an artist, a song, or a vibe…"
           onSubmit={submit}
         />
+        <Text color={c.chrome}> ]</Text>
+      </Box>
+      <Box marginTop={1}>
+        <Text color={c.chrome}>[ </Text>
+        <Text color={focusTextField ? c.title : c.chrome} bold={focusTextField}>OK</Text>
+        <Text color={c.chrome}> ]   [ </Text>
+        <Text color={c.chrome}>CANCEL</Text>
+        <Text color={c.chrome}> ]</Text>
+        <Text color={c.chrome}>     {glyph.shimL} Enter sends · Esc cancels {glyph.shimR}</Text>
       </Box>
       <Box marginTop={1}>
         {status
           ? <Text color={statusColor}>{status.message}</Text>
-          : <Text dimColor>Enter moves to the next field; Enter on “track” sends. Esc closes.</Text>}
+          : <Text dimColor>Enter advances; Enter on URL/PATH sends.</Text>}
       </Box>
     </Box>
   );
