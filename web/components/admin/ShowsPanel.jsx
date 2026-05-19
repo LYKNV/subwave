@@ -39,6 +39,33 @@ const SHOW_COLORS = [
   '#a83a6b', '#4a6b1f', '#8a6a1f', '#3a3a8a', '#7a2f5a', '#2f7a3a',
 ];
 
+function NowCard({ label, accent, slotHour, show, color, personaLabel }) {
+  return (
+    <div style={{ padding: 14, borderLeft: '1px solid var(--separator-strong)', display: 'grid', gap: 6 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <Eyebrow color={accent ? 'var(--accent)' : 'var(--muted)'}>{label}</Eyebrow>
+        <span className="caption" style={{ marginLeft: 'auto' }}>
+          {String(slotHour).padStart(2, '0')}:00
+        </span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        {show && <span style={{ width: 16, height: 16, background: color, display: 'inline-block', flexShrink: 0 }} />}
+        <span style={{
+          fontSize: 16, fontWeight: 800, letterSpacing: '-0.01em',
+          color: show ? 'var(--ink)' : 'var(--muted)',
+        }}>
+          {show ? show.name : '(no show — autonomous)'}
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--muted)' }}>
+        {show
+          ? <>persona · {personaLabel} · mood · {show.mood}</>
+          : 'station runs on its own picker'}
+      </div>
+    </div>
+  );
+}
+
 function clientMintId() {
   const b = crypto.getRandomValues(new Uint8Array(3));
   return 's_' + [...b].map(x => x.toString(16).padStart(2, '0')).join('');
@@ -327,33 +354,6 @@ export default function ShowsPanel() {
   const afterShow = after.showId ? showById(after.showId) : null;
   const draftValid = draft ? showValid(draft) : false;
 
-  const NowCard = ({ label, accent, slotHour, show, showId }) => {
-    const c = showId ? colorOf(showId) : 'transparent';
-    return (
-      <div style={{ padding: 14, borderLeft: '1px solid var(--separator-strong)', display: 'grid', gap: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <Eyebrow color={accent ? 'var(--accent)' : 'var(--muted)'}>{label}</Eyebrow>
-          <span className="caption" style={{ marginLeft: 'auto' }}>
-            {String(slotHour).padStart(2, '0')}:00
-          </span>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-          {show && <span style={{ width: 16, height: 16, background: c, display: 'inline-block', flexShrink: 0 }} />}
-          <span style={{
-            fontSize: 16, fontWeight: 800, letterSpacing: '-0.01em',
-            color: show ? 'var(--ink)' : 'var(--muted)',
-          }}>
-            {show ? show.name : '(no show — autonomous)'}
-          </span>
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--muted)' }}>
-          {show
-            ? <>persona · {personaName(show.personaId)} · mood · {show.mood}</>
-            : 'station runs on its own picker'}
-        </div>
-      </div>
-    );
-  };
 
   return (
     <div style={{ display: 'grid', gap: 16 }}>
@@ -397,9 +397,14 @@ export default function ShowsPanel() {
           borderBottom: '1px solid var(--separator-strong)',
         }}>
           <NowCard label="On air" accent slotHour={nowHour} show={nowShow}
-            showId={form.schedule[nowDay][nowHour]} />
-          <NowCard label="Up next" slotHour={upNext.hour} show={upNextShow} showId={upNext.showId} />
-          <NowCard label="After that" slotHour={after.hour} show={afterShow} showId={after.showId} />
+            color={colorOf(form.schedule[nowDay][nowHour])}
+            personaLabel={nowShow ? personaName(nowShow.personaId) : ''} />
+          <NowCard label="Up next" slotHour={upNext.hour} show={upNextShow}
+            color={colorOf(upNext.showId)}
+            personaLabel={upNextShow ? personaName(upNextShow.personaId) : ''} />
+          <NowCard label="After that" slotHour={after.hour} show={afterShow}
+            color={colorOf(after.showId)}
+            personaLabel={afterShow ? personaName(afterShow.personaId) : ''} />
         </div>
       </section>
 

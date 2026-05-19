@@ -366,8 +366,11 @@ function SuccessCard({ result }) {
 // "festival", "right now", "random"). Listeners see *why* a suggestion is
 // being offered instead of a flat canned list.
 function SuggestionChips({ nowPlaying, context, onPick }) {
+  // Listing only the fields buildSuggestions actually reads — depending on the
+  // whole nowPlaying/context objects would recompute on every poll cycle.
   const chips = useMemo(
     () => buildSuggestions(nowPlaying, context),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [nowPlaying?.artist, nowPlaying?.title, context?.festival?.name,
      context?.time?.vibe, context?.time?.show, context?.weather?.condition]
   );
