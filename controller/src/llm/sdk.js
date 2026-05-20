@@ -321,17 +321,30 @@ export async function djObject({
 // final object. Throws on failure so the caller can fall back to a stateless
 // path.
 //
-// When a `schema` is provided we use the AI SDK's canonical "done tool" pattern
-// instead of Output.object: a synthetic `done` tool whose inputSchema IS the
-// schema is added alongside the discovery tools, and `toolChoice: 'required'`
-// forces the model to call tools at every step. The agent calls discovery
-// tools to explore, then calls `done(<final answer>)` to terminate — the SDK
-// validates the call's args against the schema and stops the loop (because
-// `done` has no `execute`). This works reliably on Ollama-served models that
-// ignore Output.object's constrained-decoding (their failure mode was emitting
-// bare prose / a bare string / top-level null instead of the wrapping object;
-// see /app/node_modules/ai/docs/03-agents/04-loop-control.mdx "Forced Tool
-// Calling"). It's also compatible with OpenAI / Anthropic / etc.
+// When a `schema` is provided the structured-output strategy is chosen per
+// provider, gated by needsToolCallObject():
+//
+// - Ollama: use the AI SDK's "done tool" pattern (see
+//   /app/node_modules/ai/docs/03-agents/04-loop-control.mdx "Forced Tool
+//   Calling"). A synthetic `done` tool whose inputSchema IS the schema is
+//   added alongside the discovery tools, and `toolChoice: 'required'` forces
+//   the model to call tools every step. The model calls discovery tools to
+//   explore, then calls `done(<final answer>)` to terminate. Required because
+//   Ollama's Output.object path is broken — minimax-m2.7:cloud emits prose,
+//   takes 40-100s per failure (verified empirically).
+//
+// - Everything else (Google, DeepSeek, OpenRouter, OpenAI, Anthropic):
+//   use Output.object natively. These providers honour constrained decoding,
+//   so we don't need the done-tool workaround — and avoiding it removes the
+//   intrinsic "agent did not call done before stopping" failure mode that
+//   the done-tool pattern introduces when the model over-explores.
+//
+// Empirical reliability across 5-10 runs each (with picker-test.mjs):
+//   ollama:minimax-m2.7:cloud    done-tool 10/10  Output.object 0/5
+//   ollama:kimi-k2.6:cloud       done-tool  1/10  Output.object 0/5 (bad model fit)
+//   google:gemini-3.5-flash      Output.object 5/5
+//   deepseek:deepseek-chat       Output.object 5/5
+//   openrouter:anthropic/claude-haiku-4-5  Output.object 5/5
 export async function djAgent({
   system,
   messages,
@@ -362,10 +375,9 @@ export async function djAgent({
       });
       return { object, steps: 0, toolCalls: [] };
     }
-    // Build the tool set with the synthetic `done` tool when schema is set.
-    // `done` carries the schema as its inputSchema, has no `execute`, and the
-    // SDK validates+stops the loop when the model calls it.
-    const useDoneTool = schema != null;
+    // done-tool path on Ollama; native Output.object on everything else. See
+    // the header comment above for the per-provider rationale.
+    const useDoneTool = schema != null && needsToolCallObject();
     const allTools = useDoneTool ? {
       ...tools,
       done: tool({
@@ -402,6 +414,9 @@ export async function djAgent({
       maxOutputTokens,
       ...(useDoneTool ? { toolChoice: 'required' } : {}),
       ...(prepareStep ? { prepareStep } : {}),
+      // Non-Ollama path: native structured-output via Output.object. Ollama
+      // path: schema lives on the `done` tool, so no agent-level output.
+      ...(schema && !useDoneTool ? { output: Output.object({ schema }) } : {}),
     });
     const result = await agent.generate({ messages });
     const steps = result.steps?.length ?? 0;
@@ -413,6 +428,8 @@ export async function djAgent({
       const doneCall = (result.staticToolCalls || []).find(c => c.toolName === 'done');
       if (!doneCall) throw new Error('agent did not call the done tool before stopping');
       object = doneCall.input;
+    } else if (schema) {
+      object = result.output;
     } else {
       object = stripThinking(result.text);
     }

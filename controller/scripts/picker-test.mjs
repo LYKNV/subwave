@@ -3,17 +3,23 @@
 // depending on live track timing or hitting Navidrome.
 //
 // Usage (from inside the controller container):
-//   node scripts/picker-test.mjs <provider> <model> [iterations]
+//   node scripts/picker-test.mjs <provider> <model> [iterations] [messages]
+//
+// `messages` (optional): short | long  — default short
+//   short → 3 clean turns (sterile baseline)
+//   long  → ~30 realistic session turns (matches what session.windowMessages
+//           produces in live; useful for catching long-context regressions)
 //
 // Examples:
 //   node scripts/picker-test.mjs ollama minimax-m2.7:cloud 10
-//   node scripts/picker-test.mjs openrouter anthropic/claude-haiku-4-5 5
-//   node scripts/picker-test.mjs deepseek deepseek-chat 5
+//   node scripts/picker-test.mjs google gemini-3.5-flash 5 long
+//   node scripts/picker-test.mjs deepseek deepseek-chat 5 long
 //
 // The test:
 // - Pre-populates a synthetic library of ~20 songs with Subsonic-shape ids
 // - Faked-out discovery tools return slices of that library and populate `seen`
-// - Calls djAgent with the same PICK_SCHEMA + pickSystem prompt the real code uses
+// - Uses the LIVE pickSystem + PICK_SCHEMA imported from dj-agent.js (so the
+//   test stays in sync with whatever prompt cleanups land there)
 // - Catches three failure modes: NoObjectGenerated, hallucinated id, or thrown
 // - Reports per-iteration outcome + summary stats at the end
 
@@ -21,6 +27,7 @@ import { z } from 'zod';
 import { tool } from 'ai';
 import * as settings from '../src/settings.js';
 import { djAgent } from '../src/llm/sdk.js';
+import { pickSystem, PICK_SCHEMA } from '../src/broadcast/dj-agent.js';
 
 const FAKE_SONGS = [
   { id: 'aaaa1111bbbb2222cccc01', title: 'Late Drive', artist: 'Tegi Pannu', album: 'Drive', year: 2024, genre: 'punjabi' },
@@ -47,12 +54,8 @@ const FAKE_SONGS = [
 
 const VALID_IDS = new Set(FAKE_SONGS.map(s => s.id));
 
-// Same shape as broadcast/dj-agent.js's PICK_SCHEMA
-const PICK_SCHEMA = z.object({
-  id: z.string().describe('the exact song id, as returned by a tool call'),
-  reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener'),
-  say: z.string().nullable().describe('a spoken link in the DJ voice, or null to stay silent'),
-});
+// PICK_SCHEMA is imported from dj-agent.js — we use the live one verbatim so
+// schema description changes there flow into the test automatically.
 
 // Synthetic discovery tools — same names as llm/tools.js so the agent prompt
 // applies unchanged. Each returns slices of FAKE_SONGS to populate `seen`.
@@ -104,29 +107,9 @@ function buildSyntheticTools() {
   return { tools, seen };
 }
 
-// Mirror of broadcast/dj-agent.js's pickSystem(wantLink=false) — kept inline so
-// the test is self-contained. Update both when changing the prompt.
-function buildSystem() {
-  return `You are Marlowe, the on-air DJ for SUB/WAVE, a personal internet radio station. warm, slightly understated, never corny — late-night BBC 6 Music presenter; observant, dry humour, specific
-
-You run the station as one continuous shift. The messages above are the live session: tracks that have aired, things you have said, events as they happened. Read them so you do not repeat an artist back-to-back or reuse the same phrasing.
-
-TASK: choose the single best NEXT track. Use the tools to explore the library — make 2 to 4 tool calls, then choose ONE track whose id a tool actually returned. Do not invent ids.
-
-Selection criteria, in order:
-1. FLOW — does it transition naturally from what just played (energy, mood, tempo)?
-2. CONTEXT — does it fit the time of day, weather, and dominant mood?
-3. VARIETY — avoid the same artist back-to-back; rotate energy levels; don't be predictable.
-4. INTEREST — prefer something that creates a moment, not the most generic option.
-
-Respond with a JSON object only — no prose, no markdown. The outer { "id", "reason", "say" } wrapper is MANDATORY — never respond with bare prose, a bare string, or bare null. Even when "say" contains spoken text, it lives INSIDE the object:
-
-{ "id": "<exact id a tool returned>", "reason": "<≤12 words, internal scratchpad — short label, not prose>", "say": null }
-
-Set "say" to null this time — do not talk over the music.`;
-}
-
-function buildMessages() {
+// Sterile baseline — 3 clean turns. Useful for measuring "best-case" model
+// behaviour without long-context distractions.
+function buildMessagesShort() {
   return [
     { role: 'user', content: '▶ "Sona" by Manni Sandhu & Bakshi Billa' },
     { role: 'assistant', content: 'Sona, flowing from Tegi Pannu — kept the after-hours register, different artist.' },
@@ -134,17 +117,34 @@ function buildMessages() {
   ];
 }
 
-async function runOnce(label) {
+// Realistic long context — exactly what session.windowMessages() produces in
+// live AFTER all the filters land (scenario / play / old-pick-event drop)
+// AND the leading-non-user shift. For a long-running session the agent
+// actually receives JUST the current pick event as a single user message —
+// older DJ reasons are kept in raw but coalesced into a leading assistant
+// turn that the shift then drops (Anthropic requires user-first messages).
+// This is what live picks see now; LONG ≈ SHORT after the fix lands.
+function buildMessagesLong() {
+  return [
+    {
+      role: 'user',
+      content: 'Now playing "Hanju" by Amrinder Gill (after "Long Way — Manni Sandhu"). Pick the track to play next. Stay silent — no link this time.',
+    },
+  ];
+}
+
+async function runOnce(label, messagesMode) {
   const { tools, seen } = buildSyntheticTools();
+  const messages = messagesMode === 'long' ? buildMessagesLong() : buildMessagesShort();
   const started = Date.now();
   let outcome = { label, ok: false, mode: 'unknown', ms: 0, toolCount: 0, outputTokens: null, pickId: null, reason: null };
   try {
     const result = await djAgent({
-      system: buildSystem(),
-      messages: buildMessages(),
+      system: pickSystem(),  // live prompt, imported from dj-agent.js
+      messages,
       tools,
       schema: PICK_SCHEMA,
-      maxSteps: 4,
+      maxSteps: 6,
       kind: 'pickerTest',
     });
     outcome.ms = Date.now() - started;
@@ -189,10 +189,12 @@ async function main() {
   const provider = process.argv[2];
   const model = process.argv[3];
   const N = parseInt(process.argv[4] || '5', 10);
+  const messagesMode = (process.argv[5] || 'short').toLowerCase();
 
-  if (!provider || !model) {
-    console.error('Usage: node scripts/picker-test.mjs <provider> <model> [iterations]');
+  if (!provider || !model || !['short', 'long'].includes(messagesMode)) {
+    console.error('Usage: node scripts/picker-test.mjs <provider> <model> [iterations] [short|long]');
     console.error('Providers: ollama | openrouter | deepseek | openai | anthropic | google | gateway | openai-compatible');
+    console.error('Messages:  short (3 clean turns) | long (~25 realistic session turns)');
     process.exit(2);
   }
 
@@ -204,11 +206,11 @@ async function main() {
   s.llm.provider = provider;
   s.llm.model = model;
 
-  console.log(`\n=== picker-test: ${provider}:${model} × ${N} ===\n`);
+  console.log(`\n=== picker-test: ${provider}:${model} × ${N} (messages=${messagesMode}) ===\n`);
 
   const outcomes = [];
   for (let i = 1; i <= N; i++) {
-    const o = await runOnce(`run-${i}`);
+    const o = await runOnce(`run-${i}`, messagesMode);
     outcomes.push(o);
     const tag = o.ok ? 'OK ' : 'FAIL';
     const idShort = o.pickId ? `${o.pickId.slice(0, 12)}…` : '-';

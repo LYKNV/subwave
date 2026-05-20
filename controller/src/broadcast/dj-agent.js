@@ -21,7 +21,7 @@ import { buildPickerTools } from '../llm/tools.js';
 import { recordPick } from '../llm/log.js';
 import { withTrace } from '../observability/events.js';
 
-const PICK_SCHEMA = z.object({
+export const PICK_SCHEMA = z.object({
   id: z.string().describe('the exact song id returned by one of the discovery tools — never invent or compose ids'),
   reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener; do not justify, just label (e.g. "flow from previous, new artist")'),
   say: z.string().nullable().describe('when the latest event message says to write a spoken link, set this to one or two natural sentences in the DJ voice (back-announce what just played, ease into what is coming, vary your opener); when the event says stay silent, set this to null'),
@@ -42,7 +42,7 @@ const REQUEST_SCHEMA = z.object({
 // competes with the framework's structural signals and derails smaller
 // models. PICKER_CRITERIA stays because it's editorial preference (flow,
 // context, variety, interest) — that's not in any tool or schema.
-function pickSystem() {
+export function pickSystem() {
   return `${settings.agentPersonaPreamble(settings.getEffectivePersona(), { rules: false })}
 
 You run the station as one continuous shift. The messages above are the live session.
