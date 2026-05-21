@@ -31,8 +31,12 @@ const SCRIPT_LENGTHS = [
 const ENGINES = [
   { id: 'piper',  label: 'Piper' },
   { id: 'kokoro', label: 'Kokoro' },
+  { id: 'chatterbox', label: 'Chatterbox' },
   { id: 'cloud',  label: 'Cloud' },
 ];
+// Chatterbox reference voice files are validated against this in audio/chatterbox.ts
+// — basename only, no path separators, .wav extension, conservative chars.
+const CHATTERBOX_VOICE_RE = /^[A-Za-z0-9_.-]{1,80}\.wav$/;
 const NAME_MAX = 40;
 const TAGLINE_MAX = 80;
 const SOUL_MAX = 400;
@@ -42,7 +46,7 @@ const PERSONA_MAX = 12;
 const KOKORO_RE = /^[a-z]{2}_[a-z0-9]+$/;
 
 interface PersonaTts {
-  engine: 'piper' | 'kokoro' | 'cloud' | string;
+  engine: 'piper' | 'kokoro' | 'chatterbox' | 'cloud' | string;
   cloudProvider: string;
   voice: string;
 }
@@ -85,7 +89,13 @@ interface SettingsResponse {
   };
   defaults?: { djPrompt?: string };
   skills?: { catalog?: SkillCatalogEntry[] };
-  tts?: { kokoroVoices?: VoiceOption[]; cloudProviders?: string[] };
+  tts?: {
+    kokoroVoices?: VoiceOption[];
+    chatterboxVoices?: string[];
+    chatterboxVoiceDir?: string;
+    available?: Record<string, boolean>;
+    cloudProviders?: string[];
+  };
   env?: Record<string, unknown>;
 }
 
@@ -105,6 +115,11 @@ function personaValid(p: Persona): boolean {
   if (p.soul.trim().length < 1 || p.soul.trim().length > SOUL_MAX) return false;
   const e = p.tts.engine;
   if (e === 'kokoro') return KOKORO_RE.test(p.tts.voice.trim());
+  if (e === 'chatterbox') {
+    // Empty = use built-in default voice; otherwise must be a plain .wav filename.
+    const v = p.tts.voice.trim();
+    return v === '' || CHATTERBOX_VOICE_RE.test(v);
+  }
   if (e === 'cloud') {
     const v = p.tts.voice.trim();
     return v.length >= 1 && v.length <= 100;
@@ -320,6 +335,7 @@ export default function PersonasPanel() {
 
   const engineLabel = (p: Persona) => {
     if (p.tts.engine === 'kokoro') return `kokoro / ${p.tts.voice.trim() || '—'}`;
+    if (p.tts.engine === 'chatterbox') return `chatterbox / ${p.tts.voice.trim() || 'built-in'}`;
     if (p.tts.engine === 'cloud') return `cloud / ${p.tts.cloudProvider} / ${p.tts.voice.trim() || '—'}`;
     return 'piper';
   };
@@ -636,6 +652,45 @@ export default function PersonasPanel() {
                 <div className="field-hint">The kokoro-onnx voice id for this persona.</div>
               </div>
             )}
+
+            {focused.tts.engine === 'chatterbox' && (() => {
+              const cbVoices: string[] = data?.tts?.chatterboxVoices || [];
+              const cbDir = data?.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices';
+              const cbAvailable = data?.tts?.available?.chatterbox !== false;
+              return (
+                <div className="field max-w-[360px]">
+                  {!cbAvailable && (
+                    <div className="mb-2.5 border border-[var(--danger)] px-3 py-2.5 text-[11px] leading-[1.6] text-[var(--danger)]">
+                      Chatterbox isn’t installed on this host — this persona will fall
+                      back to <strong>{defaultEngine}</strong> until you run{' '}
+                      <code>scripts/install-chatterbox.sh</code>.
+                    </div>
+                  )}
+                  <Label>Reference voice</Label>
+                  <Select
+                    value={focused.tts.voice || ''}
+                    onValueChange={val => setPersonaTts(safeIdx, { voice: val })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Built-in default voice" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value="">Built-in default voice</SelectItem>
+                        {cbVoices.map(v => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+                        {focused.tts.voice && !cbVoices.includes(focused.tts.voice) && (
+                          <SelectItem value={focused.tts.voice}>{focused.tts.voice} (missing)</SelectItem>
+                        )}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    ~5s of clean speech is enough to clone a voice. Drop WAVs into{' '}
+                    <code>{cbDir}</code> on the host and they’ll show up here.
+                    Chatterbox also voices paralinguistic tags ([laugh], [sigh], …) the
+                    DJ may insert.
+                  </div>
+                </div>
+              );
+            })()}
 
             {focused.tts.engine === 'cloud' && (() => {
               const isCompat = focused.tts.cloudProvider === 'openai-compatible';

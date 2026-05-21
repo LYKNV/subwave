@@ -16,15 +16,24 @@ import { recentCalls } from './log.js';
 // nothing else should.
 export { recentCalls };
 
+// Paralinguistic tags Chatterbox renders as actual non-verbal sounds. Every
+// other engine (piper, kokoro, cloud) reads `[laugh]` aloud as the word
+// "laugh", so we only mention this when the on-air persona will actually be
+// voiced by Chatterbox.
+const CHATTERBOX_TAG_HINT =
+  '\n\nYou may sparingly insert non-verbal cues in square brackets: [laugh], [chuckle], [sigh], [cough]. Use them only where genuinely natural — at most one per segment, and never as filler.';
+
 // Resolve the DJ system prompt for the persona on air right now. The effective
 // persona is the current show's owner if a show is scheduled for this hour,
 // otherwise the admin-selected active persona — see settings.getEffectivePersona.
 export function djSystem() {
   const persona = settings.getEffectivePersona();
-  return settings.renderDjPrompt(persona, {
+  const base = settings.renderDjPrompt(persona, {
     station: 'SUB/WAVE',
     location: settings.get().weather?.locationName,
   });
+  if (persona?.tts?.engine === 'chatterbox') return base + CHATTERBOX_TAG_HINT;
+  return base;
 }
 
 // Persona-driven verbosity. 'concise' reproduces the historical one-liner

@@ -76,6 +76,7 @@ interface CloudTtsCfg {
 interface TtsForm {
   defaultEngine: string;
   kokoro: { voice: string };
+  chatterbox: { referenceVoice: string };
   cloud: CloudTtsCfg;
 }
 
@@ -132,6 +133,7 @@ interface SettingsData {
     tts?: {
       defaultEngine?: string;
       kokoro?: { voice?: string };
+      chatterbox?: { referenceVoice?: string };
       cloud?: Partial<CloudTtsCfg>;
     };
     llm?: Partial<LlmForm>;
@@ -142,6 +144,8 @@ interface SettingsData {
     engines?: string[];
     available?: Record<string, boolean>;
     kokoroVoices?: Array<{ id: string; label: string }>;
+    chatterboxVoices?: string[];
+    chatterboxVoiceDir?: string;
     cloudProviders?: string[];
   };
   llm?: {
@@ -222,6 +226,7 @@ export default function SettingsPanel() {
       tts: {
         defaultEngine: v.tts?.defaultEngine ?? 'piper',
         kokoro: { voice: v.tts?.kokoro?.voice ?? 'bf_isabella' },
+        chatterbox: { referenceVoice: v.tts?.chatterbox?.referenceVoice ?? '' },
         cloud: {
           enabled: v.tts?.cloud?.enabled ?? false,
           provider: v.tts?.cloud?.provider ?? 'openai',
@@ -677,13 +682,14 @@ interface SectionProps {
 function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: SectionProps) {
   const engines = data.tts?.engines || ['piper'];
   const available = data.tts?.available || {};
-  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', cloud: 'Cloud' };
+  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', chatterbox: 'Chatterbox', cloud: 'Cloud' };
   const engineOptions = engines.map(e => ({ id: e, label: ENGINE_LABELS[e] || e }));
 
   const save = () => saveSettings({
     tts: {
       defaultEngine: form.tts.defaultEngine,
       kokoro: { voice: form.tts.kokoro?.voice },
+      chatterbox: { referenceVoice: form.tts.chatterbox?.referenceVoice ?? '' },
       cloud: {
         enabled: true,
         provider: form.tts.cloud.provider,
@@ -716,6 +722,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
   const savedTts: any = data.values?.tts || {};
   const savedEngine: string = savedTts.defaultEngine || 'piper';
   const savedKokoroVoice: string = savedTts.kokoro?.voice || '';
+  const savedChatterboxVoice: string = savedTts.chatterbox?.referenceVoice || '';
   const savedCloud: any = savedTts.cloud || {};
   const savedEngineLabel = ENGINE_LABELS[savedEngine] || savedEngine;
   const formEngineLabel = ENGINE_LABELS[form.tts.defaultEngine] || form.tts.defaultEngine;
@@ -723,6 +730,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
   const ttsDirty =
     form.tts.defaultEngine !== savedEngine
     || (form.tts.kokoro?.voice || '') !== savedKokoroVoice
+    || (form.tts.chatterbox?.referenceVoice || '') !== savedChatterboxVoice
     || form.tts.cloud.provider !== (savedCloud.provider || '')
     || (form.tts.cloud.model || '').trim() !== (savedCloud.model || '').trim()
     || (form.tts.cloud.voice || '').trim() !== (savedCloud.voice || '').trim()
@@ -733,6 +741,10 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
     activeDetail = <>Bundled — no key, no config. Always the safe fallback.</>;
   } else if (savedEngine === 'kokoro') {
     activeDetail = <>Voice <code>{savedKokoroVoice || '—'}</code>. Falls back to Piper if the model isn’t loaded.</>;
+  } else if (savedEngine === 'chatterbox') {
+    activeDetail = <>
+      Reference <code>{savedChatterboxVoice || 'built-in'}</code> — voice cloning + paralinguistic tags. Falls back to Piper if the worker isn’t installed.
+    </>;
   } else if (savedEngine === 'cloud') {
     activeDetail = <>
       {savedCloud.provider || '—'} · model <code>{savedCloud.model || '—'}</code>
@@ -833,6 +845,52 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
               </>
             ) : (
               <div className="field-hint">This build reports no Kokoro voices.</div>
+            )}
+          </div>
+        )}
+
+        {form.tts.defaultEngine === 'chatterbox' && (
+          <div className="field mt-4">
+            <Label>Chatterbox reference voice</Label>
+            {available.chatterbox === false ? (
+              <div className="field-hint text-[var(--danger)]">
+                Chatterbox isn’t installed on this host. Run{' '}
+                <code>scripts/install-chatterbox.sh</code> to download the model and Python
+                runtime, then restart the controller. Until then this engine falls back to Piper.
+              </div>
+            ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
+              <>
+                <Select
+                  value={form.tts.chatterbox?.referenceVoice ?? ''}
+                  onValueChange={val => setForm(f => ({
+                    ...f,
+                    tts: { ...f.tts, chatterbox: { ...f.tts.chatterbox, referenceVoice: val } },
+                  }))}
+                >
+                  <SelectTrigger><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem value="">Built-in default voice</SelectItem>
+                      {data.tts?.chatterboxVoices?.map(v => (
+                        <SelectItem key={v} value={v}>{v}</SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+                <div className="field-hint">
+                  ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
+                  <code>{data.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices'}</code>
+                  {' '}on the host and they’ll appear here on next reload. Personas can
+                  override this on the Personas page.
+                </div>
+              </>
+            ) : (
+              <div className="field-hint">
+                No reference voices found in{' '}
+                <code>{data.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices'}</code>.
+                The engine will use its built-in default voice. Drop a 5-second WAV into
+                that directory to enable cloning.
+              </div>
             )}
           </div>
         )}
