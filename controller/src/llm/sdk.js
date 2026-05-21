@@ -17,9 +17,17 @@ import * as settings from '../settings.js';
 // inference slot for minutes. These are generous backstops for normal output
 // (idents are ~150 tokens, structured picks ~250); raise them if you turn
 // `llm.reasoning` on and need room for the chain-of-thought.
-const MAX_TOKENS_TEXT   = 800;
-const MAX_TOKENS_OBJECT = 1000;
-const MAX_TOKENS_AGENT  = 1200;
+//
+// The agent / object caps are higher than they look like they need because
+// some cloud "reasoning by default" models (Gemini 3.x, Claude with extended
+// thinking, GPT o-series) burn output budget on internal thinking before
+// they ever emit the answer. providerOpts() below tries to suppress thinking
+// when `llm.reasoning` is off, but provider coverage isn't complete — so the
+// caps stay generous enough to survive a thinking model even when we can't
+// turn its thinking off.
+const MAX_TOKENS_TEXT   = 2000;
+const MAX_TOKENS_OBJECT = 4000;
+const MAX_TOKENS_AGENT  = 4000;
 
 // Some models (Qwen 3, DeepSeek R1, etc.) emit a <think>…</think> reasoning
 // block before the answer. Reasoning is suppressed at the provider layer when
@@ -57,14 +65,63 @@ function usageOf(result) {
   return { input, output, total };
 }
 
-// `repeat_penalty` is Ollama-specific and lives under providerOptions.ollama;
-// non-Ollama providers ignore the block entirely, so it's safe to always pass.
-function ollamaOptions(repeatPenalty) {
-  // `think` follows the llm.reasoning setting — false suppresses the
-  // <think> block on reasoning models served through Ollama.
-  const opts = { think: settings.get().llm?.reasoning === true };
-  if (repeatPenalty != null) opts.options = { repeat_penalty: repeatPenalty };
-  return { ollama: opts };
+// Per-provider option blocks for the AI SDK's `providerOptions` field. The
+// SDK only reads the block matching the active provider, so it's safe to
+// emit unused blocks — non-matching providers ignore them.
+//
+// This is the single chokepoint that translates the user-facing
+// `llm.reasoning` toggle (Settings UI → "Chain-of-thought") into each
+// provider's native thinking knob. Every provider has a different name and
+// shape for it; keeping the translation in one place is what lets the toggle
+// be honestly described as universal.
+//
+// - Ollama: `think: false` skips the <think> priming on Qwen3 / DeepSeek R1
+//   / reasoning-tuned local models. `repeat_penalty` rides here too.
+// - openai-compatible (Qwen3 via llama.cpp/vLLM/LM Studio): handled at the
+//   transport layer by noThinkFetch() in provider.js, not here — it injects
+//   chat_template_kwargs.enable_thinking into every request body.
+// - Google (Gemini): gemini-3.x → thinkingLevel:'minimal'; gemini-2.5 →
+//   thinkingBudget:0. Gemini thinks by default and silently chews the
+//   maxOutputTokens budget — observed empirically on 3.5-flash returning
+//   empty text on ~20% of picker calls before this was wired.
+// - Anthropic (Claude): extended thinking is OFF by default. When reasoning
+//   is on we opt in via `thinking: { type: 'adaptive' }`, which lets Claude
+//   auto-tune effort (newer claude-sonnet-4-6+ / opus-4-6+). When off we
+//   emit nothing — Claude's default is already what we want.
+// - OpenAI (o-series + gpt-5): these always reason; only effort is tunable.
+//   Map reasoning:false → 'minimal', reasoning:true → 'medium' (the SDK's
+//   documented default). Gated on the model id since reasoningEffort is a
+//   no-op or error on gpt-4 / gpt-3.5.
+// - DeepSeek / OpenRouter / Gateway: no first-class knob. DeepSeek picks
+//   reasoning by model variant (deepseek-reasoner vs -chat); OpenRouter and
+//   Gateway pass through to the underlying provider's defaults.
+function providerOpts({ repeatPenalty = null } = {}) {
+  const llm = settings.get().llm || {};
+  const reasoning = llm.reasoning === true;
+  const model = llm.model || '';
+  const opts = {};
+
+  const ollama = { think: reasoning };
+  if (repeatPenalty != null) ollama.options = { repeat_penalty: repeatPenalty };
+  opts.ollama = ollama;
+
+  if (!reasoning) {
+    if (/^gemini-3/i.test(model)) {
+      opts.google = { thinkingConfig: { thinkingLevel: 'minimal' } };
+    } else if (/^gemini-2\.5/i.test(model)) {
+      opts.google = { thinkingConfig: { thinkingBudget: 0 } };
+    }
+  }
+
+  if (reasoning && /^claude-/i.test(model)) {
+    opts.anthropic = { thinking: { type: 'adaptive' } };
+  }
+
+  if (/^(o\d|gpt-5)/i.test(model)) {
+    opts.openai = { reasoningEffort: reasoning ? 'medium' : 'minimal' };
+  }
+
+  return opts;
 }
 
 // True when the active provider needs the tool-call structured-output path.
@@ -81,7 +138,7 @@ function needsToolCallObject() {
 // provider (openai-compatible, openai, anthropic, …) silently drops it. The
 // sampling log uses this to avoid claiming the value was applied when it
 // wasn't. If a future provider gains a real repetition-penalty channel, widen
-// this check and pipe the value through ollamaOptions's equivalent there.
+// this check and pipe the value through providerOpts's equivalent there.
 function repeatPenaltyApplies() {
   return providerName() === 'ollama';
 }
@@ -180,7 +237,7 @@ async function objectViaToolCall({ system, prompt, messages, schema, temperature
     tools: { emit },
     toolChoice: 'required',
     stopWhen: stepCountIs(1),
-    providerOptions: ollamaOptions(null),
+    providerOptions: providerOpts(),
   });
   if (captured === undefined) throw new Error('model never called the emit tool');
   return { object: schema.parse(captured), usage: usageOf(result) };
@@ -207,7 +264,7 @@ export async function djText({
       topP,
       ...(seed != null ? { seed } : {}),
       maxOutputTokens,
-      providerOptions: ollamaOptions(repeatPenalty),
+      providerOptions: providerOpts({ repeatPenalty }),
     });
     const out = stripThinking(result.text);
     // Only record sampling knobs that actually reached the model — see
@@ -276,7 +333,7 @@ export async function djObject({
           temperature,
           maxOutputTokens,
           output: Output.object({ schema }),
-          providerOptions: ollamaOptions(null),
+          providerOptions: providerOpts(),
         });
         object = result.output;
         usage = usageOf(result);
@@ -288,7 +345,7 @@ export async function djObject({
           prompt: `${prompt}\n\nRespond with a single JSON object only — no prose, no markdown fences.`,
           temperature,
           maxOutputTokens,
-          providerOptions: ollamaOptions(null),
+          providerOptions: providerOpts(),
         });
         object = schema.parse(JSON.parse(extractJson(stripThinking(result.text))));
         usage = usageOf(result);
@@ -412,6 +469,7 @@ export async function djAgent({
       stopWhen: stepCountIs(maxSteps),
       temperature,
       maxOutputTokens,
+      providerOptions: providerOpts(),
       ...(useDoneTool ? { toolChoice: 'required' } : {}),
       ...(prepareStep ? { prepareStep } : {}),
       // Non-Ollama path: native structured-output via Output.object. Ollama
