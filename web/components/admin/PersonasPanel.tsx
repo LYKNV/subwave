@@ -118,6 +118,10 @@ function personaValid(p: Persona): boolean {
 // still fall back silently; this surfaces that gap before it airs.
 function cloudIssue(persona: Persona | undefined, data: SettingsResponse | null): string | null {
   if (persona?.tts?.engine !== 'cloud') return null;
+  // openai-compatible has no env-key convention — the persona's baseUrl +
+  // model live globally on settings.tts.cloud and are validated there. Trust
+  // that the server is configured if the persona picked this provider.
+  if (persona.tts.cloudProvider === 'openai-compatible') return null;
   const envKey = persona.tts.cloudProvider === 'elevenlabs'
     ? 'ELEVENLABS_API_KEY' : 'OPENAI_API_KEY';
   if (data?.env && !data.env[envKey]) {
@@ -634,6 +638,7 @@ export default function PersonasPanel() {
             )}
 
             {focused.tts.engine === 'cloud' && (() => {
+              const isCompat = focused.tts.cloudProvider === 'openai-compatible';
               const provVoices = CLOUD_VOICES[focused.tts.cloudProvider as keyof typeof CLOUD_VOICES] || [];
               const voice = focused.tts.voice.trim();
               const isPreset = provVoices.some(v => v.id === voice);
@@ -652,47 +657,72 @@ export default function PersonasPanel() {
                       value={focused.tts.cloudProvider}
                       options={cloudProviders.map(id => ({ id, label: id }))}
                       onChange={v => {
-                        // Switching provider invalidates the old voice id —
-                        // default to the new provider's first curated voice.
-                        const next = CLOUD_VOICES[v as keyof typeof CLOUD_VOICES]?.[0]?.id || focused.tts.voice;
+                        // Switching provider invalidates the old voice id.
+                        // openai-compatible has no curated voices — leave the
+                        // field blank so the operator types their own (server
+                        // picks its default when blank).
+                        const next = v === 'openai-compatible'
+                          ? ''
+                          : (CLOUD_VOICES[v as keyof typeof CLOUD_VOICES]?.[0]?.id || focused.tts.voice);
                         setPersonaTts(safeIdx, { cloudProvider: v, voice: next });
                       }}
                     />
-                    <div className="field-hint">Uses the shared API key + model from Settings.</div>
+                    <div className="field-hint">
+                      {isCompat
+                        ? 'Uses the shared base URL + model from Settings.'
+                        : 'Uses the shared API key + model from Settings.'}
+                    </div>
                   </div>
                   <div className="field">
                     <Label>Cloud voice</Label>
-                    <Select
-                      value={isPreset ? voice : '__custom__'}
-                      onValueChange={val => {
-                        if (val !== '__custom__') {
-                          setPersonaTts(safeIdx, { voice: val });
-                        }
-                      }}
-                    >
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          {provVoices.map(v => (
-                            <SelectItem key={v.id} value={v.id}>{v.label}</SelectItem>
-                          ))}
-                          <SelectItem value="__custom__">Custom voice id…</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    {!isPreset && (
-                      <Input
-                        className={cn('mt-2', voice ? 'border-ink' : 'border-[var(--danger)]')}
-                        value={focused.tts.voice}
-                        maxLength={100}
-                        placeholder="Enter a custom voice id"
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setPersonaTts(safeIdx, { voice: e.target.value })}
-                      />
+                    {isCompat ? (
+                      <>
+                        <Input
+                          value={focused.tts.voice}
+                          maxLength={100}
+                          placeholder="Server-specific (cloning ref or speaker id)"
+                          onChange={(e: ChangeEvent<HTMLInputElement>) => setPersonaTts(safeIdx, { voice: e.target.value })}
+                        />
+                        <div className="field-hint">
+                          Server-specific — Chatterbox cloning ref name, Qwen3
+                          speaker id, etc. Leave blank to let the server pick.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <Select
+                          value={isPreset ? voice : '__custom__'}
+                          onValueChange={val => {
+                            if (val !== '__custom__') {
+                              setPersonaTts(safeIdx, { voice: val });
+                            }
+                          }}
+                        >
+                          <SelectTrigger><SelectValue /></SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {provVoices.map(v => (
+                                <SelectItem key={v.id} value={v.id}>{v.label}</SelectItem>
+                              ))}
+                              <SelectItem value="__custom__">Custom voice id…</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        {!isPreset && (
+                          <Input
+                            className={cn('mt-2', voice ? 'border-ink' : 'border-[var(--danger)]')}
+                            value={focused.tts.voice}
+                            maxLength={100}
+                            placeholder="Enter a custom voice id"
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => setPersonaTts(safeIdx, { voice: e.target.value })}
+                          />
+                        )}
+                        <div className="field-hint">
+                          Pick a default voice, or choose <em>Custom voice id…</em> to enter your own
+                          (e.g. an OpenAI voice name or an ElevenLabs voice id).
+                        </div>
+                      </>
                     )}
-                    <div className="field-hint">
-                      Pick a default voice, or choose <em>Custom voice id…</em> to enter your own
-                      (e.g. an OpenAI voice name or an ElevenLabs voice id).
-                    </div>
                   </div>
                 </div>
                 </>

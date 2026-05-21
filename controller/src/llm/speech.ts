@@ -49,6 +49,17 @@ function speechModel(c: any) {
     const provider = createElevenLabs(c.apiKey ? { apiKey: c.apiKey } : {});
     return provider.speech(c.model);
   }
+  if (c.provider === 'openai-compatible') {
+    // Any self-hosted server that exposes /v1/audio/speech (Chatterbox,
+    // Qwen3 TTS, VibeVoice, etc.). Mirrors llm/provider.ts — most local
+    // servers accept any non-empty key, so fall back to a placeholder.
+    const provider = createOpenAI({
+      baseURL: c.baseUrl,
+      apiKey: c.apiKey || 'unused',
+      name: 'openai-compatible',
+    });
+    return provider.speech(c.model);
+  }
   const provider = createOpenAI(c.apiKey ? { apiKey: c.apiKey } : {});
   return provider.speech(c.model);
 }
@@ -66,6 +77,12 @@ export function isConfigured(providerOverride: string | null = null) {
   if (c.enabled === false) return false;
   const provider = providerOverride || c.provider;
   if (!provider) return false;
+  // openai-compatible has no managed-API key convention. It's configured iff
+  // the operator gave us a baseUrl + a model — the global model is always
+  // used since there's no per-provider default to fall back to.
+  if (provider === 'openai-compatible') {
+    return !!(c.baseUrl && c.model);
+  }
   // When overriding provider the model is auto-resolved per provider, so it's
   // always present; only the global-provider path depends on the stored model.
   const model = (providerOverride && providerOverride !== c.provider)
@@ -97,15 +114,25 @@ export async function speak(
   const c: any = { ...base, ...(cloudOverride || {}) };
   // A model id is provider-specific. When a persona overrode the provider away
   // from the global Cloud engine setting, the stored model belongs to the
-  // wrong provider — swap in the new provider's default.
+  // wrong provider — swap in the new provider's default. openai-compatible
+  // has no default (server-specific), so personas overriding *to* it must
+  // share whatever the operator typed as the global model.
   if (cloudOverride?.provider && cloudOverride.provider !== base.provider) {
     c.model = CLOUD_DEFAULT_MODELS[cloudOverride.provider] || c.model;
+  }
+  // openai-compatible servers always need the global baseUrl from settings —
+  // persona-level overrides only carry provider+voice.
+  if (c.provider === 'openai-compatible') {
+    c.baseUrl = base.baseUrl;
+    c.apiKey = base.apiKey;
   }
 
   // Speech rate (CLOUD_TTS_SPEED / TTS_SPEED), clamped to the provider's
   // range. Only sent when it differs from default so default stations are
-  // unaffected and providers that ignore the field never see it.
-  const speed = clampSpeed(config.tts.cloudSpeed, c.provider);
+  // unaffected and providers that ignore the field never see it. Skipped for
+  // openai-compatible — local engines vary on whether they accept `speed`.
+  const isCompat = c.provider === 'openai-compatible';
+  const speed = isCompat ? 1.0 : clampSpeed(config.tts.cloudSpeed, c.provider);
 
   const result = await generateSpeech({
     model: speechModel(c),
@@ -115,9 +142,9 @@ export async function speak(
     // ElevenLabs gates 44.1 kHz PCM/WAV behind paid tiers — a free/lower-tier
     // key 403s ("Forbidden") on pcm_44100. mp3 is allowed on every tier and
     // OpenAI honours it too, so it's the safe cross-provider request.
-    // Liquidsoap decodes whatever lands in say.txt/intro.txt regardless, and
-    // `result.audio.format` below drives the actual file extension.
-    outputFormat: c.provider === 'elevenlabs' ? 'mp3' : 'wav',
+    // openai-compatible: omit the param entirely and let the server choose —
+    // `result.audio.format` below drives the file extension regardless.
+    ...(isCompat ? {} : { outputFormat: c.provider === 'elevenlabs' ? 'mp3' : 'wav' }),
   });
 
   const fmt = result.audio.format || 'mp3';
