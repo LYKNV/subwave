@@ -54,4 +54,6 @@ COPY controller/scripts ./scripts
 RUN mkdir -p /var/sub-wave/voice && chmod 777 /var/sub-wave
 
 EXPOSE 7701
-CMD ["node", "src/server.js"]
+# `tsx` is in `dependencies` (not devDeps) so it survives `npm install --omit=dev`
+# above; we run .ts directly — no separate build step. See controller/tsconfig.json.
+CMD ["node_modules/.bin/tsx", "src/server.ts"]
