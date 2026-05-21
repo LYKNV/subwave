@@ -61,6 +61,7 @@ interface CloudTtsCfg {
   provider: string;
   model: string;
   voice: string;
+  baseUrl: string;
 }
 
 interface TtsForm {
@@ -204,6 +205,7 @@ export default function SettingsPanel() {
           provider: v.tts?.cloud?.provider ?? 'openai',
           model: v.tts?.cloud?.model ?? '',
           voice: v.tts?.cloud?.voice ?? '',
+          baseUrl: v.tts?.cloud?.baseUrl ?? '',
         },
       },
       llm: {
@@ -653,6 +655,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
         provider: form.tts.cloud.provider,
         model: form.tts.cloud.model,
         voice: form.tts.cloud.voice,
+        baseUrl: form.tts.cloud.baseUrl,
       },
     },
   });
@@ -752,17 +755,39 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
           </div>
         )}
 
-        {form.tts.defaultEngine === 'cloud' && (
+        {form.tts.defaultEngine === 'cloud' && (() => {
+          const isCompat = form.tts.cloud.provider === 'openai-compatible';
+          return (
           <div className="mt-4">
             <div className="field">
               <Label>Provider</Label>
               <Seg
                 accent
                 value={form.tts.cloud.provider}
-                options={(data.tts?.cloudProviders || ['openai', 'elevenlabs']).map(p => ({ id: p, label: p }))}
+                options={(data.tts?.cloudProviders || ['openai', 'elevenlabs', 'openai-compatible']).map(p => ({ id: p, label: p }))}
                 onChange={v => setForm(f => selectCloudProvider(f, v))}
               />
             </div>
+            {isCompat && (
+              <div className="field mt-3.5">
+                <Label>Server base URL</Label>
+                <Input
+                  value={form.tts.cloud.baseUrl}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                    setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, baseUrl: e.target.value } } }))
+                  }
+                  placeholder="http://192.168.1.101:5000/v1"
+                  className="max-w-[360px]"
+                />
+                <div className="field-hint">
+                  Any OpenAI-compatible TTS server (Chatterbox, Qwen3 TTS,
+                  VibeVoice, …) that exposes <code>/v1/audio/speech</code>,
+                  including the <code>/v1</code> suffix. Must be reachable from the
+                  controller container — use the host’s LAN or Tailscale IP, not
+                  <code>127.0.0.1</code>.
+                </div>
+              </div>
+            )}
             <div className="mt-3.5 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-[18px]">
               <div className="field">
                 <Label>Model</Label>
@@ -771,14 +796,42 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
                   onChange={(e: ChangeEvent<HTMLInputElement>) =>
                     setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, model: e.target.value } } }))
                   }
-                  placeholder={CLOUD_MODELS[form.tts.cloud.provider as keyof typeof CLOUD_MODELS]?.[0] || 'gpt-4o-mini-tts'}
+                  placeholder={
+                    isCompat
+                      ? 'chatterbox'
+                      : (CLOUD_MODELS[form.tts.cloud.provider as keyof typeof CLOUD_MODELS]?.[0] || 'gpt-4o-mini-tts')
+                  }
                 />
-                <div className="field-hint">e.g. “gpt-4o-mini-tts” (OpenAI) or “eleven_flash_v2_5” (ElevenLabs).</div>
+                <div className="field-hint">
+                  {isCompat
+                    ? <>Model id exactly as the server reports it at <code>/v1/models</code> — required.</>
+                    : <>e.g. “gpt-4o-mini-tts” (OpenAI) or “eleven_flash_v2_5” (ElevenLabs).</>}
+                </div>
               </div>
               {(() => {
                 const provVoices = CLOUD_VOICES[form.tts.cloud.provider as keyof typeof CLOUD_VOICES] || [];
                 const voice = form.tts.cloud.voice.trim();
                 const isPreset = provVoices.some(v => v.id === voice);
+                if (isCompat) {
+                  return (
+                    <div className="field">
+                      <Label>Default voice</Label>
+                      <Input
+                        value={form.tts.cloud.voice}
+                        maxLength={100}
+                        placeholder="Server-specific (cloning ref or speaker id)"
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          setForm(f => ({ ...f, tts: { ...f.tts, cloud: { ...f.tts.cloud, voice: e.target.value } } }))
+                        }
+                      />
+                      <div className="field-hint">
+                        Server-specific — Chatterbox cloning ref name, Qwen3
+                        speaker id, etc. Leave blank to let the server pick its
+                        own default.
+                      </div>
+                    </div>
+                  );
+                }
                 return (
                   <div className="field">
                     <Label>Default voice</Label>
@@ -819,12 +872,21 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
                 );
               })()}
             </div>
-            <KeyStatus
-              envVar={form.tts.cloud.provider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'OPENAI_API_KEY'}
-              present={!!data.env?.[form.tts.cloud.provider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'OPENAI_API_KEY']}
-            />
+            {!isCompat && (
+              <KeyStatus
+                envVar={form.tts.cloud.provider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'OPENAI_API_KEY'}
+                present={!!data.env?.[form.tts.cloud.provider === 'elevenlabs' ? 'ELEVENLABS_API_KEY' : 'OPENAI_API_KEY']}
+              />
+            )}
+            {isCompat && (
+              <div className="field-hint mt-3.5">
+                Most self-hosted servers accept any non-empty API key — no env
+                var required.
+              </div>
+            )}
           </div>
-        )}
+          );
+        })()}
       </Card>
 
       <SaveBar

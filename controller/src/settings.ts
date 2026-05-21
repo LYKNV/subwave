@@ -66,8 +66,11 @@ export const LLM_PROVIDERS = [
   'gateway',
 ];
 
-// Cloud TTS vendors usable by the `cloud` engine.
-export const TTS_CLOUD_PROVIDERS = ['openai', 'elevenlabs'];
+// Cloud TTS vendors usable by the `cloud` engine. `openai-compatible` targets
+// any self-hosted OpenAI-compatible speech server (Chatterbox, Qwen3 TTS,
+// VibeVoice, etc.) via the operator-supplied `tts.cloud.baseUrl` — mirrors the
+// LLM provider of the same name.
+export const TTS_CLOUD_PROVIDERS = ['openai', 'elevenlabs', 'openai-compatible'];
 
 // Canonical mood vocabulary. Shared by the library tagger (music/tag-library.js
 // imports this as MOOD_VOCAB) and the Shows scheduler — a show's `mood`
@@ -193,6 +196,10 @@ const DEFAULTS = {
       model: 'gpt-4o-mini-tts',
       voice: 'alloy',
       apiKey: '',
+      // Base URL for the openai-compatible provider, including the /v1 suffix
+      // (e.g. http://192.168.1.101:5000/v1). Required — and only used — when
+      // provider === 'openai-compatible'.
+      baseUrl: '',
     },
   },
   llm: {
@@ -270,7 +277,11 @@ function normalizeTts(raw: any) {
   let voice =
     typeof raw?.voice === 'string' && raw.voice.trim() ? raw.voice.trim().slice(0, 100) : '';
   if (engine === 'kokoro' && !KOKORO_VOICE_RE.test(voice)) voice = 'bf_isabella';
-  if (!voice) voice = engine === 'cloud' ? 'alloy' : 'bf_isabella';
+  // openai-compatible voices are server-specific (often arbitrary cloning ref
+  // names) — no canonical default; leave empty so generateSpeech omits the
+  // field and the server picks its own.
+  if (!voice && engine === 'cloud' && cloudProvider !== 'openai-compatible') voice = 'alloy';
+  if (!voice && engine !== 'cloud') voice = 'bf_isabella';
   return { engine, cloudProvider, voice };
 }
 
@@ -424,6 +435,10 @@ export async function load() {
             ? stored.tts.cloud.voice.trim()
             : DEFAULTS.tts.cloud.voice,
         apiKey: typeof stored.tts?.cloud?.apiKey === 'string' ? stored.tts.cloud.apiKey : '',
+        baseUrl:
+          typeof stored.tts?.cloud?.baseUrl === 'string'
+            ? stored.tts.cloud.baseUrl.trim()
+            : DEFAULTS.tts.cloud.baseUrl,
       },
     },
     llm: {
@@ -496,7 +511,11 @@ function validateTtsBlock(raw, where) {
       );
     }
   } else if (t.engine === 'cloud') {
-    if (voice.length < 1 || voice.length > 100) {
+    // openai-compatible voices are server-specific; an empty voice lets the
+    // server use its own default. openai/elevenlabs both require a voice id.
+    if (t.cloudProvider === 'openai-compatible') {
+      if (voice.length > 100) throw new Error(`${where}.tts.voice must be 0-100 chars`);
+    } else if (voice.length < 1 || voice.length > 100) {
       throw new Error(`${where}.tts.voice must be 1-100 chars`);
     }
   } else {
@@ -740,13 +759,37 @@ export async function update(patch) {
       }
       if (c.voice !== undefined) {
         const v = String(c.voice).trim();
-        if (v.length < 1 || v.length > 100) throw new Error('tts.cloud.voice must be 1-100 chars');
+        // openai-compatible voices are server-specific (often arbitrary
+        // cloning ref names) and may legitimately be blank — let the server
+        // pick its own default. openai/elevenlabs require a voice id.
+        const provider = c.provider !== undefined ? c.provider : next.tts.cloud.provider;
+        const allowEmpty = provider === 'openai-compatible';
+        if (v.length > 100 || (!allowEmpty && v.length < 1)) {
+          throw new Error(
+            allowEmpty
+              ? 'tts.cloud.voice must be 0-100 chars'
+              : 'tts.cloud.voice must be 1-100 chars',
+          );
+        }
         next.tts.cloud.voice = v;
       }
       // 'set' is the redaction sentinel from getRedacted() — ignore it so a
       // round-tripped settings form doesn't overwrite the real key.
       if (c.apiKey !== undefined && c.apiKey !== 'set') {
         next.tts.cloud.apiKey = String(c.apiKey);
+      }
+      if (c.baseUrl !== undefined) {
+        const v = String(c.baseUrl).trim();
+        if (v.length > 200) throw new Error('tts.cloud.baseUrl must be 0-200 chars');
+        if (v && !/^https?:\/\//i.test(v)) {
+          throw new Error('tts.cloud.baseUrl must start with http:// or https://');
+        }
+        next.tts.cloud.baseUrl = v.replace(/\/+$/, ''); // strip trailing slashes
+      }
+      // An OpenAI-compatible TTS server has no canonical endpoint — refuse to
+      // save the provider without one. Mirrors the LLM-side check below.
+      if (next.tts.cloud.provider === 'openai-compatible' && !next.tts.cloud.baseUrl) {
+        throw new Error('tts.cloud.baseUrl is required when provider is "openai-compatible"');
       }
     }
   }

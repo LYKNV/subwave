@@ -29,6 +29,10 @@ export const CLOUD_VOICES: Record<CloudProvider, CloudVoice[]> = {
     { id: 'pNInz6obpgDQGcFmaJgB', label: 'Adam' },
     { id: 'yoZ06aMxZJJ28mfd3POQ', label: 'Sam' },
   ],
+  // openai-compatible voice ids are server-specific (Chatterbox cloning refs,
+  // Qwen3 speaker names, etc.) — no curated list. The UI falls back to the
+  // free-text "Custom voice id…" input when this array is empty.
+  'openai-compatible': [],
 };
 
 // Common TTS model ids per cloud provider. The Model field is free text (any
@@ -39,4 +43,7 @@ export const CLOUD_VOICES: Record<CloudProvider, CloudVoice[]> = {
 export const CLOUD_MODELS: Record<CloudProvider, string[]> = {
   openai: ['gpt-4o-mini-tts', 'tts-1', 'tts-1-hd'],
   elevenlabs: ['eleven_flash_v2_5', 'eleven_multilingual_v2', 'eleven_turbo_v2_5'],
+  // Server-specific model ids — Chatterbox uses 'chatterbox', VibeVoice uses
+  // its own, etc. Free-text only.
+  'openai-compatible': [],
 };

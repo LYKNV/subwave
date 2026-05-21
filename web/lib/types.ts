@@ -150,4 +150,4 @@ export interface CloudVoice {
   label: string;
 }
 
-export type CloudProvider = 'openai' | 'elevenlabs';
+export type CloudProvider = 'openai' | 'elevenlabs' | 'openai-compatible';
