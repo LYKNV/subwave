@@ -11,7 +11,7 @@
 import { accessSync, constants, existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { detectCompose, type ComposeStatus } from './compose.ts';
-import { dockerDaemonOk } from './docker.ts';
+import { dockerDaemonOk, composeExec } from './docker.ts';
 import { makeClient } from './api.ts';
 import { CONTROLLER_ENV, parseEnvFile, REPO_ROOT, STATE_DIR, fetchErrorReason } from './util.ts';
 
@@ -45,7 +45,7 @@ export async function runDoctor(): Promise<DoctorReport> {
   sections.push({ name: 'Icecast', findings: await checkIcecast(compose) });
   sections.push({ name: 'State', findings: checkState() });
   sections.push({ name: 'Content', findings: checkContent() });
-  sections.push({ name: 'Logs', findings: checkLogs() });
+  sections.push({ name: 'Logs', findings: checkLogs(compose) });
 
   const counts = { ok: 0, warn: 0, fail: 0, skip: 0 };
   for (const s of sections) {
@@ -344,37 +344,61 @@ function checkContent(): Finding[] {
   return out;
 }
 
-function checkLogs(): Finding[] {
+function checkLogs(compose: ComposeStatus): Finding[] {
   const radioLog = resolve(STATE_DIR, 'logs', 'radio.log');
-  if (!existsSync(radioLog)) {
-    return [{
-      label: 'radio.log',
-      status: 'skip',
-      detail: 'no log yet — Liquidsoap writes it on boot',
-    }];
-  }
+  // 64 KB of tail is plenty for "errors in the last few minutes" —
+  // Liquidsoap is chatty but not absurdly so.
+  const TAIL_BYTES = 64 * 1024;
+  let tail: string | null = null;
+
+  // Fast path: read the host-side file directly.
   try {
-    const size = statSync(radioLog).size;
-    // Read just the tail. 64 KB is plenty for "errors in the last few
-    // minutes" — Liquidsoap is chatty but not absurdly so.
-    const readBytes = Math.min(size, 64 * 1024);
-    const fd = readFileSync(radioLog);
-    const tail = fd.subarray(fd.length - readBytes).toString('utf8');
-    const lines = tail.split('\n').slice(-200);
-    const errLine = /\[error\]|connection refused|Permission denied|Failed to connect/i;
-    const errors = lines.filter((l) => errLine.test(l));
-    if (errors.length === 0) {
-      return [{ label: 'radio.log tail', status: 'ok', detail: 'no recent errors' }];
+    if (existsSync(radioLog)) {
+      const size = statSync(radioLog).size;
+      const fd = readFileSync(radioLog);
+      tail = fd.subarray(fd.length - Math.min(size, TAIL_BYTES)).toString('utf8');
+    }
+  } catch {
+    // Liquidsoap creates radio.log mode 0600 owned by its in-container uid
+    // (10000), so the host operator hits EACCES reading it directly. Fall
+    // through to reading it from inside the container, where `exec` runs as
+    // that same uid and can read its own file.
+  }
+
+  // Fallback: tail it from inside the liquidsoap container.
+  if (tail === null && compose.env !== 'down' && compose.file) {
+    const r = composeExec(compose.file, 'liquidsoap', [
+      'tail', '-c', String(TAIL_BYTES), '/var/log/liquidsoap/radio.log',
+    ]);
+    if (r.ok) tail = r.stdout;
+  }
+
+  if (tail === null) {
+    if (compose.env === 'down') {
+      return [{ label: 'radio.log', status: 'skip', detail: 'stack down — no log to read' }];
+    }
+    if (!existsSync(radioLog)) {
+      return [{ label: 'radio.log', status: 'skip', detail: 'no log yet — Liquidsoap writes it on boot' }];
     }
     return [{
       label: 'radio.log tail',
       status: 'warn',
-      detail: `${errors.length} error-shaped line(s) in last 200`,
-      hint: errors.slice(0, 2).join(' | '),
+      detail: 'unreadable on host and in container',
     }];
-  } catch (e) {
-    return [{ label: 'radio.log tail', status: 'warn', detail: `unreadable: ${(e as Error).message}` }];
   }
+
+  const lines = tail.split('\n').slice(-200);
+  const errLine = /\[error\]|connection refused|Permission denied|Failed to connect/i;
+  const errors = lines.filter((l) => errLine.test(l));
+  if (errors.length === 0) {
+    return [{ label: 'radio.log tail', status: 'ok', detail: 'no recent errors' }];
+  }
+  return [{
+    label: 'radio.log tail',
+    status: 'warn',
+    detail: `${errors.length} error-shaped line(s) in last 200`,
+    hint: errors.slice(0, 2).join(' | '),
+  }];
 }
 
 function isWritable(path: string): boolean {
