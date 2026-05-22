@@ -655,15 +655,15 @@ export default function PersonasPanel() {
 
             {focused.tts.engine === 'chatterbox' && (() => {
               const cbVoices: string[] = data?.tts?.chatterboxVoices || [];
-              const cbDir = data?.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices';
+              const cbDir = data?.tts?.chatterboxVoiceDir || 'state/chatterbox-voices';
               const cbAvailable = data?.tts?.available?.chatterbox !== false;
               return (
                 <div className="field max-w-[360px]">
                   {!cbAvailable && (
                     <div className="mb-2.5 border border-[var(--danger)] px-3 py-2.5 text-[11px] leading-[1.6] text-[var(--danger)]">
-                      Chatterbox isn’t installed on this host — this persona will fall
-                      back to <strong>{defaultEngine}</strong> until you run{' '}
-                      <code>scripts/install-chatterbox.sh</code>.
+                      Chatterbox isn’t bundled in this controller image — this persona
+                      will fall back to <strong>{defaultEngine}</strong> until the image
+                      is rebuilt with <code>--build-arg WITH_CHATTERBOX=1</code>.
                     </div>
                   )}
                   <Label>Reference voice</Label>

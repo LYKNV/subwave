@@ -60,13 +60,16 @@ export const config = {
     lang: process.env.KOKORO_LANG || 'en-gb',
     speed: parseFloat(process.env.KOKORO_SPEED || TTS_SPEED),
   },
-  // Chatterbox is opt-in: the default Docker image does not bake the runtime,
-  // so unless the operator runs scripts/install-chatterbox.sh on the host these
-  // paths point at nothing and isAvailable() reports false. Both `python` and
-  // `workerScript` blank → the dispatcher skips the engine entirely.
+  // Chatterbox is opt-in: the default controller image does not bundle the
+  // runtime. Build with `--build-arg WITH_CHATTERBOX=1` (see
+  // docker/Dockerfile.controller) to create the venv + model at these paths.
+  // chatterbox.isAvailable() does an existsSync on `python`, so when the image
+  // was built without the arg the venv is absent and the dispatcher falls back
+  // to Piper. The defaults below are the in-image locations; env vars override
+  // them for non-default layouts (e.g. a host venv during native dev).
   chatterbox: {
-    python: process.env.CHATTERBOX_PYTHON || '',
-    workerScript: process.env.CHATTERBOX_WORKER || '',
+    python: process.env.CHATTERBOX_PYTHON || '/opt/chatterbox/venv/bin/python',
+    workerScript: process.env.CHATTERBOX_WORKER || '/app/scripts/chatterbox_worker.py',
     // 'onnx' (default) or 'torch'. ONNX runtime has no PyTorch dep and is the
     // expected install on CPU homelabs. 'torch' is required for CUDA.
     backend: process.env.CHATTERBOX_BACKEND || 'onnx',

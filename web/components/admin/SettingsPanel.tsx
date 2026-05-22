@@ -854,9 +854,9 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
             <Label>Chatterbox reference voice</Label>
             {available.chatterbox === false ? (
               <div className="field-hint text-[var(--danger)]">
-                Chatterbox isn’t installed on this host. Run{' '}
-                <code>scripts/install-chatterbox.sh</code> to download the model and Python
-                runtime, then restart the controller. Until then this engine falls back to Piper.
+                Chatterbox isn’t bundled in this controller image. Rebuild it with{' '}
+                <code>--build-arg WITH_CHATTERBOX=1</code> to include the runtime and
+                model, then recreate the controller. Until then this engine falls back to Piper.
               </div>
             ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
               <>
@@ -879,7 +879,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
                 </Select>
                 <div className="field-hint">
                   ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
-                  <code>{data.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices'}</code>
+                  <code>{data.tts?.chatterboxVoiceDir || 'state/chatterbox-voices'}</code>
                   {' '}on the host and they’ll appear here on next reload. Personas can
                   override this on the Personas page.
                 </div>
@@ -887,7 +887,7 @@ function TtsSection({ data, form, setForm, busy, saveMsg, saveSettings }: Sectio
             ) : (
               <div className="field-hint">
                 No reference voices found in{' '}
-                <code>{data.tts?.chatterboxVoiceDir || '/opt/chatterbox/voices'}</code>.
+                <code>{data.tts?.chatterboxVoiceDir || 'state/chatterbox-voices'}</code>.
                 The engine will use its built-in default voice. Drop a 5-second WAV into
                 that directory to enable cloning.
               </div>

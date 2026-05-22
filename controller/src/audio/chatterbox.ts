@@ -12,6 +12,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, readdir } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { config } from '../config.js';
@@ -188,8 +189,13 @@ export async function speak(
   return msg.path;
 }
 
+// Chatterbox is bundled only when the controller image is built with
+// `--build-arg WITH_CHATTERBOX=1`, so a configured path isn't proof the
+// runtime exists. Check the venv interpreter and worker script are actually
+// on disk — that's true in a Chatterbox-enabled image and false otherwise,
+// which is exactly what lets the dispatcher fall back to Piper.
 export function isAvailable() {
-  return Boolean(config.chatterbox.python && config.chatterbox.workerScript);
+  return existsSync(config.chatterbox.python) && existsSync(config.chatterbox.workerScript);
 }
 
 // List the reference-WAV filenames the operator has uploaded into the voice

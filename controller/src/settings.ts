@@ -48,10 +48,11 @@ export const SCRIPT_LENGTHS = ['concise', 'extended'];
 //
 // `cloud` routes through the AI SDK (OpenAI / ElevenLabs speech models) —
 // see llm/speech.js. `piper`, `kokoro`, and `chatterbox` are local engines.
-// Chatterbox is opt-in — the default Docker image doesn't bake it; the operator
-// must run scripts/install-chatterbox.sh on the host to populate the runtime.
-// The dispatcher gates the engine on isAvailable() so settings can reference
-// it safely even when the runtime is absent (the engine just falls back).
+// Chatterbox is opt-in — the default controller image doesn't bundle it; build
+// the image with `--build-arg WITH_CHATTERBOX=1` (see docker/Dockerfile.controller)
+// to include the runtime. The dispatcher gates the engine on isAvailable() so
+// settings can reference it safely even when the runtime is absent (the engine
+// just falls back to Piper).
 export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'cloud'];
 
 // LLM provider abstraction. `ollama` is the homelab default; the cloud

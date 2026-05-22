@@ -61,9 +61,9 @@ function resolveEngine(kind: string, personaTts: any) {
       return tts.defaultEngine && tts.defaultEngine !== 'cloud' ? tts.defaultEngine : 'piper';
     }
   }
-  // Chatterbox is opt-in — if the operator hasn't run install-chatterbox.sh on
-  // the host, the worker isn't there. Skip straight to a local engine instead
-  // of trying to spawn a Python that doesn't exist.
+  // Chatterbox is opt-in — if the controller image wasn't built with
+  // --build-arg WITH_CHATTERBOX=1, the venv isn't there. Skip straight to a
+  // local engine instead of trying to spawn a Python that doesn't exist.
   if (chosen === 'chatterbox' && !chatterbox.isAvailable()) {
     return tts.defaultEngine && tts.defaultEngine !== 'chatterbox' ? tts.defaultEngine : 'piper';
   }
