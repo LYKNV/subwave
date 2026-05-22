@@ -31,8 +31,15 @@ const SCRIPT_LENGTHS = [
 const ENGINES = [
   { id: 'piper',  label: 'Piper' },
   { id: 'kokoro', label: 'Kokoro' },
+  { id: 'chatterbox', label: 'Chatterbox' },
   { id: 'cloud',  label: 'Cloud' },
 ];
+// Chatterbox reference voice files are validated against this in audio/chatterbox.ts
+// — basename only, no path separators, .wav extension, conservative chars.
+const CHATTERBOX_VOICE_RE = /^[A-Za-z0-9_.-]{1,80}\.wav$/;
+// Sentinel for the empty-string "use the built-in voice" choice — Radix Select
+// rejects an empty-string SelectItem value.
+const CB_DEFAULT_VOICE = '__cb_default__';
 const NAME_MAX = 40;
 const TAGLINE_MAX = 80;
 const SOUL_MAX = 400;
@@ -42,7 +49,7 @@ const PERSONA_MAX = 12;
 const KOKORO_RE = /^[a-z]{2}_[a-z0-9]+$/;
 
 interface PersonaTts {
-  engine: 'piper' | 'kokoro' | 'cloud' | string;
+  engine: 'piper' | 'kokoro' | 'chatterbox' | 'cloud' | string;
   cloudProvider: string;
   voice: string;
 }
@@ -85,7 +92,13 @@ interface SettingsResponse {
   };
   defaults?: { djPrompt?: string };
   skills?: { catalog?: SkillCatalogEntry[] };
-  tts?: { kokoroVoices?: VoiceOption[]; cloudProviders?: string[] };
+  tts?: {
+    kokoroVoices?: VoiceOption[];
+    chatterboxVoices?: string[];
+    chatterboxVoiceDir?: string;
+    available?: Record<string, boolean>;
+    cloudProviders?: string[];
+  };
   env?: Record<string, unknown>;
 }
 
@@ -105,11 +118,27 @@ function personaValid(p: Persona): boolean {
   if (p.soul.trim().length < 1 || p.soul.trim().length > SOUL_MAX) return false;
   const e = p.tts.engine;
   if (e === 'kokoro') return KOKORO_RE.test(p.tts.voice.trim());
+  if (e === 'chatterbox') {
+    // Empty = use built-in default voice; otherwise must be a plain .wav filename.
+    const v = p.tts.voice.trim();
+    return v === '' || CHATTERBOX_VOICE_RE.test(v);
+  }
   if (e === 'cloud') {
     const v = p.tts.voice.trim();
     return v.length >= 1 && v.length <= 100;
   }
   return true; // piper — voice ignored
+}
+
+// Coerce a persona's `voice` to a value the target engine's server-side
+// validator will accept. The `voice` field is shared across engines, so
+// switching engines can leave an incompatible value behind (e.g. a Kokoro id
+// after switching to Chatterbox). This is the last line of defence before the
+// POST — it runs regardless of UI state, so a stale form can't ship a bad save.
+function voiceForSave(engine: string, voice: string): string {
+  if (engine === 'kokoro') return voice || 'bf_isabella';
+  if (engine === 'chatterbox') return CHATTERBOX_VOICE_RE.test(voice) ? voice : '';
+  return voice; // piper ignores voice; cloud carries its own
 }
 
 // For a cloud persona: why (if at all) its cloud voice won't actually play —
@@ -258,7 +287,15 @@ export default function PersonasPanel() {
             tts: {
               engine: p.tts.engine,
               cloudProvider: p.tts.cloudProvider,
-              voice: p.tts.voice.trim() || 'bf_isabella',
+              // Sanitize voice for the target engine. The `voice` field is
+              // shared across engines, so a leftover value from a previous
+              // engine (e.g. a Kokoro id "bm_george" still in state after
+              // switching to Chatterbox) would fail the server's validator.
+              // Coerce per-engine here so the save can't ship a bad value:
+              //   kokoro     — needs a non-empty id; fall back to bf_isabella
+              //   chatterbox — must be a .wav filename or empty (built-in)
+              //   piper/cloud — passed through as-is
+              voice: voiceForSave(p.tts.engine, p.tts.voice.trim()),
             },
             skills: p.skills,
           })),
@@ -320,6 +357,7 @@ export default function PersonasPanel() {
 
   const engineLabel = (p: Persona) => {
     if (p.tts.engine === 'kokoro') return `kokoro / ${p.tts.voice.trim() || '—'}`;
+    if (p.tts.engine === 'chatterbox') return `chatterbox / ${p.tts.voice.trim() || 'built-in'}`;
     if (p.tts.engine === 'cloud') return `cloud / ${p.tts.cloudProvider} / ${p.tts.voice.trim() || '—'}`;
     return 'piper';
   };
@@ -593,20 +631,31 @@ export default function PersonasPanel() {
                 value={focused.tts.engine}
                 options={ENGINES}
                 onChange={v => {
-                  // Switching into cloud, seed a valid default voice if the
-                  // current one isn't a known voice for the active provider.
+                  // The `voice` field is shared across engines but each engine
+                  // validates it differently — a leftover value from the old
+                  // engine (e.g. a Kokoro id like "bm_george") fails the new
+                  // engine's check on save. Normalize voice to something the
+                  // target engine accepts whenever the engine changes.
                   const patch: Partial<PersonaTts> = { engine: v };
+                  const cur = focused.tts.voice.trim();
                   if (v === 'cloud') {
                     const provVoices = CLOUD_VOICES[focused.tts.cloudProvider as keyof typeof CLOUD_VOICES] || [];
-                    if (!provVoices.some(pv => pv.id === focused.tts.voice.trim())) {
-                      patch.voice = provVoices[0]?.id || focused.tts.voice;
+                    if (!provVoices.some(pv => pv.id === cur)) {
+                      patch.voice = provVoices[0]?.id || cur;
                     }
+                  } else if (v === 'kokoro') {
+                    if (!KOKORO_RE.test(cur)) patch.voice = 'bf_isabella';
+                  } else if (v === 'chatterbox') {
+                    // Empty = built-in voice; a real value must be a .wav filename.
+                    if (cur && !CHATTERBOX_VOICE_RE.test(cur)) patch.voice = '';
                   }
                   setPersonaTts(safeIdx, patch);
                 }}
               />
               <div className="field-hint">
-                Piper is local &amp; fast. Kokoro is more natural but slower. Cloud routes through OpenAI / ElevenLabs.
+                Piper is local &amp; fast. Kokoro is more natural but slower. Chatterbox
+                clones a voice from a reference clip (local, opt-in). Cloud routes through
+                OpenAI / ElevenLabs.
               </div>
             </div>
 
@@ -636,6 +685,45 @@ export default function PersonasPanel() {
                 <div className="field-hint">The kokoro-onnx voice id for this persona.</div>
               </div>
             )}
+
+            {focused.tts.engine === 'chatterbox' && (() => {
+              const cbVoices: string[] = data?.tts?.chatterboxVoices || [];
+              const cbDir = 'state/chatterbox-voices/';
+              const cbAvailable = data?.tts?.available?.chatterbox !== false;
+              return (
+                <div className="field max-w-[360px]">
+                  {!cbAvailable && (
+                    <div className="mb-2.5 border border-[var(--danger)] px-3 py-2.5 text-[11px] leading-[1.6] text-[var(--danger)]">
+                      Chatterbox isn’t bundled in this controller image — this persona
+                      will fall back to <strong>{defaultEngine}</strong> until the image
+                      is rebuilt with <code>--build-arg WITH_CHATTERBOX=1</code>.
+                    </div>
+                  )}
+                  <Label>Reference voice</Label>
+                  <Select
+                    value={focused.tts.voice || CB_DEFAULT_VOICE}
+                    onValueChange={val => setPersonaTts(safeIdx, { voice: val === CB_DEFAULT_VOICE ? '' : val })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Built-in default voice" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
+                        {cbVoices.map(v => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+                        {focused.tts.voice && !cbVoices.includes(focused.tts.voice) && (
+                          <SelectItem value={focused.tts.voice}>{focused.tts.voice} (missing)</SelectItem>
+                        )}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    ~5s of clean speech is enough to clone a voice. Drop WAVs into{' '}
+                    <code>{cbDir}</code> on the host and they’ll show up here.
+                    Chatterbox also voices paralinguistic tags ([laugh], [sigh], …) the
+                    DJ may insert.
+                  </div>
+                </div>
+              );
+            })()}
 
             {focused.tts.engine === 'cloud' && (() => {
               const isCompat = focused.tts.cloudProvider === 'openai-compatible';

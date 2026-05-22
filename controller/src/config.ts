@@ -60,6 +60,25 @@ export const config = {
     lang: process.env.KOKORO_LANG || 'en-gb',
     speed: parseFloat(process.env.KOKORO_SPEED || TTS_SPEED),
   },
+  // Chatterbox is opt-in: the default controller image does not bundle the
+  // runtime. Build with `--build-arg WITH_CHATTERBOX=1` (see
+  // docker/Dockerfile.controller) to create the venv + model at these paths.
+  // chatterbox.isAvailable() does an existsSync on `python`, so when the image
+  // was built without the arg the venv is absent and the dispatcher falls back
+  // to Piper. The defaults below are the in-image locations; env vars override
+  // them for non-default layouts (e.g. a host venv during native dev).
+  chatterbox: {
+    python: process.env.CHATTERBOX_PYTHON || '/opt/chatterbox/venv/bin/python',
+    workerScript: process.env.CHATTERBOX_WORKER || '/app/scripts/chatterbox_worker.py',
+    // 'cpu' or 'cuda'. CPU works but is slow; CUDA needs a GPU-enabled image.
+    device: process.env.CHATTERBOX_DEVICE || 'cpu',
+    // Directory where the operator drops per-persona reference WAVs. Each
+    // persona stores a filename (relative to here) in its `tts.voice` field.
+    voiceDir: process.env.CHATTERBOX_VOICE_DIR || `${STATE_DIR}/chatterbox-voices`,
+    // Global fallback reference WAV used when a persona has no voice set.
+    // Empty → use Chatterbox's built-in default voice.
+    referenceWav: process.env.CHATTERBOX_REFERENCE_WAV || '',
+  },
   icecast: {
     // Public status JSON — listener counts + per-mount metadata. No auth.
     statusUrl: process.env.ICECAST_STATUS_URL || 'http://icecast:7702/status-json.xsl',

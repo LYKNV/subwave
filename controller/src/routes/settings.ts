@@ -7,6 +7,7 @@ import * as library from '../music/library.js';
 import * as jingles from '../broadcast/jingles.js';
 import * as settings from '../settings.js';
 import * as tts from '../audio/tts.js';
+import * as chatterbox from '../audio/chatterbox.js';
 import * as llmProvider from '../llm/provider.js';
 import { queue } from '../broadcast/queue.js';
 import { restartLiquidsoap, startStream, stopStream, streamStatus } from '../broadcast/liquidsoap-control.js';
@@ -64,6 +65,8 @@ router.get('/settings', requireAdmin, async (req, res) => {
         engines: tts.ENGINES,
         available: tts.availableEngines(),
         kokoroVoices: settings.KOKORO_VOICES_BRITISH,
+        chatterboxVoices: await chatterbox.listReferenceVoices(),
+        chatterboxVoiceDir: chatterbox.voiceDir(),
         cloudProviders: settings.TTS_CLOUD_PROVIDERS,
         frequencies: settings.FREQUENCIES,
         moods: settings.SHOW_MOODS,

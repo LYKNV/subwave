@@ -43,6 +43,49 @@ ENV KOKORO_MODEL=/opt/kokoro/models/kokoro-v1.0.onnx \
     KOKORO_VOICES=/opt/kokoro/models/voices-v1.0.bin \
     KOKORO_PYTHON=/opt/kokoro/venv/bin/python
 
+# --- Chatterbox (opt-in) --------------------------------------------------
+# Fourth TTS engine — Resemble AI's Chatterbox Turbo: zero-shot voice cloning
+# plus native paralinguistic tags ([laugh], [sigh], …). Uses the official
+# `chatterbox-tts` PyPI package (PyTorch — there is no turn-key ONNX runtime).
+# The runtime + weights add ~2-3GB, and CPU inference is slow, so this is
+# deliberately NOT in the default image. Build with
+# `--build-arg WITH_CHATTERBOX=1` to bundle it into an isolated venv (same
+# pattern as Kokoro above). The final `from_pretrained` doubles as a build-time
+# smoke test (it fails the build if the install is broken) and pre-warms the
+# Hugging Face cache so the first DJ line doesn't trigger a multi-GB download.
+# When the venv is absent, chatterbox.isAvailable() (an existsSync on the venv
+# interpreter) reports false and the dispatcher falls back to Piper.
+# CHATTERBOX_PIP_PKG is overridable in case the package is renamed upstream.
+ENV HF_HOME=/opt/chatterbox/hf-cache
+ARG WITH_CHATTERBOX=0
+ARG CHATTERBOX_PIP_PKG=chatterbox-tts
+# Image size: the default PyPI `torch` wheel is the CUDA build, which drags in
+# ~3.6GB of NVIDIA libraries (nvidia-*, triton, cusparselt) that are dead weight
+# on a CPU-only station. torch + torchaudio + chatterbox-tts are therefore all
+# installed in ONE resolve with PyTorch's CPU wheel index as the primary index
+# and PyPI as the extra (for the non-torch deps). The CPU wheels carry a `+cpu`
+# local version tag, which sorts ABOVE the plain PyPI version, so pip prefers
+# them — and the CPU torch wheel simply doesn't declare the nvidia-* deps, so
+# they're never pulled. Installing in two separate commands does NOT work: the
+# second resolve sees only PyPI and re-pulls the CUDA torch. The final cleanup
+# strips compiled bytecode and torch's C++ headers/test suite (unused at runtime).
+RUN if [ "$WITH_CHATTERBOX" = "1" ]; then \
+      echo "Bundling Chatterbox Turbo (PyTorch, CPU-only) — adds ~3-4GB to the image" && \
+      python3 -m venv /opt/chatterbox/venv && \
+      /opt/chatterbox/venv/bin/pip install --no-cache-dir --upgrade pip && \
+      /opt/chatterbox/venv/bin/pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu \
+        --extra-index-url https://pypi.org/simple \
+        torch torchaudio "${CHATTERBOX_PIP_PKG}" && \
+      /opt/chatterbox/venv/bin/python -c \
+        "from chatterbox.tts_turbo import ChatterboxTurboTTS; ChatterboxTurboTTS.from_pretrained(device='cpu')" && \
+      find /opt/chatterbox/venv -depth -type d -name __pycache__ -exec rm -rf {} + && \
+      SP=/opt/chatterbox/venv/lib/python3.11/site-packages && \
+      rm -rf "$SP/torch/include" "$SP/torch/test" ; \
+    else \
+      echo "Chatterbox not bundled — build with --build-arg WITH_CHATTERBOX=1 to include it" ; \
+    fi
+
 # --- Controller app -------------------------------------------------------
 WORKDIR /app
 COPY controller/package*.json ./

@@ -1,4 +1,5 @@
 import ManualPage from './ManualPage';
+import CodeBlock from '../setup/CodeBlock';
 
 export default function HowTheDjWorks() {
   return (
@@ -41,8 +42,8 @@ export default function HowTheDjWorks() {
         <h2>Local voices, or the cloud.</h2>
         <p>
           The DJ's words are written by the language model, but turning them into speech
-          is a separate job — handled by one of three text-to-speech engines the operator
-          chooses under <strong>Admin &rarr; TTS voice</strong>. Two run on your own
+          is a separate job — handled by one of four text-to-speech engines the operator
+          chooses under <strong>Admin &rarr; TTS voice</strong>. Three run on your own
           hardware, one is hosted.
         </p>
         <ul className="bs-list">
@@ -60,8 +61,15 @@ export default function HowTheDjWorks() {
             the console.
           </li>
           <li>
+            <strong>Chatterbox</strong> — a local model that clones a voice from a short
+            reference clip, so each persona can have its own distinct sound, and voices
+            paralinguistic cues like <em>[laugh]</em> and <em>[sigh]</em> as real sounds.
+            The most capable local engine and the heaviest — comfortable on a GPU, slow
+            on CPU — and opt-in: the operator bundles it into the controller image.
+          </li>
+          <li>
             <strong>Cloud</strong> — hosted text-to-speech through OpenAI or ElevenLabs,
-            using an API key. The most lifelike and expressive of the three, but it costs
+            using an API key. The most lifelike and expressive of the four, but it costs
             per use and depends on the network being up.
           </li>
         </ul>
@@ -77,6 +85,28 @@ export default function HowTheDjWorks() {
             If a voice ever fails — a cloud outage, a model that isn't installed — the
             station drops to a local engine automatically. Piper is always there as the
             last resort, so a spoken segment is never lost to a missing voice.
+          </p>
+        </div>
+        <div className="bs-callout">
+          <div className="bs-eyebrow">ENABLING CHATTERBOX</div>
+          <p>
+            Piper and Kokoro ship inside the controller image, and the cloud engine just
+            needs an API key — but Chatterbox is the exception. Its model and PyTorch
+            runtime are large, so it is <em>opt-in at build time</em> rather than bundled
+            by default. Rebuild the controller image with the{' '}
+            <code className="bs-code-inline">WITH_CHATTERBOX</code> build argument, then
+            recreate the container:
+          </p>
+          <CodeBlock>{`cd docker
+docker compose build --build-arg WITH_CHATTERBOX=1 controller
+docker compose up -d controller`}</CodeBlock>
+          <p>
+            Once the image is built, Chatterbox shows up as an available engine under{' '}
+            <strong>Admin &rarr; TTS voice</strong>. To give a persona a cloned voice,
+            drop a short reference WAV into{' '}
+            <code className="bs-code-inline">state/chatterbox-voices/</code> and pick it
+            on the Personas page — without one, Chatterbox uses its built-in voice. Until
+            the image is rebuilt, selecting Chatterbox simply falls back to Piper.
           </p>
         </div>
       </section>

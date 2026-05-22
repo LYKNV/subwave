@@ -6,11 +6,12 @@
 
 import * as piper from './piper.js';
 import * as kokoro from './kokoro.js';
+import * as chatterbox from './chatterbox.js';
 import * as cloud from '../llm/speech.js';
 import * as settings from '../settings.js';
 import { recordTts } from '../stats.js';
 
-export const ENGINES = ['piper', 'kokoro', 'cloud'];
+export const ENGINES = ['piper', 'kokoro', 'chatterbox', 'cloud'];
 
 // Voice kinds the system speaks. `kind` is passed by the caller and used to
 // look up an engine override in settings. Unknown kinds fall back to default.
@@ -60,6 +61,12 @@ function resolveEngine(kind: string, personaTts: any) {
       return tts.defaultEngine && tts.defaultEngine !== 'cloud' ? tts.defaultEngine : 'piper';
     }
   }
+  // Chatterbox is opt-in — if the controller image wasn't built with
+  // --build-arg WITH_CHATTERBOX=1, the venv isn't there. Skip straight to a
+  // local engine instead of trying to spawn a Python that doesn't exist.
+  if (chosen === 'chatterbox' && !chatterbox.isAvailable()) {
+    return tts.defaultEngine && tts.defaultEngine !== 'chatterbox' ? tts.defaultEngine : 'piper';
+  }
   return chosen;
 }
 
@@ -69,6 +76,15 @@ async function speakWith(engine: string, text: string, opts: any, personaTts: an
       ? personaTts.voice
       : settings.get().tts?.kokoro?.voice;
     return kokoro.speak(text, { ...opts, voice });
+  }
+  if (engine === 'chatterbox') {
+    // For chatterbox, persona's `voice` is a reference-WAV filename (resolved
+    // by chatterbox.ts against config.chatterbox.voiceDir). Empty/missing →
+    // built-in default voice.
+    const voice = (personaTts && personaTts.engine === 'chatterbox' && personaTts.voice)
+      ? personaTts.voice
+      : settings.get().tts?.chatterbox?.referenceVoice;
+    return chatterbox.speak(text, { ...opts, voice });
   }
   if (engine === 'cloud') {
     // Persona picks provider + voice; the shared tts.cloud holds key + model.
@@ -107,6 +123,9 @@ export async function speak(text: string, { kind = 'default', outPath }: { kind?
     });
     return result;
   } catch (err) {
+    // Piper is the universal local fallback — no model load, no API key.
+    // From any non-piper engine we always fall back to piper; if piper itself
+    // is the primary, try kokoro (only if its worker is installed).
     const fallback = primary === 'piper' ? 'kokoro' : 'piper';
     if (fallback === 'kokoro' && !kokoro.isAvailable()) {
       recordTts({
@@ -144,6 +163,7 @@ export function availableEngines() {
   return {
     piper: true,
     kokoro: kokoro.isAvailable(),
+    chatterbox: chatterbox.isAvailable(),
     cloud: cloud.isConfigured(),
     // Per-provider — a persona's cloud voice is only usable if *its* provider
     // is configured, which can differ from the global Cloud-engine provider.
@@ -173,6 +193,11 @@ export function describeRouting() {
     voice = (personaTts?.engine === 'kokoro' && personaTts.voice)
       ? personaTts.voice
       : tts.kokoro?.voice;
+  } else if (engine === 'chatterbox') {
+    // For chatterbox, `voice` is the reference-WAV filename; empty → built-in.
+    voice = (personaTts?.engine === 'chatterbox' && personaTts.voice)
+      ? personaTts.voice
+      : (tts.chatterbox?.referenceVoice || null);
   }
   return {
     effectivePersona: persona ? { id: persona.id, name: persona.name } : null,

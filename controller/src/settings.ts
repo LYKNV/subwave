@@ -47,8 +47,13 @@ export const SCRIPT_LENGTHS = ['concise', 'extended'];
 // global defaultEngine.
 //
 // `cloud` routes through the AI SDK (OpenAI / ElevenLabs speech models) —
-// see llm/speech.js. `piper` and `kokoro` stay local CLI/worker engines.
-export const TTS_ENGINES = ['piper', 'kokoro', 'cloud'];
+// see llm/speech.js. `piper`, `kokoro`, and `chatterbox` are local engines.
+// Chatterbox is opt-in — the default controller image doesn't bundle it; build
+// the image with `--build-arg WITH_CHATTERBOX=1` (see docker/Dockerfile.controller)
+// to include the runtime. The dispatcher gates the engine on isAvailable() so
+// settings can reference it safely even when the runtime is absent (the engine
+// just falls back to Piper).
+export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'cloud'];
 
 // LLM provider abstraction. `ollama` is the homelab default; the cloud
 // providers are opt-in and resolved by llm/provider.js. `openrouter` and
@@ -118,6 +123,11 @@ export const KOKORO_VOICES_BRITISH = [
 ];
 
 const KOKORO_VOICE_RE = /^[a-z]{2}_[a-z0-9]+$/;
+// Chatterbox voices are reference-WAV filenames living in
+// config.chatterbox.voiceDir. Loose check — basename only, no path
+// separators, conservative character set, ends in .wav. Empty is also
+// valid (means "use the built-in default voice").
+const CHATTERBOX_VOICE_RE = /^[A-Za-z0-9_.-]{1,80}\.wav$/;
 const ID_RE = /^[a-z0-9_]{3,32}$/;
 // Skill slugs (e.g. 'weather', 'random-facts'). The skills registry is the
 // source of truth for which slugs exist; settings only checks the shape.
@@ -193,6 +203,10 @@ const DEFAULTS = {
   tts: {
     defaultEngine: 'piper',
     kokoro: { voice: 'bf_isabella' },
+    // Global Chatterbox fallback — used as the reference voice when the
+    // engine resolves to chatterbox but no persona-level voice is set.
+    // Empty filename means "use the model's built-in default voice".
+    chatterbox: { referenceVoice: '' },
     // Cloud engine config — used when an engine resolves to 'cloud'. A persona
     // chooses provider+voice; `model` and `apiKey` stay shared here. `apiKey`
     // empty means "read the provider's env var" (OPENAI_API_KEY etc.).
@@ -293,11 +307,15 @@ function normalizeTts(raw: any) {
   let voice =
     typeof raw?.voice === 'string' && raw.voice.trim() ? raw.voice.trim().slice(0, 100) : '';
   if (engine === 'kokoro' && !KOKORO_VOICE_RE.test(voice)) voice = 'bf_isabella';
+  // Chatterbox voices are reference-WAV filenames in config.chatterbox.voiceDir.
+  // Empty is legitimate ("use built-in default"), invalid filenames get reset
+  // to empty rather than rewritten to a Kokoro id.
+  if (engine === 'chatterbox' && voice && !CHATTERBOX_VOICE_RE.test(voice)) voice = '';
   // openai-compatible voices are server-specific (often arbitrary cloning ref
   // names) — no canonical default; leave empty so generateSpeech omits the
   // field and the server picks its own.
   if (!voice && engine === 'cloud' && cloudProvider !== 'openai-compatible') voice = 'alloy';
-  if (!voice && engine !== 'cloud') voice = 'bf_isabella';
+  if (!voice && engine !== 'cloud' && engine !== 'chatterbox') voice = 'bf_isabella';
   return { engine, cloudProvider, voice };
 }
 
@@ -432,6 +450,14 @@ export async function load() {
             ? stored.tts.kokoro.voice
             : DEFAULTS.tts.kokoro.voice,
       },
+      chatterbox: {
+        referenceVoice:
+          typeof stored.tts?.chatterbox?.referenceVoice === 'string' &&
+          (stored.tts.chatterbox.referenceVoice === '' ||
+            CHATTERBOX_VOICE_RE.test(stored.tts.chatterbox.referenceVoice))
+            ? stored.tts.chatterbox.referenceVoice
+            : DEFAULTS.tts.chatterbox.referenceVoice,
+      },
       cloud: {
         // Explicit boolean wins; otherwise an install that already had a saved
         // cloud key keeps cloud on so the upgrade doesn't silently disable it.
@@ -531,6 +557,15 @@ function validateTtsBlock(raw, where) {
     if (!KOKORO_VOICE_RE.test(voice)) {
       throw new Error(
         `${where}.tts.voice must match <lang><gender>_<name> for kokoro, e.g. bf_isabella`,
+      );
+    }
+  } else if (t.engine === 'chatterbox') {
+    // Empty = use built-in default voice. Otherwise the value must be a plain
+    // .wav filename — no path separators — referencing a file the operator has
+    // uploaded into config.chatterbox.voiceDir.
+    if (voice && !CHATTERBOX_VOICE_RE.test(voice)) {
+      throw new Error(
+        `${where}.tts.voice for chatterbox must be a .wav filename (no path), or empty for the default voice`,
       );
     }
   } else if (t.engine === 'cloud') {
@@ -762,6 +797,18 @@ export async function update(patch) {
           throw new Error('tts.kokoro.voice must match <lang><gender>_<name>, e.g. bf_isabella');
         }
         next.tts.kokoro.voice = v;
+      }
+    }
+    if (t.chatterbox !== undefined) {
+      const cb = t.chatterbox || {};
+      if (cb.referenceVoice !== undefined) {
+        const v = String(cb.referenceVoice).trim();
+        if (v && !CHATTERBOX_VOICE_RE.test(v)) {
+          throw new Error(
+            'tts.chatterbox.referenceVoice must be a .wav filename (no path), or empty for the default voice',
+          );
+        }
+        next.tts.chatterbox.referenceVoice = v;
       }
     }
     if (t.cloud !== undefined) {
