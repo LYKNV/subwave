@@ -59,13 +59,25 @@ ENV KOKORO_MODEL=/opt/kokoro/models/kokoro-v1.0.onnx \
 ENV HF_HOME=/opt/chatterbox/hf-cache
 ARG WITH_CHATTERBOX=0
 ARG CHATTERBOX_PIP_PKG=chatterbox-tts
+# torch + torchaudio are installed FIRST from PyTorch's CPU-only wheel index.
+# This matters a lot for image size: the default PyPI `torch` wheel is the
+# CUDA build, which drags in ~3.6GB of NVIDIA libraries (nvidia-*, triton,
+# cusparselt) that are dead weight on a CPU-only station. Installing the CPU
+# wheel first means the subsequent `chatterbox-tts` install sees torch already
+# satisfied and never pulls the CUDA variant. The final cleanup strips compiled
+# bytecode and torch's C++ headers/test suite — neither is needed at runtime.
 RUN if [ "$WITH_CHATTERBOX" = "1" ]; then \
-      echo "Bundling Chatterbox Turbo (PyTorch) — this adds ~2-3GB to the image" && \
+      echo "Bundling Chatterbox Turbo (PyTorch, CPU-only) — adds ~3-4GB to the image" && \
       python3 -m venv /opt/chatterbox/venv && \
       /opt/chatterbox/venv/bin/pip install --no-cache-dir --upgrade pip && \
-      /opt/chatterbox/venv/bin/pip install --no-cache-dir "${CHATTERBOX_PIP_PKG}" torchaudio && \
+      /opt/chatterbox/venv/bin/pip install --no-cache-dir \
+        --index-url https://download.pytorch.org/whl/cpu torch torchaudio && \
+      /opt/chatterbox/venv/bin/pip install --no-cache-dir "${CHATTERBOX_PIP_PKG}" && \
       /opt/chatterbox/venv/bin/python -c \
-        "from chatterbox.tts_turbo import ChatterboxTurboTTS; ChatterboxTurboTTS.from_pretrained(device='cpu')" ; \
+        "from chatterbox.tts_turbo import ChatterboxTurboTTS; ChatterboxTurboTTS.from_pretrained(device='cpu')" && \
+      find /opt/chatterbox/venv -depth -type d -name __pycache__ -exec rm -rf {} + && \
+      SP=/opt/chatterbox/venv/lib/python3.11/site-packages && \
+      rm -rf "$SP/torch/include" "$SP/torch/test" ; \
     else \
       echo "Chatterbox not bundled — build with --build-arg WITH_CHATTERBOX=1 to include it" ; \
     fi
