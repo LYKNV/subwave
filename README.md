@@ -118,36 +118,28 @@ Browsers pull audio directly from Icecast.
 
 ## Quick start (local dev, Mac smoke test)
 
-```bash
-# 1. Bring up Icecast + Liquidsoap + Controller
-cd docker && docker compose up -d
-
-# 2. Controller (separate process)
-cd controller && npm install && npm run dev
-
-# 3. Web UI on :7700 (separate process, hot-reloads)
-cd web && npm install && npm run dev
-```
-
-You'll need a reachable **Navidrome** instance and an **LLM provider** — the
-homelab default is a local **Ollama** box (no API key needed).
-
-The fastest way to get configured is the operator CLI's **setup wizard** — it
-collects Navidrome credentials, the LLM provider/model, and admin login, probes
-each one, writes the env files, and brings the stack up. From the repo root:
+The operator CLI's **setup wizard** handles the whole first boot — preflight
+checks, Navidrome + LLM + admin credentials (each probed live), the env files,
+`scripts/setup.sh` (icecast.xml + studio audio), and `docker compose up -d`.
+From the repo root:
 
 ```bash
-npm install        # installs the CLI's runtime deps (tsx loader)
-npm start -- setup # interactive first-boot wizard
+npm install            # CLI runtime deps (the tsx loader)
+npm start -- setup     # interactive wizard — pick "dev"
+npm run dev:web        # web UI on :7700 — a separate, hot-reloading process
 ```
 
-(Prefer to configure by hand? Set Navidrome credentials in `controller/.env`
-and pick the LLM provider in the admin Settings UI — the wizard just automates
-exactly that.)
+In dev the wizard runs Icecast + Liquidsoap + Controller in Docker; only the
+Next.js web UI runs as a separate host process. You'll need a reachable
+**Navidrome** instance and an **LLM provider** — the homelab default is a local
+**Ollama** box (no API key needed); the wizard collects and probes both.
 
-The same CLI then doubles as the console for running the station. Run
-`npm start` for a status-aware menu; every menu action is also a one-shot
-subcommand — append it after `npm start --`:
+Running the steps by hand instead — see *Common commands* in
+[`CLAUDE.md`](CLAUDE.md).
+
+The same CLI doubles as the console for running the station. Run `npm start`
+for a status-aware menu; every menu action is also a one-shot subcommand —
+append it after `npm start --`:
 
 ```bash
 npm start                       # interactive operator console (status-aware menu)
@@ -167,16 +159,17 @@ npm start -- stop               # docker compose down (confirms first)
 ## Production deploy
 
 Single Linux host, Cloudflare terminating TLS, Caddy routing to four internal
-services. See **[`DEPLOY.md`](DEPLOY.md)** for the full walkthrough — host
-prerequisites, secrets, first boot, jingles, Cloudflare setup, updates, and
-backup.
+services. The same setup wizard covers first boot — run it on the host and
+pick **"prod"**:
 
 ```bash
-./scripts/setup.sh
-docker compose -f docker/docker-compose.prod.yml up -d --build
-./scripts/generate-jingles.sh
-curl http://localhost/api/health        # → {"status":"on-air"}
+npm install
+npm start -- setup     # prod mode — runs scripts/setup.sh, builds and starts
+                       # the prod stack, waits for /health, offers to render jingles
 ```
+
+See **[`DEPLOY.md`](DEPLOY.md)** for the full walkthrough — host prerequisites,
+secrets, Cloudflare setup, updates, and backup.
 
 ## Repository layout
 
