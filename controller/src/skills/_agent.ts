@@ -33,7 +33,7 @@
 import { z } from 'zod';
 import { queue } from '../broadcast/queue.js';
 import * as settings from '../settings.js';
-import { djAgent } from '../llm/sdk.js';
+import { defineAgent } from '../llm/agent.js';
 import { buildContextLines } from '../llm/dj.js';
 import { buildSegmentTools } from '../llm/segment-tools.js';
 import { searchReady } from './web-search.js';
@@ -174,6 +174,19 @@ Capabilities available this tick (pick one of these kinds, or stay silent):
 ${capList}${sfxBlock(sfxCatalog)}`;
 }
 
+// The autonomous segment director — runs every 5 min, decides to air one
+// segment or stay silent. Schema, prompt, and tool builder bundled here; the
+// caller (agenticTick) only feeds the dynamic per-tick state.
+export const directorAgent = defineAgent({
+  kind: 'djAgentSegment',
+  schema: SEGMENT_SCHEMA,
+  buildSystem: ({ persona, caps, freq, sfxCatalog }) =>
+    directorSystem(persona, caps, freq, sfxCatalog),
+  buildTools: ({ ctx, segmentState, caps }) => ({
+    tools: buildSegmentTools(ctx, segmentState, caps),
+  }),
+});
+
 // The concrete situation handed to the agent as its single user turn. Built
 // from what is on air and queue.getDjRecap() (what actually aired recently) —
 // NOT the track-pick session history, which derails small models.
@@ -217,15 +230,12 @@ export async function agenticTick(ctx) {
 
   tickBusy = true;
   try {
-    const tools = buildSegmentTools(ctx, segmentState, caps);
     // Empty catalogue when SFX are disabled — the agent is never offered effects.
     const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
-    const { object } = await djAgent({
-      system: directorSystem(persona, caps, freq, sfxCatalog),
+    const { object } = await directorAgent.run({
       messages: [{ role: 'user', content: buildSituation(ctx) }],
-      tools,
-      schema: SEGMENT_SCHEMA,
-      kind: 'djAgentSegment',
+      persona, caps, freq, sfxCatalog,
+      ctx, segmentState,
     });
 
     const seg = object?.segment;
@@ -318,6 +328,17 @@ The operator asked you to air ONE ${cap.kind} segment now — you must produce a
 ${cap.desc}${sfxBlock(sfxCatalog)}`;
 }
 
+// The operator-override variant of directorAgent — exactly one capability,
+// the segment is mandatory, silence is not an option.
+export const forcedDirectorAgent = defineAgent({
+  kind: 'djAgentSegment',
+  schema: FORCED_SCHEMA,
+  buildSystem: ({ persona, cap, sfxCatalog }) => forcedSystem(persona, cap, sfxCatalog),
+  buildTools: ({ ctx, segmentState, cap }) => ({
+    tools: buildSegmentTools(ctx, segmentState, [cap]),
+  }),
+});
+
 // Operator override — fire one capability on demand, bypassing cooldowns, the
 // frequency floor, persona ownership and the enable toggle. Backs POST
 // /dj/skill. `which` is a kind or skill slug (kept identical). Returns the
@@ -338,15 +359,12 @@ export async function runCapability(which, ctx) {
   }
 
   const persona = settings.getEffectivePersona(new Date());
-  const tools = buildSegmentTools(ctx, segmentState, [cap]);
   // Empty catalogue when SFX are disabled — the agent is never offered effects.
   const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
-  const { object } = await djAgent({
-    system: forcedSystem(persona, cap, sfxCatalog),
+  const { object } = await forcedDirectorAgent.run({
     messages: [{ role: 'user', content: buildSituation(ctx, { forced: true }) }],
-    tools,
-    schema: FORCED_SCHEMA,
-    kind: 'djAgentSegment',
+    persona, cap, sfxCatalog,
+    ctx, segmentState,
   });
 
   const text = object?.text?.trim();

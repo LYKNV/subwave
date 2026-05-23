@@ -16,7 +16,7 @@ import * as settings from '../settings.js';
 import * as session from './session.js';
 import * as picker from '../music/picker.js';
 import * as dj from '../llm/dj.js';
-import { djAgent } from '../llm/sdk.js';
+import { defineAgent } from '../llm/agent.js';
 import { buildPickerTools } from '../llm/tools.js';
 import { recordPick } from '../llm/log.js';
 import { withTrace } from '../observability/events.js';
@@ -56,6 +56,42 @@ function requestSystem() {
 The messages above are the live session — the last user turn is a listener request.`;
 }
 
+// Named agents — the picker and request-handler specs in one declarable block
+// each. `buildSystem` and `buildTools` resolve persona / per-call filters at
+// run time; everything else (schema, step cap, hard timeout, log kind) is
+// fixed here so the spec lives in one place. picker-test.mjs reads
+// `pickerAgent.maxSteps` / `pickerAgent.timeoutMs` so test runs match prod
+// without drifting. The hard timeout is what fails fast into the stateless
+// fallback below instead of dragging on a flaky cloud call.
+export const pickerAgent = defineAgent({
+  kind: 'djAgentPick',
+  schema: PICK_SCHEMA,
+  // On the Ollama done-tool path the loop ends at step 1 (COMMIT_AFTER_STEPS
+  // in sdk.js); maxSteps is the backstop and the budget for the non-Ollama
+  // native path.
+  maxSteps: 4,
+  timeoutMs: 22000,
+  buildSystem: () => pickSystem(),
+  buildTools: ({ recentIds, recentArtists }) => {
+    const { tools, seen } = buildPickerTools({ recentIds, recentArtists });
+    return { tools, extras: { seen } };
+  },
+});
+
+export const requestAgent = defineAgent({
+  kind: 'djAgentRequest',
+  schema: REQUEST_SCHEMA,
+  maxSteps: 4,
+  timeoutMs: 22000,
+  buildSystem: () => requestSystem(),
+  // recentArtists deliberately empty — a request for a recently-played artist
+  // must still resolve.
+  buildTools: ({ recentIds }) => {
+    const { tools, seen } = buildPickerTools({ recentIds });
+    return { tools, extras: { seen } };
+  },
+});
+
 function trackFields(song) {
   return {
     id: song.id,
@@ -91,23 +127,14 @@ async function pickViaAgent(queue, { wantLink }) {
   const recentArtists = new Set<string>(
     queue.getRecentArtists(10).map((a: string) => a.toLowerCase().trim()).filter(Boolean),
   );
-  const { tools, seen } = buildPickerTools({ recentIds, recentArtists });
 
-  const { object, steps, toolCalls } = await djAgent({
-    system: pickSystem(),
+  const { object, steps, toolCalls, extras } = await pickerAgent.run({
     messages: session.windowMessages(),
-    tools,
-    schema: PICK_SCHEMA,
-    // On the Ollama done-tool path the loop ends at step 1 (COMMIT_AFTER_STEPS
-    // in sdk.js); maxSteps is the backstop and the budget for the non-Ollama
-    // native path. timeoutMs is a hard ceiling so a slow/flaky-cloud run fails
-    // fast into the pool-picker fallback below instead of dragging on.
-    maxSteps: 4,
-    timeoutMs: 22000,
-    kind: 'djAgentPick',
+    recentIds,
+    recentArtists,
   });
 
-  const song = object?.id ? seen.get(object.id) : null;
+  const song = object?.id ? extras.seen.get(object.id) : null;
   if (!song) throw new Error(`agent returned unknown id ${object?.id}`);
 
   await enqueuePick(queue, song, object.reason, 'agent');
@@ -200,21 +227,13 @@ export async function runRequest(queue: any, ctx: any, { requester, text: _text 
 
   return withTrace({ kind: 'request', requester }, async () => {
     const recentIds = queue.recentlyPlayedIds(25);
-    const { tools, seen } = buildPickerTools({ recentIds });
 
-    const { object, toolCalls } = await djAgent({
-      system: requestSystem(),
+    const { object, toolCalls, extras } = await requestAgent.run({
       messages: session.windowMessages(),
-      tools,
-      schema: REQUEST_SCHEMA,
-      // See pickViaAgent above — maxSteps is the backstop, timeoutMs the hard
-      // ceiling that fails fast into the stateless matcher fallback.
-      maxSteps: 4,
-      timeoutMs: 22000,
-      kind: 'djAgentRequest',
+      recentIds,
     });
 
-    const song = object?.id ? seen.get(object.id) : null;
+    const song = object?.id ? extras.seen.get(object.id) : null;
     if (!song) throw new Error(`request agent returned unknown id ${object?.id}`);
 
     const intro = typeof object.intro === 'string' ? object.intro.trim() : '';
