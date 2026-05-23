@@ -27,7 +27,7 @@ import { z } from 'zod';
 import { tool } from 'ai';
 import * as settings from '../src/settings.js';
 import { djAgent } from '../src/llm/sdk.js';
-import { pickSystem, PICK_SCHEMA } from '../src/broadcast/dj-agent.js';
+import { pickSystem, PICK_SCHEMA, pickerAgent } from '../src/broadcast/dj-agent.js';
 
 const FAKE_SONGS = [
   { id: 'aaaa1111bbbb2222cccc01', title: 'Late Drive', artist: 'Tegi Pannu', album: 'Drive', year: 2024, genre: 'punjabi' },
@@ -133,10 +133,11 @@ function buildMessagesLong() {
   ];
 }
 
-// maxSteps / timeoutMs default to the live picker call site; override for
-// tuning runs with argv[6] / argv[7].
-const TEST_MAX_STEPS = parseInt(process.argv[6] || '4', 10);
-const TEST_TIMEOUT_MS = parseInt(process.argv[7] || '22000', 10);
+// maxSteps / timeoutMs default to the live picker agent's spec so a tuning
+// change in dj-agent.ts flows here automatically. Override per-run via
+// argv[6] / argv[7].
+const TEST_MAX_STEPS = parseInt(process.argv[6] || String(pickerAgent.maxSteps), 10);
+const TEST_TIMEOUT_MS = parseInt(process.argv[7] || String(pickerAgent.timeoutMs), 10);
 
 async function runOnce(label, messagesMode) {
   const { tools, seen } = buildSyntheticTools();
