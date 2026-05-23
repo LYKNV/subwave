@@ -25,7 +25,7 @@ export default function Updates() {
             <tr><td><code className="bs-code-inline">liquidsoap/radio.liq</code></td><td>liquidsoap</td></tr>
             <tr><td><code className="bs-code-inline">web/**</code></td><td>web (prod) · hot-reload (dev)</td></tr>
             <tr><td><code className="bs-code-inline">docker/Caddyfile</code></td><td>just <code className="bs-code-inline">restart caddy</code> (mounted)</td></tr>
-            <tr><td><code className="bs-code-inline">docker/docker-compose*.yml</code></td><td><code className="bs-code-inline">up -d</code> (compose decides)</td></tr>
+            <tr><td><code className="bs-code-inline">docker-compose*.yml</code></td><td><code className="bs-code-inline">up -d</code> (compose decides)</td></tr>
             <tr><td>README / TODO / docs</td><td>nothing</td></tr>
           </tbody>
         </table>
@@ -33,7 +33,7 @@ export default function Updates() {
         <p className="mt-4">Typical manual deploy:</p>
         <CodeBlock>{`git pull --ff-only
 # rebuild only what changed (example: controller + web)
-docker compose -f docker/docker-compose.prod.yml up -d --build controller web
+docker compose -f docker-compose.prod.yml up -d --build controller web
 # then verify
 ./scripts/health-check.sh`}</CodeBlock>
 
@@ -44,9 +44,9 @@ docker compose -f docker/docker-compose.prod.yml up -d --build controller web
             <code className="bs-code-inline">ghcr.io/perminder-klair/subwave-*</code>{' '}
             instead of building locally, the rebuild step becomes a pull:
           </p>
-          <CodeBlock>{`# pin SUBWAVE_VERSION in docker/.env, then:
-docker compose -f docker/docker-compose.prod.yml pull
-docker compose -f docker/docker-compose.prod.yml up -d`}</CodeBlock>
+          <CodeBlock>{`# pin SUBWAVE_VERSION in .env, then:
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d`}</CodeBlock>
           <p className="text-muted">
             Same flow if you're on{' '}
             <code className="bs-code-inline">docker-compose.byo-proxy.yml</code> — just
@@ -72,11 +72,11 @@ docker compose -f docker/docker-compose.prod.yml up -d`}</CodeBlock>
         <ul className="bs-list">
           <li>
             <strong>Controller logs</strong> —{' '}
-            <code className="bs-code-inline">docker compose -f docker/docker-compose.prod.yml logs -f controller</code>
+            <code className="bs-code-inline">docker compose -f docker-compose.prod.yml logs -f controller</code>
           </li>
           <li>
             <strong>Liquidsoap logs</strong> —{' '}
-            <code className="bs-code-inline">docker compose -f docker/docker-compose.prod.yml logs -f liquidsoap</code>
+            <code className="bs-code-inline">docker compose -f docker-compose.prod.yml logs -f liquidsoap</code>
           </li>
           <li>
             <strong>Operator console</strong> —{' '}

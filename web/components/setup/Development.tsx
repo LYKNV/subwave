@@ -22,17 +22,17 @@ export default function Development() {
           </thead>
           <tbody>
             <tr>
-              <td><code className="bs-code-inline">docker/docker-compose.yml</code></td>
+              <td><code className="bs-code-inline">docker-compose.yml</code></td>
               <td>icecast · liquidsoap · controller (web runs separately on host)</td>
               <td><code className="bs-code-inline">./state</code></td>
             </tr>
             <tr>
-              <td><code className="bs-code-inline">docker/docker-compose.prod.yml</code></td>
+              <td><code className="bs-code-inline">docker-compose.prod.yml</code></td>
               <td>+ web (built image) + caddy edge on <code className="bs-code-inline">:7700</code></td>
               <td><code className="bs-code-inline">${'{STATE_DIR:-<repo>/state}'}</code></td>
             </tr>
             <tr>
-              <td><code className="bs-code-inline">docker/docker-compose.byo-proxy.yml</code></td>
+              <td><code className="bs-code-inline">docker-compose.byo-proxy.yml</code></td>
               <td>same as prod minus caddy — web, controller, icecast on host ports{' '}
                 <code className="bs-code-inline">:7700</code> /{' '}
                 <code className="bs-code-inline">:7701</code> /{' '}
