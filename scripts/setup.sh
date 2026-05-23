@@ -87,9 +87,9 @@ Setup scaffolded.
   .env:      $ROOT_ENV   (admin creds + SITE_URL)
 
 Next:
-  Dev:       docker compose up -d
-  Prod:      docker compose -f docker-compose.prod.yml up -d
-  BYO proxy: docker compose -f docker-compose.byo-proxy.yml up -d
+  Prod:      docker compose up -d
+  BYO proxy: docker compose -f docker-compose.byo.yml up -d
+  Dev:       docker compose -f docker-compose.dev.yml up -d
 
 Then visit http://localhost:7700/onboarding to finish configuration
 (Navidrome, LLM, TTS, DJ persona, jingles). Or run 'npm run setup' for the

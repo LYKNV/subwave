@@ -13,7 +13,7 @@ cd "$(dirname "$0")/.."
 [[ -z "${STATE_DIR:-}" && -f .env ]] && \
   STATE_DIR=$(grep -E '^STATE_DIR=' .env | cut -d= -f2-)
 STATE_DIR="${STATE_DIR:-$(pwd)/state}"
-COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
+COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 COMPOSE="docker compose -f ${COMPOSE_FILE}"
 
 JINGLES=(

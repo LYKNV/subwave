@@ -15,10 +15,10 @@ The wizard is independent of the install style — both wizards write to the sam
 | You want… | Run |
 |---|---|
 | **Hack on the code locally** (Mac smoke test, branch testing) | `git clone … && cd subwave && npm install && npm run setup` → pick **dev** |
-| **Run a public station** on a Linux box, no source clone | `mkdir subwave && cd subwave && curl -O .../docker-compose.prod.yml && curl -O .../.env.example && mv .env.example .env && $EDITOR .env && docker compose -f docker-compose.prod.yml up -d && open https://your-host/onboarding` |
-| **Run a public station** but you already have Traefik / nginx / your own Caddy | Same as above, but `docker-compose.byo-proxy.yml` |
+| **Run a public station** on a Linux box, no source clone | `mkdir subwave && cd subwave && curl -O .../docker-compose.yml && curl -O .../.env.example && mv .env.example .env && $EDITOR .env && docker compose up -d && open https://your-host/onboarding` |
+| **Run a public station** but you already have Traefik / nginx / your own Caddy | Same as above, but `docker-compose.byo.yml` |
 | **Prefer the terminal wizard, but want a prod install** | `git clone … && cd subwave && npm install && npm run setup` → pick **prod** |
-| **Already cloned, but prefer the browser** | `./scripts/setup.sh && docker compose -f docker-compose.prod.yml up -d --build && open http://localhost:7700/onboarding` |
+| **Already cloned, but prefer the browser** | `./scripts/setup.sh && docker compose up -d --build && open http://localhost:7700/onboarding` |
 
 Everything below is the longer version.
 
@@ -28,35 +28,21 @@ Everything below is the longer version.
 
 The three compose files at the repo root.
 
-### `docker-compose.yml` — dev
+### `docker-compose.yml` — production with bundled Caddy (default)
 
-For local hacking. Spins up **3 containers** (Icecast + Liquidsoap + Controller).
-The web UI runs **outside Docker** as a Next.js dev server (`npm run dev` on
-:7700) so JSX edits hot-reload instantly. `radio.liq` and `sounds/` are
-**bind-mounted** so editing the mixer script or dropping in new audio
-doesn't need a rebuild.
-
-```bash
-docker compose up -d                # icecast + liquidsoap + controller
-cd web && npm run dev               # web UI on :7700, separate process
-```
-
-State lives at `./state/` (repo-local).
-
-### `docker-compose.prod.yml` — production with bundled Caddy
-
-For a public single-host deploy. Spins up **5 containers** (Caddy + Icecast +
-Liquidsoap + Controller + Web). **Only Caddy binds a host port** (default
-`:7700`); everything else is internal to the docker network and reachable
-through Caddy's reverse proxy. Cloudflare is expected to terminate TLS in
-front. `radio.liq`, `sounds/`, and the Caddyfile are **baked into images** —
-no bind mounts, no clone needed.
+For a public single-host deploy — the file a fresh `docker compose up -d`
+picks up. Spins up **5 containers** (Caddy + Icecast + Liquidsoap +
+Controller + Web). **Only Caddy binds a host port** (default `:7700`);
+everything else is internal to the docker network and reachable through
+Caddy's reverse proxy. Cloudflare is expected to terminate TLS in front.
+`radio.liq`, `sounds/`, and the Caddyfile are **baked into images** — no
+bind mounts, no clone needed.
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d
+docker compose up -d
 ```
 
-### `docker-compose.byo-proxy.yml` — production, your own reverse proxy
+### `docker-compose.byo.yml` — production, your own reverse proxy
 
 Same as prod, but **without the bundled Caddy**. If you already run Traefik,
 nginx, your own Caddy, etc., use this variant. Web (`:7700`), Controller
@@ -64,8 +50,24 @@ nginx, your own Caddy, etc., use this variant. Web (`:7700`), Controller
 to front. Use `docker/Caddyfile` as the reference route table to replicate.
 
 ```bash
-docker compose -f docker-compose.byo-proxy.yml up -d
+docker compose -f docker-compose.byo.yml up -d
 ```
+
+### `docker-compose.dev.yml` — local development
+
+For local hacking. Spins up **3 containers** (Icecast + Liquidsoap +
+Controller). The web UI runs **outside Docker** as a Next.js dev server
+(`npm run dev` on :7700) so JSX edits hot-reload instantly.
+`controller/src/`, `radio.liq`, and `sounds/` are **bind-mounted** so
+editing the controller, the mixer script, or dropping in new audio doesn't
+need a rebuild — the controller container runs under `tsx watch`.
+
+```bash
+docker compose -f docker-compose.dev.yml up -d   # icecast + liquidsoap + controller
+cd web && npm run dev                             # web UI on :7700, separate process
+```
+
+State lives at `./state/` (repo-local).
 
 ---
 
@@ -91,11 +93,11 @@ The headline path. Two `curl`s, three env vars, then a browser wizard.
 
 ```bash
 mkdir subwave && cd subwave
-curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.prod.yml
+curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.yml
 curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/.env.example
 mv .env.example .env
 $EDITOR .env                                  # set ADMIN_USER, ADMIN_PASS, SITE_URL
-docker compose -f docker-compose.prod.yml up -d
+docker compose up -d
 open https://your-host/onboarding             # browser wizard finishes setup
 ```
 
@@ -107,9 +109,9 @@ Same browser wizard, just from a local clone (handy when you want the operator c
 git clone https://github.com/perminder-klair/subwave.git
 cd subwave
 ./scripts/setup.sh                            # scaffolds 3-var root .env + state/
-docker compose -f docker-compose.prod.yml up -d --build   # prod (builds images locally)
+docker compose up -d --build                              # prod (builds images locally)
 # or for dev:
-docker compose up -d && (cd web && npm run dev &)
+docker compose -f docker-compose.dev.yml up -d && (cd web && npm run dev &)
 open http://localhost:7700/onboarding
 ```
 
@@ -181,10 +183,10 @@ npm start -- restart controller # rebuild + recreate (source is COPY-d at build)
 For no-clone installs, the equivalents are:
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f controller   # logs
-docker compose -f docker-compose.prod.yml up -d                # restart after .env edit
-docker compose -f docker-compose.prod.yml pull                 # pull newer images
-docker compose -f docker-compose.prod.yml up -d                # recreate with new images
+docker compose logs -f controller   # logs
+docker compose up -d                # restart after .env edit
+docker compose pull                 # pull newer images
+docker compose up -d                # recreate with new images
 ```
 
 …or visit `/admin` (after signing in with `ADMIN_USER` / `ADMIN_PASS`) for
@@ -250,6 +252,6 @@ need to be UI-managed because the schema is too rich for env vars.
 
 ## What's intentionally not included
 
-- **A `curl | sh` installer.** The two-file install (`curl docker-compose.prod.yml` + `curl .env.example`) is the deliberate "as simple as it can be without piping random scripts into your shell" line.
+- **A `curl | sh` installer.** The two-file install (`curl docker-compose.yml` + `curl .env.example`) is the deliberate "as simple as it can be without piping random scripts into your shell" line.
 - **Multi-arch (arm64) images.** Piper, Kokoro, and Chatterbox wheels are amd64-only. Pin a Linux/amd64 host.
 - **Multi-host / k8s.** SUB/WAVE is a personal radio station — one Icecast mount, one broadcast. Scaling horizontally would mean per-listener streams, which defeats the design.

@@ -33,7 +33,7 @@ export default function Updates() {
         <p className="mt-4">Typical manual deploy:</p>
         <CodeBlock>{`git pull --ff-only
 # rebuild only what changed (example: controller + web)
-docker compose -f docker-compose.prod.yml up -d --build controller web
+docker compose up -d --build controller web
 # then verify
 ./scripts/health-check.sh`}</CodeBlock>
 
@@ -45,11 +45,11 @@ docker compose -f docker-compose.prod.yml up -d --build controller web
             instead of building locally, the rebuild step becomes a pull:
           </p>
           <CodeBlock>{`# pin SUBWAVE_VERSION in .env, then:
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d`}</CodeBlock>
+docker compose pull
+docker compose up -d`}</CodeBlock>
           <p className="text-muted">
             Same flow if you're on{' '}
-            <code className="bs-code-inline">docker-compose.byo-proxy.yml</code> — just
+            <code className="bs-code-inline">docker-compose.byo.yml</code> — just
             swap the file flag.
           </p>
         </div>
@@ -72,11 +72,11 @@ docker compose -f docker-compose.prod.yml up -d`}</CodeBlock>
         <ul className="bs-list">
           <li>
             <strong>Controller logs</strong> —{' '}
-            <code className="bs-code-inline">docker compose -f docker-compose.prod.yml logs -f controller</code>
+            <code className="bs-code-inline">docker compose logs -f controller</code>
           </li>
           <li>
             <strong>Liquidsoap logs</strong> —{' '}
-            <code className="bs-code-inline">docker compose -f docker-compose.prod.yml logs -f liquidsoap</code>
+            <code className="bs-code-inline">docker compose logs -f liquidsoap</code>
           </li>
           <li>
             <strong>Operator console</strong> —{' '}

@@ -34,7 +34,7 @@ npm run setup`}</CodeBlock>
             <p className="bs-eyebrow">DEV</p>
             <ul className="bs-list">
               <li>
-                <code className="bs-code-inline">docker-compose.yml</code>
+                <code className="bs-code-inline">docker-compose.dev.yml</code>
               </li>
               <li>
                 state in <code className="bs-code-inline">./state</code>
@@ -49,7 +49,7 @@ npm run setup`}</CodeBlock>
             <p className="bs-eyebrow">PRODUCTION</p>
             <ul className="bs-list">
               <li>
-                <code className="bs-code-inline">docker-compose.prod.yml</code> with{' '}
+                <code className="bs-code-inline">docker-compose.yml</code> with{' '}
                 <code className="bs-code-inline">--build</code>
               </li>
               <li>
@@ -66,7 +66,7 @@ npm run setup`}</CodeBlock>
             <p className="bs-eyebrow">PROD (BYO PROXY)</p>
             <ul className="bs-list">
               <li>
-                <code className="bs-code-inline">docker-compose.byo-proxy.yml</code> —
+                <code className="bs-code-inline">docker-compose.byo.yml</code> —
                 no bundled Caddy
               </li>
               <li>

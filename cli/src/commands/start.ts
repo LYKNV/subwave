@@ -122,17 +122,17 @@ async function pickEnv(arg?: StartableEnv): Promise<ComposeFile | null> {
       {
         value: 'dev',
         label: 'dev',
-        hint: 'docker-compose.yml · controller :7701 · web dev separately on :7700',
+        hint: 'docker-compose.dev.yml · controller :7701 · web dev separately on :7700',
       },
       {
         value: 'prod',
         label: 'prod',
-        hint: 'docker-compose.prod.yml · Caddy on :7700 · web baked into image',
+        hint: 'docker-compose.yml · Caddy on :7700 · web baked into image',
       },
       {
         value: 'prod-byo',
         label: 'prod (BYO proxy)',
-        hint: 'docker-compose.byo-proxy.yml · web :7700 · controller :7701 · icecast :7702',
+        hint: 'docker-compose.byo.yml · web :7700 · controller :7701 · icecast :7702',
       },
     ],
   }));

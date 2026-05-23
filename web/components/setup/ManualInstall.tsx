@@ -26,11 +26,11 @@ export default function ManualInstall() {
             <h3>Grab the two files</h3>
             <p>
               No clone needed. SUB/WAVE installs from a single{' '}
-              <code className="bs-code-inline">docker-compose.prod.yml</code> + a 3-var{' '}
+              <code className="bs-code-inline">docker-compose.yml</code> + a 3-var{' '}
               <code className="bs-code-inline">.env</code>:
             </p>
             <CodeBlock>{`mkdir subwave && cd subwave
-curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.prod.yml
+curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.yml
 curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/.env.example
 mv .env.example .env
 $EDITOR .env`}</CodeBlock>
@@ -58,7 +58,7 @@ $EDITOR .env`}</CodeBlock>
           <div className="bs-step-num">02</div>
           <div className="bs-step-body">
             <h3>Boot the stack</h3>
-            <CodeBlock>{`docker compose -f docker-compose.prod.yml up -d`}</CodeBlock>
+            <CodeBlock>{`docker compose up -d`}</CodeBlock>
             <p>What just started:</p>
             <ul className="bs-list">
               <li>
@@ -81,7 +81,7 @@ $EDITOR .env`}</CodeBlock>
             <div className="bs-callout">
               <div className="bs-eyebrow">PIN A VERSION</div>
               <p>
-                <code className="bs-code-inline">docker-compose.prod.yml</code> pulls{' '}
+                <code className="bs-code-inline">docker-compose.yml</code> pulls{' '}
                 <code className="bs-code-inline">ghcr.io/perminder-klair/subwave-*:latest</code>{' '}
                 by default. Pin a specific release with{' '}
                 <code className="bs-code-inline">SUBWAVE_VERSION=v1.2.3</code> in your
@@ -94,7 +94,7 @@ $EDITOR .env`}</CodeBlock>
               <div className="bs-eyebrow">ALREADY RUNNING TRAEFIK OR NGINX?</div>
               <p>
                 Swap the compose file for{' '}
-                <code className="bs-code-inline">docker-compose.byo-proxy.yml</code> —
+                <code className="bs-code-inline">docker-compose.byo.yml</code> —
                 same stack minus the bundled Caddy, with web / controller / icecast bound to{' '}
                 <code className="bs-code-inline">:7700</code> /{' '}
                 <code className="bs-code-inline">:7701</code> /{' '}

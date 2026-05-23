@@ -122,11 +122,11 @@ Browsers pull audio directly from Icecast.
 
 ```bash
 mkdir subwave && cd subwave
-curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.prod.yml
+curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/docker-compose.yml
 curl -O https://raw.githubusercontent.com/perminder-klair/subwave/main/.env.example
 mv .env.example .env
 # Edit .env — set ADMIN_USER, ADMIN_PASS, SITE_URL (three vars, that's it).
-docker compose -f docker-compose.prod.yml up -d
+docker compose up -d
 # Then open https://your-host/onboarding — the web wizard collects Navidrome,
 # LLM, TTS, DJ persona, and offers to render jingles.
 ```
@@ -141,14 +141,15 @@ shows) goes through the existing `settings.json`.
 
 ```bash
 git clone https://github.com/perminder-klair/subwave.git && cd subwave
-./scripts/setup.sh          # scaffolds a 3-var root .env + state/
-docker compose up -d        # Icecast + Liquidsoap + Controller — from repo root
-cd web && npm install && npm run dev   # web UI on :7700 — separate, hot-reloading
+./scripts/setup.sh                                  # scaffolds a 3-var root .env + state/
+docker compose -f docker-compose.dev.yml up -d      # Icecast + Liquidsoap + Controller
+cd web && npm install && npm run dev                # web UI on :7700 — separate, hot-reloading
 # Then http://localhost:7700/onboarding to finish configuration.
 ```
 
-Dev compose still bind-mounts `radio.liq` and `sounds/` from the repo so edits
-take effect with a `docker compose restart liquidsoap` — no rebuild.
+Dev compose bind-mounts `controller/src/`, `radio.liq`, and `sounds/` from the
+repo. Controller runs under `tsx watch` so `src/**` edits hot-reload inside
+the container; `radio.liq` edits just need a `docker compose -f docker-compose.dev.yml restart liquidsoap`.
 
 The operator CLI is still around — `npm start` opens the status-aware menu,
 and `npm start -- doctor` runs the diagnostic sweep. See *Common commands* in
@@ -185,7 +186,7 @@ prerequisites, Cloudflare setup, updates, and backup.
 own Caddy in your homelab, swap the bundled-Caddy compose for the BYO variant:
 
 ```bash
-docker compose -f docker-compose.byo-proxy.yml up -d
+docker compose -f docker-compose.byo.yml up -d
 ```
 
 That exposes the web UI on `:7700`, the controller API on `:7701`, and the

@@ -23,10 +23,15 @@ export interface ComposeFile {
   abs: string;  // absolute path
 }
 
+// `docker-compose.yml` is the production default (bundled Caddy) so a
+// fresh-host `docker compose up -d` does the right thing. Dev moves to
+// the explicit `.dev.yml`; BYO-proxy variant is `.byo.yml`. Probe order
+// matters: detectCompose() returns the first file with running
+// containers, so list prod first to prefer it on ambiguity.
 export const COMPOSE_FILES: ComposeFile[] = [
-  { env: 'prod',     file: 'docker-compose.prod.yml',      abs: resolve(REPO_ROOT, 'docker-compose.prod.yml') },
-  { env: 'prod-byo', file: 'docker-compose.byo-proxy.yml', abs: resolve(REPO_ROOT, 'docker-compose.byo-proxy.yml') },
-  { env: 'dev',      file: 'docker-compose.yml',           abs: resolve(REPO_ROOT, 'docker-compose.yml') },
+  { env: 'prod',     file: 'docker-compose.yml',     abs: resolve(REPO_ROOT, 'docker-compose.yml') },
+  { env: 'prod-byo', file: 'docker-compose.byo.yml', abs: resolve(REPO_ROOT, 'docker-compose.byo.yml') },
+  { env: 'dev',      file: 'docker-compose.dev.yml', abs: resolve(REPO_ROOT, 'docker-compose.dev.yml') },
 ];
 
 // `prod` and `prod-byo` differ in routing surface (bundled Caddy vs external
