@@ -35,6 +35,36 @@ Open an issue with:
 - Don't commit secrets. `.env` files are gitignored; update the `.env.example`
   files instead when you add config.
 
+## Commit messages
+
+We use [Conventional Commits](https://www.conventionalcommits.org/) so
+[`release-please`](https://github.com/googleapis/release-please) can maintain
+the version and `CHANGELOG.md` automatically. The prefix decides the version
+bump and the changelog section:
+
+```
+feat: add llama.cpp model switching       # → minor bump, "Features"
+fix(ui): handle empty model list          # → patch bump, "Bug Fixes"
+docs: update README install steps         # → no bump, "Documentation"
+chore: bump deps                          # → no bump, hidden
+feat!: rename /request payload field      # → major bump (breaking)
+```
+
+A scope in parens (`fix(ui): …`, `feat(controller): …`) is optional but helps
+when skimming the changelog. Use `!` after the type, or a `BREAKING CHANGE:`
+footer, for anything that breaks compatibility.
+
+PR titles follow the same convention — squash-merging then produces a clean
+commit on `main` that release-please can read.
+
+## Releases
+
+You don't cut releases by hand. On every push to `main`, the **Release Please**
+workflow opens (or updates) a release PR that bumps `package.json` +
+`CHANGELOG.md` based on the Conventional Commits since the last tag. Merging
+that PR creates a `vX.Y.Z` tag and a GitHub Release, which triggers
+`publish-images.yml` to build and push the three Docker images to GHCR.
+
 ## Code of conduct
 
 Be respectful and constructive. Harassment or abuse of any kind isn't welcome
