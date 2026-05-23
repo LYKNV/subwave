@@ -1,6 +1,6 @@
 'use client';
 
-import { useRef, type ReactNode } from 'react';
+import { useLayoutEffect, useRef, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import {
   AnimatePresence,
@@ -46,6 +46,15 @@ export function Sheet({ open, onOpenChange, title, children, container }: SheetP
 
   const x = useMotionValue(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Reset the drag offset whenever the drawer opens. The exit animation slides
+  // the m.div to x: 100% on close — and because useMotionValue persists across
+  // the AnimatePresence mount cycle, that stale offset would otherwise carry
+  // into the next open and render the drawer off-screen to the right.
+  // useLayoutEffect runs before paint so the user never sees the wrong frame.
+  useLayoutEffect(() => {
+    if (open) x.set(0);
+  }, [open, x]);
 
   const bind = useDrag(
     ({ first, movement: [mx], velocity: [vx], cancel, last, event }) => {
