@@ -11,13 +11,17 @@
 // so the operator doesn't have to remember which is which.
 
 import { detectCompose, listDeclaredServices, type ComposeFile, type ComposeEnv } from '../compose.ts';
-import { composeRestart, composeUpBuild } from '../docker.ts';
+import { composeRestart, composeUpBuild, composeUpRecreate } from '../docker.ts';
+import { isCloneMode } from '../home.ts';
+import { getSubwaveHome } from '../util.ts';
 import { exitIfCancelled, ok, err, info, muted, p, pc, pauseForEnter, header } from '../ui.ts';
 import { maybeStartWebDev, stopWebDev } from '../web-dev.ts';
 
 // Sentinel service name for the host-side web dev server (not a compose
 // service in dev mode). Same string the operator sees in the picker.
 const WEB_DEV_SERVICE = 'web (dev)';
+// Sentinel for "bounce every service in the stack at once".
+const ALL_SERVICES = '__all__';
 
 interface ServicePolicy {
   rebuild: boolean;
@@ -50,6 +54,21 @@ export async function runRestartCommand(opts: RestartOpts = {}): Promise<void> {
   const service = opts.service ?? (await pickService(current.file, current.env));
   if (!service) return;
 
+  // Full-stack: bounce every service AND re-read .env. Uses
+  // `--force-recreate` so the operator's mental model of "restart"
+  // (everything gets a fresh process) matches the behaviour, instead of
+  // `up -d` quietly no-op'ing services whose config hasn't changed.
+  if (service === ALL_SERVICES) {
+    header('Restarting full stack');
+    muted(`docker compose -f ${current.file.file} up -d --force-recreate`);
+    console.log();
+    const code = await composeUpRecreate(current.file);
+    if (code !== 0) err(`docker compose exited ${code}`);
+    else ok('full stack recreated.');
+    await pauseForEnter();
+    return;
+  }
+
   // Host-side web dev server — not a compose service, no docker involved.
   if (service === WEB_DEV_SERVICE || service === 'web-dev') {
     if (current.env !== 'dev') {
@@ -72,22 +91,40 @@ export async function runRestartCommand(opts: RestartOpts = {}): Promise<void> {
   }
 
   const policy = POLICY[service] ?? { rebuild: false, hint: 'restart' };
-  const rebuild = opts.forceBuild || policy.rebuild;
+  // Rebuild is only possible in clone mode — standalone installs have no
+  // source or Dockerfile to build from. On standalone, fall back to
+  // `up -d --force-recreate` instead of erroring out: that bounces the
+  // container and re-reads .env (the realistic restart intent on a
+  // standalone install), without trying to build anything.
+  const cloneMode = isCloneMode(getSubwaveHome());
+  const wantsBuild = opts.forceBuild || policy.rebuild;
+  const action: 'build' | 'recreate' | 'restart' =
+    wantsBuild && cloneMode  ? 'build' :
+    wantsBuild && !cloneMode ? 'recreate' :
+                               'restart';
 
-  header(`${rebuild ? 'Rebuilding' : 'Restarting'} ${service}`);
-  muted(rebuild
-    ? `docker compose -f ${current.file.file} up -d --build ${service}`
-    : `docker compose -f ${current.file.file} restart ${service}`);
+  const verb = action === 'build' ? 'Rebuilding' : action === 'recreate' ? 'Recreating' : 'Restarting';
+  header(`${verb} ${service}`);
+  muted(
+    action === 'build'    ? `docker compose -f ${current.file.file} up -d --build ${service}` :
+    action === 'recreate' ? `docker compose -f ${current.file.file} up -d --force-recreate ${service}` :
+                            `docker compose -f ${current.file.file} restart ${service}`
+  );
+  if (wantsBuild && !cloneMode) {
+    muted('(standalone install — no source to rebuild from; recreating to re-read .env instead)');
+  }
   console.log();
 
-  const code = rebuild
-    ? await composeUpBuild(current.file, service)
-    : await composeRestart(current.file, service);
+  const code =
+    action === 'build'    ? await composeUpBuild(current.file, service) :
+    action === 'recreate' ? await composeUpRecreate(current.file, service) :
+                            await composeRestart(current.file, service);
 
   if (code !== 0) {
     err(`docker compose exited ${code}`);
   } else {
-    ok(`${service} ${rebuild ? 'rebuilt + recreated' : 'restarted'}.`);
+    const past = action === 'build' ? 'rebuilt + recreated' : action === 'recreate' ? 'recreated' : 'restarted';
+    ok(`${service} ${past}.`);
   }
   await pauseForEnter();
 }
@@ -115,6 +152,13 @@ async function pickService(file: ComposeFile, env: ComposeEnv): Promise<string |
       hint: 'kill + respawn `npm run dev` on :7700',
     });
   }
+  // Full-stack option — bounces every service AND re-reads .env. Goes at
+  // the end so the per-service rows are the visual default.
+  options.push({
+    value: ALL_SERVICES,
+    label: pc.bold('all services'),
+    hint: 'force-recreate every container — picks up .env changes',
+  });
   const chosen = exitIfCancelled(await p.select<string>({
     message: 'Which service?',
     options,

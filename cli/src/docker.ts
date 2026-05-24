@@ -46,6 +46,17 @@ export function composeUpBuild(file: ComposeFile, service: string): Promise<numb
   return run(file, ['up', '-d', '--build', service]);
 }
 
+// `docker compose up -d --force-recreate [service]` — bounces the container
+// AND re-reads .env, without rebuilding the image. The right primitive for
+// "restart this on a standalone install" (where there's no build context to
+// rebuild from) and "restart the whole stack and pick up .env changes".
+// Omit `service` to recreate every service in the stack.
+export function composeUpRecreate(file: ComposeFile, service?: string): Promise<number> {
+  const a = ['up', '-d', '--force-recreate'];
+  if (service) a.push(service);
+  return run(file, a);
+}
+
 // Tail logs for one or more services. Inherits stdio so the operator's
 // Ctrl-C breaks out cleanly. Pass an empty array for "all services".
 export function composeLogs(file: ComposeFile, services: string[], tail = 200): Promise<number> {
