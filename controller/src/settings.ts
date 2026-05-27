@@ -53,13 +53,14 @@ export const SCRIPT_LENGTHS = ['concise', 'extended'];
 // global defaultEngine.
 //
 // `cloud` routes through the AI SDK (OpenAI / ElevenLabs speech models) —
-// see llm/speech.js. `piper`, `kokoro`, and `chatterbox` are local engines.
-// Chatterbox is opt-in — the default controller image doesn't bundle it; build
-// the image with `--build-arg WITH_CHATTERBOX=1` (see docker/Dockerfile.controller)
-// to include the runtime. The dispatcher gates the engine on isAvailable() so
-// settings can reference it safely even when the runtime is absent (the engine
-// just falls back to Piper).
-export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'cloud'];
+// see llm/speech.js. `piper`, `kokoro`, `chatterbox`, and `pocket-tts` are
+// local engines. Chatterbox and PocketTTS are opt-in — the default controller
+// image doesn't bundle either; build the image with `--build-arg WITH_CHATTERBOX=1`
+// or `--build-arg WITH_POCKETTTS=1` (see docker/Dockerfile.controller) to
+// include the runtime. The dispatcher gates each engine on isAvailable() so
+// settings can reference it safely even when the runtime is absent (the
+// engine just falls back to Piper).
+export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'];
 
 // LLM provider abstraction. `ollama` is the homelab default; the cloud
 // providers are opt-in and resolved by llm/provider.js. `openrouter` and
@@ -129,6 +130,23 @@ export const KOKORO_VOICES_BRITISH = [
 ];
 
 const KOKORO_VOICE_RE = /^[a-z]{2}_[a-z0-9]+$/;
+// PocketTTS built-in voices — the curated set the admin UI offers. The
+// underlying model also accepts a reference-WAV path for zero-shot cloning,
+// but the v1 wrapper sticks to built-ins (see controller/src/audio/pocketTts.ts).
+// Any voice matching POCKET_TTS_VOICE_RE still passes validation, so an
+// operator can override via POST with an unlisted id and the worker will
+// fall back to the default if the voice isn't recognised.
+export const POCKET_TTS_VOICES = [
+  { id: 'alba', label: 'Alba (EN, F)' },
+  { id: 'anna', label: 'Anna (EN, F)' },
+  { id: 'charles', label: 'Charles (EN, M)' },
+  { id: 'estelle', label: 'Estelle (FR, F)' },
+  { id: 'giovanni', label: 'Giovanni (IT, M)' },
+  { id: 'juergen', label: 'Juergen (DE, M)' },
+  { id: 'lola', label: 'Lola (ES, F)' },
+  { id: 'rafael', label: 'Rafael (PT, M)' },
+];
+const POCKET_TTS_VOICE_RE = /^[a-z][a-z0-9_-]{0,39}$/;
 // Chatterbox voices are reference-WAV filenames living in
 // config.chatterbox.voiceDir. Loose check — basename only, no path
 // separators, conservative character set, ends in .wav. Empty is also
@@ -242,11 +260,22 @@ const DEFAULTS = {
   schedule: emptyWeek(),
   tts: {
     defaultEngine: 'piper',
+    // Advisory flag — does the operator intend to run the optional tts-heavy
+    // sidecar (Chatterbox + PocketTTS)? Both setup wizards (CLI + /onboarding)
+    // write to this so each surface knows the other's choice. Nothing in the
+    // controller branches on it — engine availability is still read from
+    // chatterbox.isAvailable() / pocketTts.isAvailable() at call time, which
+    // is the source of truth. This is purely for the UI to show consistent
+    // state and for the CLI to know whether to write COMPOSE_PROFILES.
+    heavyEnabled: false,
     kokoro: { voice: 'bf_isabella' },
     // Global Chatterbox fallback — used as the reference voice when the
     // engine resolves to chatterbox but no persona-level voice is set.
     // Empty filename means "use the model's built-in default voice".
     chatterbox: { referenceVoice: '' },
+    // Global PocketTTS default voice — used when the engine resolves to
+    // pocket-tts but no persona-level voice is set. Built-in voice id.
+    pocketTts: { voice: 'alba' },
     // Cloud engine config — used when an engine resolves to 'cloud'. A persona
     // chooses provider+voice; `model` and `apiKey` stay shared here. `apiKey`
     // empty means "read the provider's env var" (OPENAI_API_KEY etc.).
@@ -415,6 +444,10 @@ function normalizeTts(raw: any) {
   // Empty is legitimate ("use built-in default"), invalid filenames get reset
   // to empty rather than rewritten to a Kokoro id.
   if (engine === 'chatterbox' && voice && !CHATTERBOX_VOICE_RE.test(voice)) voice = '';
+  // PocketTTS uses plain built-in voice ids (alba, anna, …). Invalid or
+  // missing values reset to the default — the worker also guards against
+  // unknown ids, but normalising here keeps the persisted form clean.
+  if (engine === 'pocket-tts' && (!voice || !POCKET_TTS_VOICE_RE.test(voice))) voice = 'alba';
   // openai-compatible voices are server-specific (often arbitrary cloning ref
   // names) — no canonical default; leave empty so generateSpeech omits the
   // field and the server picks its own.
@@ -580,6 +613,12 @@ export async function load() {
       defaultEngine: TTS_ENGINES.includes(stored.tts?.defaultEngine)
         ? stored.tts.defaultEngine
         : DEFAULTS.tts.defaultEngine,
+      // Stored as a plain boolean; coerce missing/non-boolean (older saves) to
+      // the default. See DEFAULTS.tts.heavyEnabled for the semantics.
+      heavyEnabled:
+        typeof stored.tts?.heavyEnabled === 'boolean'
+          ? stored.tts.heavyEnabled
+          : DEFAULTS.tts.heavyEnabled,
       kokoro: {
         voice:
           typeof stored.tts?.kokoro?.voice === 'string' &&
@@ -594,6 +633,13 @@ export async function load() {
             CHATTERBOX_VOICE_RE.test(stored.tts.chatterbox.referenceVoice))
             ? stored.tts.chatterbox.referenceVoice
             : DEFAULTS.tts.chatterbox.referenceVoice,
+      },
+      pocketTts: {
+        voice:
+          typeof stored.tts?.pocketTts?.voice === 'string' &&
+          POCKET_TTS_VOICE_RE.test(stored.tts.pocketTts.voice)
+            ? stored.tts.pocketTts.voice
+            : DEFAULTS.tts.pocketTts.voice,
       },
       cloud: {
         // Explicit boolean wins; otherwise an install that already had a saved
@@ -834,6 +880,16 @@ function validateTtsBlock(raw, where) {
     if (voice && !CHATTERBOX_VOICE_RE.test(voice)) {
       throw new Error(
         `${where}.tts.voice for chatterbox must be a .wav filename (no path), or empty for the default voice`,
+      );
+    }
+  } else if (t.engine === 'pocket-tts') {
+    // Built-in voice id — alba, anna, charles, … Curated set lives in
+    // POCKET_TTS_VOICES; anything else passing the regex is also accepted
+    // (the worker falls back to the default for unknown ids).
+    if (!voice) voice = 'alba';
+    if (!POCKET_TTS_VOICE_RE.test(voice)) {
+      throw new Error(
+        `${where}.tts.voice for pocket-tts must be a built-in voice id (lowercase, e.g. alba)`,
       );
     }
   } else if (t.engine === 'cloud') {
@@ -1139,6 +1195,12 @@ export async function update(patch) {
       }
       next.tts.defaultEngine = t.defaultEngine;
     }
+    if (t.heavyEnabled !== undefined) {
+      if (typeof t.heavyEnabled !== 'boolean') {
+        throw new Error('tts.heavyEnabled must be a boolean');
+      }
+      next.tts.heavyEnabled = t.heavyEnabled;
+    }
     if (t.kokoro !== undefined) {
       const k = t.kokoro || {};
       if (k.voice !== undefined) {
@@ -1159,6 +1221,18 @@ export async function update(patch) {
           );
         }
         next.tts.chatterbox.referenceVoice = v;
+      }
+    }
+    if (t.pocketTts !== undefined) {
+      const pt = t.pocketTts || {};
+      if (pt.voice !== undefined) {
+        const v = String(pt.voice).trim();
+        if (!POCKET_TTS_VOICE_RE.test(v)) {
+          throw new Error(
+            'tts.pocketTts.voice must be a built-in voice id (lowercase, e.g. alba)',
+          );
+        }
+        next.tts.pocketTts.voice = v;
       }
     }
     if (t.cloud !== undefined) {
