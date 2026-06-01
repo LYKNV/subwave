@@ -65,6 +65,10 @@ interface Persona {
   tagline: string;
   frequency: string;
   scriptLength: string;
+  // When true the persona behaves like a working DJ — back-announces AND teases
+  // what's next, runs callbacks across the session, and is more present. Off =
+  // the historical tasteful-narrator behaviour.
+  djMode: boolean;
   soul: string;
   // Stored basename like `p_abc123.png` — empty when no avatar is uploaded.
   // The actual image is served via /api/persona-avatar/<id>; we keep the
@@ -103,6 +107,7 @@ interface SettingsResponse {
   skills?: { catalog?: SkillCatalogEntry[] };
   tts?: {
     kokoroVoices?: VoiceOption[];
+    piperVoices?: string[];
     chatterboxVoices?: string[];
     // `voiceDir` is the new shared name (issue #213). `chatterboxVoiceDir` is
     // kept as an alias so the UI keeps working against older controllers.
@@ -283,8 +288,10 @@ function personaValid(p: Persona): boolean {
     return v === '' || CHATTERBOX_VOICE_RE.test(v);
   }
   if (e === 'pocket-tts') {
+    // Built-in voice id, OR a .wav filename for zero-shot cloning (issue #213),
+    // OR empty for the default — matches the server-side validator in settings.ts.
     const v = p.tts.voice.trim();
-    return v === '' || POCKET_TTS_VOICE_RE.test(v);
+    return v === '' || POCKET_TTS_VOICE_RE.test(v) || CHATTERBOX_VOICE_RE.test(v);
   }
   if (e === 'cloud') {
     const v = p.tts.voice.trim();
@@ -301,7 +308,8 @@ function personaValid(p: Persona): boolean {
 function voiceForSave(engine: string, voice: string): string {
   if (engine === 'kokoro') return voice || 'bf_isabella';
   if (engine === 'chatterbox') return CHATTERBOX_VOICE_RE.test(voice) ? voice : '';
-  if (engine === 'pocket-tts') return POCKET_TTS_VOICE_RE.test(voice) ? voice : 'alba';
+  // Built-in id or a .wav clone filename both pass through; anything else → default.
+  if (engine === 'pocket-tts') return (POCKET_TTS_VOICE_RE.test(voice) || CHATTERBOX_VOICE_RE.test(voice)) ? voice : 'alba';
   return voice; // piper ignores voice; cloud carries its own
 }
 
@@ -382,6 +390,7 @@ export default function PersonasPanel() {
             tagline: p.tagline ?? '',
             frequency: p.frequency ?? 'moderate',
             scriptLength: p.scriptLength ?? 'concise',
+            djMode: p.djMode === true,
             soul: p.soul ?? '',
             avatar: typeof p.avatar === 'string' ? p.avatar : '',
             tts: {
@@ -414,7 +423,7 @@ export default function PersonasPanel() {
         ...f,
         personas: [...f.personas, {
           id: clientMintId(), name: 'New persona', tagline: '',
-          frequency: 'moderate', scriptLength: 'concise', soul: '',
+          frequency: 'moderate', scriptLength: 'concise', djMode: false, soul: '',
           avatar: '',
           tts: { engine: 'piper', cloudProvider: 'openai', voice: 'bf_isabella' },
           skills: (data?.skills?.catalog || []).map(s => s.name),
@@ -547,6 +556,7 @@ export default function PersonasPanel() {
             tagline: p.tagline.trim(),
             frequency: p.frequency,
             scriptLength: p.scriptLength,
+            djMode: p.djMode,
             soul: p.soul.trim(),
             avatar: p.avatar || '',
             tts: {
@@ -626,7 +636,7 @@ export default function PersonasPanel() {
     if (p.tts.engine === 'chatterbox') return `chatterbox / ${p.tts.voice.trim() || 'built-in'}`;
     if (p.tts.engine === 'pocket-tts') return `pocket-tts / ${p.tts.voice.trim() || 'alba'}`;
     if (p.tts.engine === 'cloud') return `cloud / ${p.tts.cloudProvider} / ${p.tts.voice.trim() || '—'}`;
-    return 'piper';
+    return `piper / ${p.tts.voice.trim() || 'built-in'}`;
   };
 
   return (
@@ -899,6 +909,23 @@ export default function PersonasPanel() {
                 />
               ))}
             </div>
+
+            <div className="rule-label">DJ mode</div>
+
+            <div className="grid grid-cols-[1fr_auto] items-center gap-4">
+              <div>
+                <div className="text-[13px] font-bold">Work the desk like a real DJ</div>
+                <div className="mt-0.5 text-[11px] text-muted">
+                  Back-announces and teases what&apos;s coming next, runs callbacks across the
+                  hour, and talks more often. Off keeps this persona a tasteful between-track
+                  narrator.
+                </div>
+              </div>
+              <Toggle
+                on={focused.djMode}
+                onClick={() => setPersona(safeIdx, { djMode: !focused.djMode })}
+              />
+            </div>
           </Card>
 
           <Card title="Voice" sub="text-to-speech engine">
@@ -938,11 +965,36 @@ export default function PersonasPanel() {
               </div>
             </div>
 
-            {focused.tts.engine === 'piper' && (
-              <div className="field-hint">
-                Piper uses its built-in local voice — fast, keyless. No voice selection needed.
-              </div>
-            )}
+            {focused.tts.engine === 'piper' && (() => {
+              const piperVoices: string[] = data?.tts?.piperVoices || [];
+              const value = focused.tts.voice || CB_DEFAULT_VOICE;
+              return (
+                <div className="field max-w-[360px]">
+                  <Label>Voice</Label>
+                  <Select
+                    value={value}
+                    onValueChange={val => setPersonaTts(safeIdx, { voice: val === CB_DEFAULT_VOICE ? '' : val })}
+                  >
+                    <SelectTrigger><SelectValue placeholder="Built-in default voice" /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
+                        {piperVoices.map(v => <SelectItem key={v} value={v}>{v}</SelectItem>)}
+                        {focused.tts.voice && !piperVoices.includes(focused.tts.voice) && (
+                          <SelectItem value={focused.tts.voice}>{focused.tts.voice} (missing)</SelectItem>
+                        )}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    Piper is fast, local, and keyless. Drop a voice’s <code>.onnx</code> and its{' '}
+                    <code>.onnx.json</code> manifest into <code>state/voices/</code> on the host — the
+                    same files Home Assistant uses — and they’ll show up here. Leave on the built-in
+                    default if you don’t have any.
+                  </div>
+                </div>
+              );
+            })()}
 
             {focused.tts.engine === 'kokoro' && (
               <div className="field max-w-[320px]">
