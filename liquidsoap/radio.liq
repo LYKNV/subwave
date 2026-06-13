@@ -197,6 +197,16 @@ end
 # one song behind until the next crossfade.
 music_meta = music
 
+# Per-track loudness normalisation. The controller stamps `liq_amplify` (in the
+# "<n> dB" form, via subsonic.getAnnotatedUri) on any track with a measured LUFS;
+# `amplify` reads it per track — exactly the ReplayGain mechanism. Base factor
+# 1.0 = unity, so a track without the metadata (un-analysed library, or no
+# pyloudnorm) plays untouched. Applied BEFORE the cross so each track carries its
+# own gain into the crossfade, and AFTER the music_meta capture so the
+# on_metadata hook still sees clean pre-cross metadata. No master-bus normaliser
+# is involved — the broadcast bus stays the brick-wall limiter only.
+music = amplify(override="liq_amplify", 1., music)
+
 music = cross(
   duration=crossfade_duration(),
   dj_transition,
@@ -364,7 +374,7 @@ music_bus =
 #
 #   voice_queue (say.txt)  → HEAVY duck. Request intros, station IDs, hourly
 #                            time checks, weather. The voice is the focus;
-#                            music drops well underneath to ~10%.
+#                            music drops well underneath to ~22%.
 #   intro_queue (intro.txt) → LIGHT duck. Between-track auto-DJ links. The
 #                            song that just started should still be audible
 #                            under the voice, so we only dip to ~40%.
@@ -386,7 +396,7 @@ ducked = smooth_add(
                     # clip pushed ahead of the speech (see poll_voice /
                     # poll_intro) so this dip completes BEFORE the DJ starts
                     # talking, and ramps back up after.
-  p={0.15},         # music drops to 15% (~-16 dB) while voice plays
+  p={0.22},         # music drops to 22% (~-13 dB) while voice plays
   normal=music_bus,
   special=voice
 )
