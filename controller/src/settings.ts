@@ -90,15 +90,18 @@ export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'clou
 // providers are opt-in and resolved by llm/provider.js. `openrouter` and
 // `gateway` are aggregators — one key, any vendor's models. `openai-compatible`
 // targets any self-hosted OpenAI-compatible server (llama.cpp, vLLM, LM Studio,
-// etc.) via the operator-supplied `llm.baseUrl`.
+// etc.) via the operator-supplied `llm.baseUrl`. `locca` is a first-class local
+// llama.cpp via the locca CLI — same transport as openai-compatible but with a
+// host default base URL (host.docker.internal:8080) and onboarding discovery.
 export const LLM_PROVIDERS = [
   'ollama',
   'openai-compatible',
+  'locca',
+  'openrouter',
   'anthropic',
   'openai',
   'google',
   'deepseek',
-  'openrouter',
   'gateway',
 ];
 
@@ -450,6 +453,13 @@ const DEFAULTS = {
     // dj-agent.js). When off, the stateless pool picker runs instead — still
     // inside a session, still logged, just without the conversational loop.
     pickerAgent: true,
+    // When on, the listener-request agent (djAgentRequest only — never the
+    // per-track picker) gets an extra `identifyRequestedTrack` tool that resolves
+    // a DESCRIBED track ("the song from the new Dune movie") via web search, then
+    // matches it against the local library. Off by default: it needs a web-search
+    // provider (settings.search) and costs a web round-trip + a small extraction
+    // call per use. No-op unless searchReady() — see llm/internal/tools/picker-tools.ts.
+    requestWebResolve: false,
     // Hard wall-clock ceiling (ms) on a single DJ-agent generation (track
     // picks and listener requests). Enforced by withDeadline in llm/sdk.ts;
     // the main and recovery runs each get the full budget, so worst case per
@@ -497,6 +507,13 @@ const DEFAULTS = {
     enabled: true,
     provider: '',         // empty → follow settings.llm.provider
     model: '',            // empty → sensible default per provider
+    // Embeddings often need a DIFFERENT endpoint than chat: one llama.cpp /
+    // locca server can't serve both chat and embeddings, so a dedicated
+    // embedding server runs on its own port. Empty → inherit settings.llm's
+    // baseUrl / ollamaUrl (fine only when the chat server also does embeddings,
+    // e.g. Ollama). See issue #405.
+    baseUrl: '',          // openai-compatible / locca embedding server URL (with /v1)
+    ollamaUrl: '',        // Ollama embedding server URL (ollama provider)
     seedCount: 0,         // 0 → auto max(200, ceil(sqrt(library)))
     knnNeighbours: 5,
     moodVoteThreshold: 0.6,
@@ -921,6 +938,10 @@ export async function load() {
         typeof stored.llm?.pickerAgent === 'boolean'
           ? stored.llm.pickerAgent
           : DEFAULTS.llm.pickerAgent,
+      requestWebResolve:
+        typeof stored.llm?.requestWebResolve === 'boolean'
+          ? stored.llm.requestWebResolve
+          : DEFAULTS.llm.requestWebResolve,
       // Clamped to [5s, 180s]; settings.json files from before the field
       // existed pick up the default.
       agentTimeoutMs: clampAgentTimeout(stored.llm?.agentTimeoutMs, DEFAULTS.llm.agentTimeoutMs),
@@ -967,6 +988,14 @@ export async function load() {
         typeof stored.embedding?.model === 'string'
           ? stored.embedding.model.trim()
           : DEFAULTS.embedding.model,
+      baseUrl:
+        typeof stored.embedding?.baseUrl === 'string'
+          ? stored.embedding.baseUrl.trim()
+          : DEFAULTS.embedding.baseUrl,
+      ollamaUrl:
+        typeof stored.embedding?.ollamaUrl === 'string'
+          ? stored.embedding.ollamaUrl.trim()
+          : DEFAULTS.embedding.ollamaUrl,
       seedCount:
         Number.isFinite(stored.embedding?.seedCount) && stored.embedding.seedCount >= 0
           ? Math.floor(stored.embedding.seedCount)
@@ -1659,6 +1688,9 @@ export async function update(patch) {
     if (l.pickerAgent !== undefined) {
       next.llm.pickerAgent = !!l.pickerAgent;
     }
+    if (l.requestWebResolve !== undefined) {
+      next.llm.requestWebResolve = !!l.requestWebResolve;
+    }
     if (l.agentTimeoutMs !== undefined) {
       next.llm.agentTimeoutMs = clampAgentTimeout(Number(l.agentTimeoutMs), next.llm.agentTimeoutMs);
     }
@@ -1722,6 +1754,23 @@ export async function update(patch) {
       const v = String(e.model).trim();
       if (v.length > 100) throw new Error('embedding.model must be 0-100 chars');
       next.embedding.model = v;
+    }
+    // Dedicated embedding endpoint (issue #405). Empty → inherit settings.llm.
+    if (e.baseUrl !== undefined) {
+      const v = String(e.baseUrl).trim();
+      if (v.length > 200) throw new Error('embedding.baseUrl must be 0-200 chars');
+      if (v && !/^https?:\/\//i.test(v)) {
+        throw new Error('embedding.baseUrl must start with http:// or https://');
+      }
+      next.embedding.baseUrl = v.replace(/\/+$/, ''); // strip trailing slashes
+    }
+    if (e.ollamaUrl !== undefined) {
+      const v = String(e.ollamaUrl).trim();
+      if (v.length > 200) throw new Error('embedding.ollamaUrl must be 0-200 chars');
+      if (v && !/^https?:\/\//i.test(v)) {
+        throw new Error('embedding.ollamaUrl must start with http:// or https://');
+      }
+      next.embedding.ollamaUrl = v.replace(/\/+$/, '');
     }
     if (e.seedCount !== undefined) {
       const v = parseInt(e.seedCount, 10);
