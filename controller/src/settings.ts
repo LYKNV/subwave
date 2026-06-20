@@ -210,6 +210,10 @@ export const SHOW_MOODS = [
   'cultural',
 ];
 
+// Energy bands a show can pin as a soft music-steering filter. Mirrors the
+// tagger's per-track energy classes and the `tracksByMood` agent-tool filter.
+export const SHOW_ENERGY = ['low', 'medium', 'high'];
+
 // British English Kokoro voices — the ones that fit a BBC 6 Music tone. The
 // underlying model ships 54 voices total; we expose only the British subset to
 // keep the UI tidy. Any voice matching KOKORO_VOICE_RE still passes validation.
@@ -652,8 +656,13 @@ function normalizeTts(raw: any) {
   }
   // Piper voices are `.onnx` filenames in the shared voice folder (issue #230).
   // Empty is legitimate ("use the baked-in default voice"); invalid filenames
-  // reset to empty rather than being rewritten to a Kokoro id.
-  if (engine === 'piper' && voice && !PIPER_VOICE_RE.test(voice)) voice = '';
+  // reset to empty. A Kokoro-shaped id is preserved, not wiped: the seed roster
+  // carries one per persona under piper so switching to Kokoro yields distinct
+  // voices without re-editing, and resolvePiperVoice() falls back gracefully for
+  // it at render time. Wiping it here would silently break that on first reload
+  // after a save (issue #454).
+  if (engine === 'piper' && voice && !PIPER_VOICE_RE.test(voice) && !KOKORO_VOICE_RE.test(voice))
+    voice = '';
   // openai-compatible voices are server-specific (often arbitrary cloning ref
   // names) — no canonical default; leave empty so generateSpeech omits the
   // field and the server picks its own.
@@ -724,6 +733,15 @@ function normalizeShows(raw: any, personaIds: string[]) {
       typeof item.themeId === 'string' && item.themeId.trim()
         ? item.themeId.trim().slice(0, 64)
         : '';
+    // Optional music-steering filters (soft lean, applied at pick time). Genre
+    // is stored as free text and resolved fuzzily against the live library when
+    // a pick is made (mirrors the listener-request path) — never validated
+    // against Subsonic here. fromYear/toYear are a decade window. energy is one
+    // of the tagger's three bands. All default to "no constraint".
+    const genre = typeof item.genre === 'string' ? item.genre.trim().slice(0, 64) : '';
+    const fromYear = Number.isFinite(item.fromYear) ? Math.trunc(item.fromYear) : null;
+    const toYear = Number.isFinite(item.toYear) ? Math.trunc(item.toYear) : null;
+    const energy = SHOW_ENERGY.includes(item.energy) ? item.energy : '';
     out.push({
       id,
       name,
@@ -731,6 +749,10 @@ function normalizeShows(raw: any, personaIds: string[]) {
       personaId: item.personaId,
       mood: item.mood,
       themeId,
+      genre,
+      fromYear,
+      toYear,
+      energy,
     });
     if (out.length >= SHOWS_LIMIT) break;
   }
@@ -1203,8 +1225,13 @@ function validateTtsBlock(raw, where) {
   } else {
     // piper: empty = use the baked-in default voice. Otherwise the value must
     // be an .onnx filename (no path separators) referencing a model the operator
-    // dropped into the shared voice folder (issue #230).
-    if (voice && !PIPER_VOICE_RE.test(voice)) {
+    // dropped into the shared voice folder (issue #230). A Kokoro-shaped id is
+    // also accepted: the seed roster carries a distinct Kokoro voice per persona
+    // under the piper engine so switching to Kokoro yields different-sounding
+    // DJs with no extra editing (see SEED_PERSONAS). resolvePiperVoice() falls
+    // back to the default for it at render time, so it is harmless under piper
+    // and must not block saving the shipped roster (issue #454).
+    if (voice && !PIPER_VOICE_RE.test(voice) && !KOKORO_VOICE_RE.test(voice)) {
       throw new Error(
         `${where}.tts.voice for piper must be an .onnx filename (no path), or empty for the default voice`,
       );
@@ -1348,10 +1375,32 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
       }
       themeId = v;
     }
+    // Optional music-steering filters — all default to "no constraint". Genre
+    // is free text resolved fuzzily at pick time, so it isn't checked against
+    // the live library here.
+    const genre = String(item.genre ?? '').trim();
+    if (genre.length > 64) throw new Error(`shows[${i}].genre must be 0-64 chars`);
+    const energy = item.energy == null || item.energy === '' ? '' : String(item.energy);
+    if (energy && !SHOW_ENERGY.includes(energy)) {
+      throw new Error(`shows[${i}].energy must be one of: ${SHOW_ENERGY.join(', ')}`);
+    }
+    const parseYear = (v, field) => {
+      if (v == null || v === '') return null;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1900 || n > 2100) {
+        throw new Error(`shows[${i}].${field} must be an integer between 1900 and 2100`);
+      }
+      return n;
+    };
+    const fromYear = parseYear(item.fromYear, 'fromYear');
+    const toYear = parseYear(item.toYear, 'toYear');
+    if (fromYear != null && toYear != null && fromYear > toYear) {
+      throw new Error(`shows[${i}].fromYear must be <= toYear`);
+    }
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
-    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId };
+    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy };
   });
 }
 
@@ -1967,6 +2016,12 @@ export function resolveActiveShow(date = new Date(), s = get()) {
     name: show.name,
     topic: show.topic,
     mood: show.mood,
+    // Optional music-steering filters (soft lean). Surfaced for the picker and
+    // DJ agent; empty string / null means "no constraint".
+    genre: typeof show.genre === 'string' ? show.genre : '',
+    fromYear: Number.isFinite(show.fromYear) ? show.fromYear : null,
+    toYear: Number.isFinite(show.toYear) ? show.toYear : null,
+    energy: typeof show.energy === 'string' ? show.energy : '',
     // Empty string means "fall back to the station-wide default". The route
     // layer is responsible for resolving an empty/stale id against the live
     // theme registry; we just surface what the show declares.
