@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useDynamicStyle } from '../../hooks/useDynamicStyle';
 import { m } from 'motion/react';
 import { notify, errorMessage } from '../../lib/notify';
-import { fmtSize } from '../../lib/format';
+import { fmtClockMinute, fmtSize, normalizeStationLocale, type StationLocale } from '../../lib/format';
 import { useAdminAuth } from '../../lib/adminAuth';
 import { applyTheme, cacheTheme } from '../../lib/theme';
 import { CLOUD_VOICES, CLOUD_MODELS } from '../../lib/cloudVoices';
@@ -23,7 +23,7 @@ import WebhooksPanel from './WebhooksPanel';
 import BackupPanel from './BackupPanel';
 
 const SECTIONS = [
-  { id: 'station',  label: 'Station', hint: 'name · location · timezone' },
+  { id: 'station',  label: 'Station', hint: 'name · location · locale' },
   { id: 'theme',    label: 'Theme', hint: 'station-wide palette' },
   { id: 'llm',      label: 'LLM provider', hint: 'model routing' },
   { id: 'tts',      label: 'TTS voice', hint: 'default engine' },
@@ -113,6 +113,9 @@ interface TtsForm {
   chatterbox: { referenceVoice: string };
   pocketTts: { voice: string };
   cloud: CloudTtsCfg;
+  // Per-engine voice-level trim in dB, keyed by engine id (note the hyphen in
+  // `pocket-tts`). Always carries all 5 known engines, 0 = unity = no change.
+  gainDb: Record<string, number>;
 }
 
 interface LlmFallbackForm {
@@ -202,6 +205,7 @@ interface FormState {
   stream: StreamForm;
   station: string;
   timezone: string;
+  locale: StationLocale;
   weather: WeatherCfg;
   tts: TtsForm;
   llm: LlmForm;
@@ -241,6 +245,7 @@ interface SettingsData {
     stream?: { opusEnabled?: boolean };
     station?: string;
     timezone?: string;
+    locale?: StationLocale;
     theme?: { active?: string };
     weather?: { lat?: number; lng?: number; locationName?: string; units?: 'metric' | 'imperial' };
     tts?: {
@@ -249,6 +254,7 @@ interface SettingsData {
       chatterbox?: { referenceVoice?: string };
       pocketTts?: { voice?: string };
       cloud?: Partial<CloudTtsCfg>;
+      gainDb?: Record<string, number>;
     };
     llm?: Partial<LlmForm>;
     search?: Partial<SearchForm>;
@@ -293,6 +299,7 @@ interface SettingsData {
   };
   defaults?: {
     search?: Partial<SearchForm>;
+    locale?: StationLocale;
   };
   jingles?: JingleEntry[];
   libraryStats?: { total?: number };
@@ -369,6 +376,7 @@ export default function SettingsPanel() {
       },
       station: v.station ?? '',
       timezone: v.timezone ?? '',
+      locale: normalizeStationLocale(v.locale),
       weather: {
         lat: String(v.weather?.lat ?? ''),
         lng: String(v.weather?.lng ?? ''),
@@ -386,6 +394,16 @@ export default function SettingsPanel() {
           model: v.tts?.cloud?.model ?? '',
           voice: v.tts?.cloud?.voice ?? '',
           baseUrl: v.tts?.cloud?.baseUrl ?? '',
+        },
+        // Per-engine voice level (dB). Zero default for all 5 engine ids, then
+        // overlay any saved values. Keyed by engine id — `pocket-tts` (hyphen).
+        gainDb: {
+          piper: 0,
+          kokoro: 0,
+          chatterbox: 0,
+          'pocket-tts': 0,
+          cloud: 0,
+          ...(v.tts?.gainDb || {}),
         },
       },
       llm: {
@@ -1117,6 +1135,62 @@ interface SectionProps {
 // rejects an empty-string SelectItem value.
 const CB_DEFAULT_VOICE = '__cb_default__';
 
+// Voice-level (dB) trim. Engine ids match the server contract exactly — note the
+// hyphen in `pocket-tts`. Range mirrors the server clamp (TTS_GAIN_CLAMP_DB=12).
+const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'] as const;
+const TTS_GAIN_MIN = -12;
+const TTS_GAIN_MAX = 12;
+const TTS_GAIN_STEP = 0.5;
+
+// Pretty-print a gain: "0 dB" clean-neutral, otherwise a signed one-decimal value
+// with a real minus sign (e.g. "+3.0 dB", "−2.5 dB").
+function formatGainDb(v: number): string {
+  if (!v) return '0 dB';
+  const sign = v > 0 ? '+' : '−';
+  return `${sign}${Math.abs(v).toFixed(1)} dB`;
+}
+
+// Compact per-engine voice-level control: a labelled range slider + live readout,
+// writing into form.tts.gainDb[engineId]. Dropped into each engine's config panel.
+function TtsGainField({
+  engineId,
+  form,
+  setForm,
+}: {
+  engineId: string;
+  form: FormState;
+  setForm: FormUpdater;
+}) {
+  const value = form.tts.gainDb?.[engineId] ?? 0;
+  return (
+    <div className="field mt-4">
+      <div className="flex items-center justify-between gap-3">
+        <Label>Voice level (dB)</Label>
+        <span className="font-mono text-[12px] text-ink tabular-nums">{formatGainDb(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={TTS_GAIN_MIN}
+        max={TTS_GAIN_MAX}
+        step={TTS_GAIN_STEP}
+        value={value}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+          const next = Number(e.target.value);
+          setForm(f => ({
+            ...f,
+            tts: { ...f.tts, gainDb: { ...f.tts.gainDb, [engineId]: next } },
+          }));
+        }}
+        aria-label="Voice level in decibels"
+        className="mt-1.5 w-full max-w-[360px] accent-[var(--accent)]"
+      />
+      <div className="field-hint">
+        Trim this engine’s loudness to match your other voices. <code>0 dB</code> = no change.
+      </div>
+    </div>
+  );
+}
+
 // Prominent, self-contained "engine not installed" callout with a step-by-step
 // setup guide. Chatterbox and PocketTTS both live in the optional `tts-heavy`
 // sidecar, so the recommended path is identical; only the engine label and the
@@ -1192,6 +1266,9 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
         voice: form.tts.cloud.voice,
         baseUrl: form.tts.cloud.baseUrl,
       },
+      // Per-engine voice-level trim. Always sent (server clamps + drops unknown
+      // keys); keyed by engine id, `pocket-tts` with the hyphen.
+      gainDb: form.tts.gainDb,
     },
   });
 
@@ -1221,6 +1298,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
     chatterbox?: { referenceVoice?: string };
     pocketTts?: { voice?: string };
     cloud?: SavedCloud;
+    gainDb?: Record<string, number>;
   } = data.values?.tts || {};
   const savedEngine: string = savedTts.defaultEngine || 'piper';
   const savedKokoroVoice: string = savedTts.kokoro?.voice || '';
@@ -1230,6 +1308,12 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
   const savedEngineLabel = ENGINE_LABELS[savedEngine] || savedEngine;
   const formEngineLabel = ENGINE_LABELS[form.tts.defaultEngine] || form.tts.defaultEngine;
 
+  const savedGainDb: Record<string, number> = savedTts.gainDb || {};
+  // Any engine whose form gain differs from its saved value (absent → 0 unity).
+  const gainDirty = TTS_GAIN_ENGINES.some(
+    e => (form.tts.gainDb?.[e] ?? 0) !== (savedGainDb[e] ?? 0),
+  );
+
   const ttsDirty =
     form.tts.defaultEngine !== savedEngine
     || (form.tts.kokoro?.voice || '') !== savedKokoroVoice
@@ -1238,7 +1322,8 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
     || form.tts.cloud.provider !== (savedCloud.provider || '')
     || (form.tts.cloud.model || '').trim() !== (savedCloud.model || '').trim()
     || (form.tts.cloud.voice || '').trim() !== (savedCloud.voice || '').trim()
-    || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim();
+    || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim()
+    || gainDirty;
 
   let activeDetail: ReactNode = null;
   if (savedEngine === 'piper') {
@@ -1316,134 +1401,146 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
           </div>
 
         {form.tts.defaultEngine === 'piper' && (
-          <div className="field mt-4">
-            <div className="field-hint">
-              Piper is bundled with the controller — fast, lightweight, and always
-              available. Nothing to configure.
+          <>
+            <div className="field mt-4">
+              <div className="field-hint">
+                Piper is bundled with the controller — fast, lightweight, and always
+                available. Nothing else to configure.
+              </div>
             </div>
-          </div>
+            <TtsGainField engineId="piper" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'kokoro' && (
-          <div className="field mt-4">
-            <Label>Kokoro voice</Label>
-            {available.kokoro === false && (
-              <div className="field-hint text-[var(--danger)]">
-                Kokoro is not installed in this build — it will fall back to Piper.
-              </div>
-            )}
-            {(data.tts?.kokoroVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.kokoro?.voice ?? 'bf_isabella'}
-                  onValueChange={val => setForm(f => ({
-                    ...f, tts: { ...f.tts, kokoro: { ...f.tts.kokoro, voice: val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {data.tts?.kokoroVoices?.map(v => (
-                        <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <div className="field-hint">British English only. Applies to every kind routed through Kokoro.</div>
-              </>
-            ) : (
-              <div className="field-hint">This build reports no Kokoro voices.</div>
-            )}
-          </div>
+          <>
+            <div className="field mt-4">
+              <Label>Kokoro voice</Label>
+              {available.kokoro === false && (
+                <div className="field-hint text-[var(--danger)]">
+                  Kokoro is not installed in this build — it will fall back to Piper.
+                </div>
+              )}
+              {(data.tts?.kokoroVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.kokoro?.voice ?? 'bf_isabella'}
+                    onValueChange={val => setForm(f => ({
+                      ...f, tts: { ...f.tts, kokoro: { ...f.tts.kokoro, voice: val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {data.tts?.kokoroVoices?.map(v => (
+                          <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">British English only. Applies to every kind routed through Kokoro.</div>
+                </>
+              ) : (
+                <div className="field-hint">This build reports no Kokoro voices.</div>
+              )}
+            </div>
+            <TtsGainField engineId="kokoro" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'chatterbox' && (
-          <div className="field mt-4">
-            <Label>Chatterbox reference voice</Label>
-            {available.chatterbox === false ? (
-              <HeavyEngineSetupGuide engine="Chatterbox" buildArg="WITH_CHATTERBOX=1" />
-            ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.chatterbox?.referenceVoice || CB_DEFAULT_VOICE}
-                  onValueChange={val => setForm(f => ({
-                    ...f,
-                    tts: { ...f.tts, chatterbox: { ...f.tts.chatterbox, referenceVoice: val === CB_DEFAULT_VOICE ? '' : val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
-                      {data.tts?.chatterboxVoices?.map(v => (
-                        <SelectItem key={v} value={v}>{v}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <div className="field-hint">
-                  ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
-                  <code>state/voices/</code>
-                  {' '}on the host (the legacy <code>state/chatterbox-voices/</code> is
-                  still read) and they’ll appear here on next reload. Personas can
-                  override this on the Personas page.
-                </div>
-              </>
-            ) : (
-              <div className="field-hint">
-                No reference voices found in{' '}
-                <code>state/voices/</code>{' '}
-                (legacy <code>state/chatterbox-voices/</code> also empty). The engine will
-                use its built-in default voice — drop a 5-second WAV into that directory
-                to enable cloning.
-              </div>
-            )}
-          </div>
-        )}
-
-        {form.tts.defaultEngine === 'pocket-tts' && (
-          <div className="field mt-4">
-            <Label>PocketTTS voice</Label>
-            {available['pocket-tts'] === false ? (
-              <HeavyEngineSetupGuide engine="PocketTTS" buildArg="WITH_POCKETTTS=1" />
-            ) : (data.tts?.pocketTtsVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.pocketTts?.voice ?? 'alba'}
-                  onValueChange={val => setForm(f => ({
-                    ...f, tts: { ...f.tts, pocketTts: { ...f.tts.pocketTts, voice: val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectLabel>Built-in</SelectLabel>
-                      {data.tts?.pocketTtsVoices?.map(v => (
-                        <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                    {(data.tts?.pocketTtsCustomVoices?.length || 0) > 0 && (
+          <>
+            <div className="field mt-4">
+              <Label>Chatterbox reference voice</Label>
+              {available.chatterbox === false ? (
+                <HeavyEngineSetupGuide engine="Chatterbox" buildArg="WITH_CHATTERBOX=1" />
+              ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.chatterbox?.referenceVoice || CB_DEFAULT_VOICE}
+                    onValueChange={val => setForm(f => ({
+                      ...f,
+                      tts: { ...f.tts, chatterbox: { ...f.tts.chatterbox, referenceVoice: val === CB_DEFAULT_VOICE ? '' : val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
                       <SelectGroup>
-                        <SelectLabel>Custom (cloned)</SelectLabel>
-                        {data.tts?.pocketTtsCustomVoices?.map(v => (
+                        <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
+                        {data.tts?.chatterboxVoices?.map(v => (
                           <SelectItem key={v} value={v}>{v}</SelectItem>
                         ))}
                       </SelectGroup>
-                    )}
-                  </SelectContent>
-                </Select>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
+                    <code>state/voices/</code>
+                    {' '}on the host (the legacy <code>state/chatterbox-voices/</code> is
+                    still read) and they’ll appear here on next reload. Personas can
+                    override this on the Personas page.
+                  </div>
+                </>
+              ) : (
                 <div className="field-hint">
-                  100M-param CPU-only model from kyutai-labs. Built-in voices speak
-                  English, French, German, Italian, Spanish and Portuguese. Drop a
-                  ~5-second WAV into <code>state/voices/</code> to clone a voice and it
-                  will appear under <em>Custom</em> on next reload. Personas can override
-                  this on the Personas page.
+                  No reference voices found in{' '}
+                  <code>state/voices/</code>{' '}
+                  (legacy <code>state/chatterbox-voices/</code> also empty). The engine will
+                  use its built-in default voice — drop a 5-second WAV into that directory
+                  to enable cloning.
                 </div>
-              </>
-            ) : (
-              <div className="field-hint">This build reports no PocketTTS voices.</div>
-            )}
-          </div>
+              )}
+            </div>
+            <TtsGainField engineId="chatterbox" form={form} setForm={setForm} />
+          </>
+        )}
+
+        {form.tts.defaultEngine === 'pocket-tts' && (
+          <>
+            <div className="field mt-4">
+              <Label>PocketTTS voice</Label>
+              {available['pocket-tts'] === false ? (
+                <HeavyEngineSetupGuide engine="PocketTTS" buildArg="WITH_POCKETTTS=1" />
+              ) : (data.tts?.pocketTtsVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.pocketTts?.voice ?? 'alba'}
+                    onValueChange={val => setForm(f => ({
+                      ...f, tts: { ...f.tts, pocketTts: { ...f.tts.pocketTts, voice: val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>Built-in</SelectLabel>
+                        {data.tts?.pocketTtsVoices?.map(v => (
+                          <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                      {(data.tts?.pocketTtsCustomVoices?.length || 0) > 0 && (
+                        <SelectGroup>
+                          <SelectLabel>Custom (cloned)</SelectLabel>
+                          {data.tts?.pocketTtsCustomVoices?.map(v => (
+                            <SelectItem key={v} value={v}>{v}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    100M-param CPU-only model from kyutai-labs. Built-in voices speak
+                    English, French, German, Italian, Spanish and Portuguese. Drop a
+                    ~5-second WAV into <code>state/voices/</code> to clone a voice and it
+                    will appear under <em>Custom</em> on next reload. Personas can override
+                    this on the Personas page.
+                  </div>
+                </>
+              ) : (
+                <div className="field-hint">This build reports no PocketTTS voices.</div>
+              )}
+            </div>
+            <TtsGainField engineId="pocket-tts" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'cloud' && (() => {
@@ -1575,6 +1672,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
                 var required.
               </div>
             )}
+            <TtsGainField engineId="cloud" form={form} setForm={setForm} />
           </div>
           );
         })()}
@@ -2818,18 +2916,15 @@ const TZ_GROUPS: Array<{ region: string; zones: string[] }> = (() => {
 })();
 
 // Wall-clock preview for a zone, or '' when the zone can't be formatted.
-function clockPreview(timeZone: string) {
-  try {
-    return new Date().toLocaleTimeString('en-GB', { timeZone: timeZone || undefined, hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '';
-  }
+function clockPreview(timeZone: string, locale: StationLocale) {
+  return fmtClockMinute(new Date(), timeZone || undefined, locale);
 }
 
 function StationSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
   const save = () => saveSettings({
     station: form.station,
     timezone: form.timezone,
+    locale: form.locale,
     weather: {
       lat: parseFloat(form.weather.lat),
       lng: parseFloat(form.weather.lng),
@@ -2849,14 +2944,15 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
   const serverTz = data.serverTimezone || 'server timezone';
   // '' = Auto → preview the server's zone, which is what the station runs on.
   const previewTz = form.timezone || data.serverTimezone || '';
-  const preview = clockPreview(previewTz);
+  const preview = clockPreview(previewTz, form.locale);
+  const localeLabel = form.locale === 'en-US' ? 'English (US)' : 'English (UK)';
 
   return (
     <>
       <SectionHeader
         eyebrow="station"
         title="How the DJ identifies this radio on air."
-        sub="The station name is substituted into the DJ prompt as {station}. The location sets where the DJ thinks it broadcasts from and drives the Open-Meteo weather it reads on air. The timezone sets the clock the DJ lives on. All apply live — no mixer restart."
+        sub="The station name is substituted into the DJ prompt as {station}. The location sets where the DJ thinks it broadcasts from and drives the Open-Meteo weather it reads on air. The timezone sets the clock the DJ lives on; locale controls how station times are displayed. All apply live — no mixer restart."
         metrics={[
           { n: data.values?.station || 'SUB/WAVE', l: 'station', accent: true },
         ]}
@@ -2971,7 +3067,7 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
           </Select>
           {preview && (
             <div className="field-hint">
-              Station clock: <span className="mono-num">{preview}</span> — if that doesn’t match your watch, pick your zone above.
+              Station clock: <span className="mono-num">{preview}</span> in {localeLabel} — if that doesn’t match your watch, pick your zone above.
             </div>
           )}
           <div className="field-hint">
@@ -2982,8 +3078,31 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
         </div>
       </Card>
 
+      <Card title="Localization" sub="Language variant and clock display">
+        <div className="field">
+          <Label>Station locale</Label>
+          <Select
+            value={form.locale}
+            onValueChange={val =>
+              setForm(f => ({ ...f, locale: normalizeStationLocale(val) }))
+            }
+          >
+            <SelectTrigger className="w-[260px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="en-GB">English (UK) — 24-hour</SelectItem>
+                <SelectItem value="en-US">English (US) — AM/PM</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <div className="field-hint">
+            Sets station-facing display language and clock style. US English uses AM/PM for visible clock times. Applies live.
+          </div>
+        </div>
+      </Card>
+
       <SaveBar
-        note="Station name, location, and timezone apply live."
+        note="Station name, location, timezone, and locale apply live."
         busy={busy}
         onSave={save}
         saveLabel="Save station settings"
