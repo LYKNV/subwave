@@ -48,9 +48,9 @@ export interface PlayerAppProps {
 
 export default function PlayerApp({ contained = false }: PlayerAppProps) {
   const { apiUrl } = useStationOrigin();
-  const { nowPlaying, context, dj, activeShow, listeners, streamOnline, llmTokens, state, session, trackStartedAt, timezone } = useStationFeed();
+  const { nowPlaying, context, dj, activeShow, listeners, streamOnline, llmTokens, state, session, trackStartedAt, timezone, locale } = useStationFeed();
   const boothFeed = session.messages;
-  const { audioRef, tunedIn, status, volume, setVolume, tune, stop, toggleMute, muted, idleStopped } = usePlayer();
+  const { audioRef, tunedIn, status, volume, setVolume, tune, toggleMute, muted, idleStopped } = usePlayer();
 
   // streamOnline is null until the first poll resolves — only treat an
   // explicit false as offline so the player never flashes "offline" on load.
@@ -64,12 +64,6 @@ export default function PlayerApp({ contained = false }: PlayerAppProps) {
   // normalise the feed's number | { current } | null shape to a plain count.
   const listenerCount =
     listeners == null ? null : typeof listeners === 'number' ? listeners : (listeners.current ?? null);
-
-  // If the station goes off air while someone is tuned in, tear playback down
-  // so the <audio> element isn't left retrying a dead mount.
-  useEffect(() => {
-    if (offline && tunedIn) stop();
-  }, [offline, tunedIn, stop]);
 
   // One-shot audience beacon: hand the controller the external referrer + any
   // UTM tag on first load. The referrer is browser-only knowledge — by the time
@@ -354,7 +348,7 @@ export default function PlayerApp({ contained = false }: PlayerAppProps) {
         {drawer === 'timeline' && (
           <TimelineDrawer upcoming={state.upcoming} history={state.history} />
         )}
-        {drawer === 'booth'   && <BoothDrawer items={boothFeed} timezone={timezone} />}
+        {drawer === 'booth'   && <BoothDrawer items={boothFeed} timezone={timezone} locale={locale} />}
         {drawer === 'request' && (
           <RequestDrawer
             requestText={requestText} setRequestText={setRequestText}

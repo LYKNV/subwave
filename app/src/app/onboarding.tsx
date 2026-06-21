@@ -22,7 +22,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import DiscMark from '@/components/DiscMark';
 import LiveDot from '@/components/LiveDot';
 import StationLiveStatus from '@/components/StationLiveStatus';
-import { createApi, normalizeBase } from '@/lib/api';
+import { createApi, normalizeBase, type StationApi } from '@/lib/api';
 import { useStation } from '@/config/StationContext';
 import { fetchDirectory, type DirectoryStation } from '@/lib/directory';
 import type { StationRef } from '@/lib/station';
@@ -33,6 +33,24 @@ const STEPS = ['Resolving host', 'Controller · /health', 'Icecast · /stream', 
 type StepState = 'wait' | 'run' | 'ok' | 'fail';
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const stripProto = (u: string) => u.replace(/^https?:\/\//, '');
+// Bare host (no scheme, port, or path), lowercased. Best-effort for hostnames
+// and IPv4 — an IPv6 literal isn't a realistic station address here.
+const hostOf = (u: string) => stripProto(u).split('/')[0].split(':')[0].toLowerCase();
+// Private/reserved TLDs that never resolve on the public internet, so a
+// cleartext station behind one is a LAN box, not an exposed origin.
+const PRIVATE_TLDS = /\.(local|lan|home|internal|corp|intranet|localdomain)$|\.home\.arpa$/;
+// A host where falling back to cleartext carries bounded MITM risk: loopback, a
+// single-label LAN name (http://nas), *.local mDNS, an RFC1918 address, or a
+// private TLD. These skip the insecure-downgrade consent prompt. Anything that
+// looks like a public domain does NOT — it takes the one-tap consent path.
+const isLocalHost = (h: string) =>
+  h === 'localhost' ||
+  !h.includes('.') ||
+  PRIVATE_TLDS.test(h) ||
+  /^127\./.test(h) ||
+  /^10\./.test(h) ||
+  /^192\.168\./.test(h) ||
+  /^172\.(1[6-9]|2\d|3[01])\./.test(h);
 
 interface Target {
   base: string;
@@ -55,6 +73,9 @@ export default function Onboarding() {
   const [target, setTarget] = useState<Target | null>(null);
   const [done, setDone] = useState(false);
   const [failed, setFailed] = useState(false);
+  // True when the probe silently fell back from https to cleartext http on a
+  // non-local host — gates "Tune in" behind an explicit consent button.
+  const [insecure, setInsecure] = useState(false);
   const [directory, setDirectory] = useState<DirectoryStation[]>([]);
   const runId = useRef(0);
 
@@ -78,24 +99,43 @@ export default function Onboarding() {
   });
 
   const runCheck = async (rawUrl: string, presetName?: string) => {
-    const withProto = /:\/\//.test(rawUrl) ? rawUrl : `https://${rawUrl.trim()}`;
-    const normalized = normalizeBase(withProto);
-    if (!normalized) return;
+    const trimmed = rawUrl.trim();
+    // A bare hostname probes https first then falls back to cleartext http, so
+    // listeners on HTTP-only stations can just type the address. An explicit
+    // protocol (http:// or https://) is honored verbatim — no fallback.
+    const candidates = (/:\/\//.test(trimmed) ? [trimmed] : [`https://${trimmed}`, `http://${trimmed}`])
+      .map((c) => normalizeBase(c))
+      .filter(Boolean);
+    if (!candidates.length) return;
 
     const id = ++runId.current;
-    const fallbackName = presetName || stripProto(normalized);
-    setTarget({ base: normalized, url: stripProto(normalized), name: fallbackName });
+    const first = candidates[0];
+    setTarget({ base: first, url: stripProto(first), name: presetName || stripProto(first) });
     setSteps(['wait', 'wait', 'wait', 'wait']);
     setDone(false);
     setFailed(false);
+    setInsecure(false);
     setPhase('check');
 
-    const api = createApi(normalized);
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
     const set = (i: number, s: StepState) =>
       setSteps((prev) => (runId.current === id ? prev.map((v, idx) => (idx === i ? s : v)) : prev));
     const alive = () => runId.current === id;
+
+    // Hit one candidate's controller /health behind its own timeout. Returns
+    // the live StationApi on success, or null on failure / unreachable so the
+    // caller can try the next candidate.
+    const probe = async (candidate: string): Promise<StationApi | null> => {
+      const api = createApi(candidate);
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
+      try {
+        return (await api.health(ctrl.signal)) ? api : null;
+      } catch {
+        return null;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
 
     try {
       // 1 · Resolving host (cosmetic)
@@ -104,15 +144,33 @@ export default function Onboarding() {
       if (!alive()) return;
       set(0, 'ok');
 
-      // 2 · Controller /health — the real gate
+      // 2 · Controller /health — the real gate. Try each candidate in turn.
       set(1, 'run');
-      const ok = await api.health(ctrl.signal);
-      if (!alive()) return;
-      if (!ok) {
+      let api: StationApi | null = null;
+      let base = first;
+      for (const candidate of candidates) {
+        base = candidate;
+        api = await probe(candidate);
+        if (!alive()) return;
+        if (api) break;
+      }
+      if (!api) {
         set(1, 'fail');
         setFailed(true);
         return;
       }
+      // Re-point the target at the candidate that actually answered.
+      const fallbackName = presetName || stripProto(base);
+      setTarget({ base, url: stripProto(base), name: fallbackName });
+      // Flag a silent https→http downgrade: the probe tried https first and
+      // ended up on cleartext, which an on-path attacker could have forced by
+      // blocking the https attempt. Local hosts carry bounded risk and skip
+      // this; a public-looking host requires explicit consent before tuning in.
+      setInsecure(
+        base.startsWith('http://') &&
+          candidates.some((c) => c.startsWith('https://')) &&
+          !isLocalHost(hostOf(base)),
+      );
       set(1, 'ok');
 
       // 3 · Icecast /stream (cosmetic — controller answered, mount assumed up)
@@ -124,11 +182,15 @@ export default function Onboarding() {
       // 4 · DJ booth — best-effort name resolution
       set(3, 'run');
       let name = fallbackName;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS);
       try {
         const dj = await api.dj(ctrl.signal);
         if (dj?.station || dj?.name) name = dj.station || dj.name || name;
       } catch {
         /* booth name is best-effort */
+      } finally {
+        clearTimeout(timer);
       }
       if (!alive()) return;
       set(3, 'ok');
@@ -139,8 +201,6 @@ export default function Onboarding() {
         set(1, 'fail');
         setFailed(true);
       }
-    } finally {
-      clearTimeout(timer);
     }
   };
 
@@ -326,6 +386,7 @@ export default function Onboarding() {
               steps={steps}
               done={done}
               failed={failed}
+              insecure={insecure}
               onTuneIn={tuneIn}
               onBack={backToEntry}
               onRetry={() => target && runCheck(target.url, target.name)}
@@ -342,6 +403,7 @@ function HealthCheck({
   steps,
   done,
   failed,
+  insecure,
   onTuneIn,
   onBack,
   onRetry,
@@ -350,6 +412,7 @@ function HealthCheck({
   steps: StepState[];
   done: boolean;
   failed: boolean;
+  insecure: boolean;
   onTuneIn: () => void;
   onBack: () => void;
   onRetry: () => void;
@@ -413,9 +476,27 @@ function HealthCheck({
               {target.url}
             </Text>
           </View>
-          <Pressable onPress={onTuneIn} accessibilityRole="button" accessibilityLabel={`Tune in to ${target.name}`} className="items-center justify-center" style={{ backgroundColor: colors.accent, paddingVertical: 15 }}>
+          {insecure ? (
+            <View style={{ borderWidth: 1, borderColor: destructive, padding: 14, gap: 6 }}>
+              <Text className="font-body-semibold text-ink" style={{ fontSize: 13 }}>
+                Insecure connection
+              </Text>
+              <Text className="font-body text-muted" style={{ fontSize: 12.5, lineHeight: 20 }}>
+                This station answered over plain HTTP, not HTTPS, so anyone on your network can
+                see and tamper with the traffic. Only continue if it&apos;s your own box, or a
+                station you trust on a network you trust.
+              </Text>
+            </View>
+          ) : null}
+          <Pressable
+            onPress={onTuneIn}
+            accessibilityRole="button"
+            accessibilityLabel={insecure ? 'Continue over insecure HTTP' : `Tune in to ${target.name}`}
+            className="items-center justify-center"
+            style={{ backgroundColor: insecure ? destructive : colors.accent, paddingVertical: 15 }}
+          >
             <Text className="font-body-semibold" style={{ color: '#fff', fontSize: 14 }}>
-              Tune in to {target.name}
+              {insecure ? 'Continue over insecure HTTP' : `Tune in to ${target.name}`}
             </Text>
           </Pressable>
         </View>

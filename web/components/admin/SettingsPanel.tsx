@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useDynamicStyle } from '../../hooks/useDynamicStyle';
 import { m } from 'motion/react';
 import { notify, errorMessage } from '../../lib/notify';
-import { fmtSize } from '../../lib/format';
+import { fmtClockMinute, fmtSize, normalizeStationLocale, type StationLocale } from '../../lib/format';
 import { useAdminAuth } from '../../lib/adminAuth';
 import { applyTheme, cacheTheme } from '../../lib/theme';
 import { CLOUD_VOICES, CLOUD_MODELS } from '../../lib/cloudVoices';
@@ -23,7 +23,7 @@ import WebhooksPanel from './WebhooksPanel';
 import BackupPanel from './BackupPanel';
 
 const SECTIONS = [
-  { id: 'station',  label: 'Station', hint: 'name · location · timezone' },
+  { id: 'station',  label: 'Station', hint: 'name · location · locale' },
   { id: 'theme',    label: 'Theme', hint: 'station-wide palette' },
   { id: 'llm',      label: 'LLM provider', hint: 'model routing' },
   { id: 'tts',      label: 'TTS voice', hint: 'default engine' },
@@ -113,6 +113,9 @@ interface TtsForm {
   chatterbox: { referenceVoice: string };
   pocketTts: { voice: string };
   cloud: CloudTtsCfg;
+  // Per-engine voice-level trim in dB, keyed by engine id (note the hyphen in
+  // `pocket-tts`). Always carries all 5 known engines, 0 = unity = no change.
+  gainDb: Record<string, number>;
 }
 
 interface LlmFallbackForm {
@@ -202,6 +205,7 @@ interface FormState {
   stream: StreamForm;
   station: string;
   timezone: string;
+  locale: StationLocale;
   weather: WeatherCfg;
   tts: TtsForm;
   llm: LlmForm;
@@ -216,6 +220,7 @@ interface JingleEntry {
   size?: number;
   createdAt?: string;
   builtin?: boolean;
+  source?: string;
 }
 
 interface SfxEntry {
@@ -224,6 +229,7 @@ interface SfxEntry {
   size?: number;
   durationSec?: number;
   builtin?: boolean;
+  source?: string;
 }
 
 interface SfxData {
@@ -239,6 +245,7 @@ interface SettingsData {
     stream?: { opusEnabled?: boolean };
     station?: string;
     timezone?: string;
+    locale?: StationLocale;
     theme?: { active?: string };
     weather?: { lat?: number; lng?: number; locationName?: string; units?: 'metric' | 'imperial' };
     tts?: {
@@ -247,6 +254,7 @@ interface SettingsData {
       chatterbox?: { referenceVoice?: string };
       pocketTts?: { voice?: string };
       cloud?: Partial<CloudTtsCfg>;
+      gainDb?: Record<string, number>;
     };
     llm?: Partial<LlmForm>;
     search?: Partial<SearchForm>;
@@ -291,6 +299,7 @@ interface SettingsData {
   };
   defaults?: {
     search?: Partial<SearchForm>;
+    locale?: StationLocale;
   };
   jingles?: JingleEntry[];
   libraryStats?: { total?: number };
@@ -367,6 +376,7 @@ export default function SettingsPanel() {
       },
       station: v.station ?? '',
       timezone: v.timezone ?? '',
+      locale: normalizeStationLocale(v.locale),
       weather: {
         lat: String(v.weather?.lat ?? ''),
         lng: String(v.weather?.lng ?? ''),
@@ -384,6 +394,16 @@ export default function SettingsPanel() {
           model: v.tts?.cloud?.model ?? '',
           voice: v.tts?.cloud?.voice ?? '',
           baseUrl: v.tts?.cloud?.baseUrl ?? '',
+        },
+        // Per-engine voice level (dB). Zero default for all 5 engine ids, then
+        // overlay any saved values. Keyed by engine id — `pocket-tts` (hyphen).
+        gainDb: {
+          piper: 0,
+          kokoro: 0,
+          chatterbox: 0,
+          'pocket-tts': 0,
+          cloud: 0,
+          ...(v.tts?.gainDb || {}),
         },
       },
       llm: {
@@ -540,6 +560,25 @@ export default function SettingsPanel() {
     finally { setBusy(false); }
   };
 
+  // Multipart upload — adminFetch leaves Content-Type unset so the browser
+  // sets the multipart boundary itself. The controller transcodes + levels.
+  const uploadJingle = async (file: File, label: string): Promise<boolean> => {
+    if (busy) return false;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      if (label.trim()) fd.append('label', label.trim());
+      const r = await adminFetch('/jingles/upload', { method: 'POST', body: fd });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `failed (${r.status})`);
+      await refresh();
+      notify.ok('jingle imported');
+      return true;
+    } catch (e) { notify.err(`Jingle import failed: ${errorMessage(e)}`); return false; }
+    finally { setBusy(false); }
+  };
+
   const createSfx = async () => {
     if (!sfxForm.name.trim() || !sfxForm.prompt.trim() || busy) return;
     setBusy(true);
@@ -570,6 +609,25 @@ export default function SettingsPanel() {
       if (!r.ok) throw new Error(j.error || `failed (${r.status})`);
       await refreshSfx();
     } catch (e) { notify.err(`Delete failed: ${errorMessage(e)}`); }
+    finally { setBusy(false); }
+  };
+
+  // Upload a ready-made effect — no ElevenLabs key required (unlike createSfx).
+  const uploadSfx = async (file: File, name: string, description: string): Promise<boolean> => {
+    if (busy) return false;
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('name', name.trim());
+      if (description.trim()) fd.append('description', description.trim());
+      const r = await adminFetch('/sfx/upload', { method: 'POST', body: fd });
+      const j = (await r.json().catch(() => ({}))) as { error?: string };
+      if (!r.ok) throw new Error(j.error || `failed (${r.status})`);
+      await refreshSfx();
+      notify.ok('sound effect imported');
+      return true;
+    } catch (e) { notify.err(`Sound effect import failed: ${errorMessage(e)}`); return false; }
     finally { setBusy(false); }
   };
 
@@ -663,7 +721,8 @@ export default function SettingsPanel() {
               <JinglesSection
                 data={data} form={form} setForm={updateForm} busy={busy}
                 jingleText={jingleText} setJingleText={setJingleText}
-                createJingle={createJingle} saveSettings={saveSettings}
+                createJingle={createJingle} uploadJingle={uploadJingle}
+                saveSettings={saveSettings}
                 onDelete={setConfirmDelete} adminFetch={adminFetch}
               />
             )}
@@ -679,7 +738,8 @@ export default function SettingsPanel() {
         {activeSection === 'sfx' && (
           <SfxSection
             sfxData={sfxData} sfxForm={sfxForm} setSfxForm={setSfxForm}
-            busy={busy} createSfx={createSfx} onDelete={setConfirmDeleteSfx}
+            busy={busy} createSfx={createSfx} uploadSfx={uploadSfx}
+            onDelete={setConfirmDeleteSfx}
             data={data} saveSettings={saveSettings} adminFetch={adminFetch}
           />
         )}
@@ -1075,6 +1135,62 @@ interface SectionProps {
 // rejects an empty-string SelectItem value.
 const CB_DEFAULT_VOICE = '__cb_default__';
 
+// Voice-level (dB) trim. Engine ids match the server contract exactly — note the
+// hyphen in `pocket-tts`. Range mirrors the server clamp (TTS_GAIN_CLAMP_DB=12).
+const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'] as const;
+const TTS_GAIN_MIN = -12;
+const TTS_GAIN_MAX = 12;
+const TTS_GAIN_STEP = 0.5;
+
+// Pretty-print a gain: "0 dB" clean-neutral, otherwise a signed one-decimal value
+// with a real minus sign (e.g. "+3.0 dB", "−2.5 dB").
+function formatGainDb(v: number): string {
+  if (!v) return '0 dB';
+  const sign = v > 0 ? '+' : '−';
+  return `${sign}${Math.abs(v).toFixed(1)} dB`;
+}
+
+// Compact per-engine voice-level control: a labelled range slider + live readout,
+// writing into form.tts.gainDb[engineId]. Dropped into each engine's config panel.
+function TtsGainField({
+  engineId,
+  form,
+  setForm,
+}: {
+  engineId: string;
+  form: FormState;
+  setForm: FormUpdater;
+}) {
+  const value = form.tts.gainDb?.[engineId] ?? 0;
+  return (
+    <div className="field mt-4">
+      <div className="flex items-center justify-between gap-3">
+        <Label>Voice level (dB)</Label>
+        <span className="font-mono text-[12px] text-ink tabular-nums">{formatGainDb(value)}</span>
+      </div>
+      <input
+        type="range"
+        min={TTS_GAIN_MIN}
+        max={TTS_GAIN_MAX}
+        step={TTS_GAIN_STEP}
+        value={value}
+        onChange={(e: ChangeEvent<HTMLInputElement>) => {
+          const next = Number(e.target.value);
+          setForm(f => ({
+            ...f,
+            tts: { ...f.tts, gainDb: { ...f.tts.gainDb, [engineId]: next } },
+          }));
+        }}
+        aria-label="Voice level in decibels"
+        className="mt-1.5 w-full max-w-[360px] accent-[var(--accent)]"
+      />
+      <div className="field-hint">
+        Trim this engine’s loudness to match your other voices. <code>0 dB</code> = no change.
+      </div>
+    </div>
+  );
+}
+
 // Prominent, self-contained "engine not installed" callout with a step-by-step
 // setup guide. Chatterbox and PocketTTS both live in the optional `tts-heavy`
 // sidecar, so the recommended path is identical; only the engine label and the
@@ -1150,6 +1266,9 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
         voice: form.tts.cloud.voice,
         baseUrl: form.tts.cloud.baseUrl,
       },
+      // Per-engine voice-level trim. Always sent (server clamps + drops unknown
+      // keys); keyed by engine id, `pocket-tts` with the hyphen.
+      gainDb: form.tts.gainDb,
     },
   });
 
@@ -1179,6 +1298,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
     chatterbox?: { referenceVoice?: string };
     pocketTts?: { voice?: string };
     cloud?: SavedCloud;
+    gainDb?: Record<string, number>;
   } = data.values?.tts || {};
   const savedEngine: string = savedTts.defaultEngine || 'piper';
   const savedKokoroVoice: string = savedTts.kokoro?.voice || '';
@@ -1188,6 +1308,12 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
   const savedEngineLabel = ENGINE_LABELS[savedEngine] || savedEngine;
   const formEngineLabel = ENGINE_LABELS[form.tts.defaultEngine] || form.tts.defaultEngine;
 
+  const savedGainDb: Record<string, number> = savedTts.gainDb || {};
+  // Any engine whose form gain differs from its saved value (absent → 0 unity).
+  const gainDirty = TTS_GAIN_ENGINES.some(
+    e => (form.tts.gainDb?.[e] ?? 0) !== (savedGainDb[e] ?? 0),
+  );
+
   const ttsDirty =
     form.tts.defaultEngine !== savedEngine
     || (form.tts.kokoro?.voice || '') !== savedKokoroVoice
@@ -1196,7 +1322,8 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
     || form.tts.cloud.provider !== (savedCloud.provider || '')
     || (form.tts.cloud.model || '').trim() !== (savedCloud.model || '').trim()
     || (form.tts.cloud.voice || '').trim() !== (savedCloud.voice || '').trim()
-    || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim();
+    || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim()
+    || gainDirty;
 
   let activeDetail: ReactNode = null;
   if (savedEngine === 'piper') {
@@ -1274,134 +1401,146 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
           </div>
 
         {form.tts.defaultEngine === 'piper' && (
-          <div className="field mt-4">
-            <div className="field-hint">
-              Piper is bundled with the controller — fast, lightweight, and always
-              available. Nothing to configure.
+          <>
+            <div className="field mt-4">
+              <div className="field-hint">
+                Piper is bundled with the controller — fast, lightweight, and always
+                available. Nothing else to configure.
+              </div>
             </div>
-          </div>
+            <TtsGainField engineId="piper" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'kokoro' && (
-          <div className="field mt-4">
-            <Label>Kokoro voice</Label>
-            {available.kokoro === false && (
-              <div className="field-hint text-[var(--danger)]">
-                Kokoro is not installed in this build — it will fall back to Piper.
-              </div>
-            )}
-            {(data.tts?.kokoroVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.kokoro?.voice ?? 'bf_isabella'}
-                  onValueChange={val => setForm(f => ({
-                    ...f, tts: { ...f.tts, kokoro: { ...f.tts.kokoro, voice: val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {data.tts?.kokoroVoices?.map(v => (
-                        <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <div className="field-hint">British English only. Applies to every kind routed through Kokoro.</div>
-              </>
-            ) : (
-              <div className="field-hint">This build reports no Kokoro voices.</div>
-            )}
-          </div>
+          <>
+            <div className="field mt-4">
+              <Label>Kokoro voice</Label>
+              {available.kokoro === false && (
+                <div className="field-hint text-[var(--danger)]">
+                  Kokoro is not installed in this build — it will fall back to Piper.
+                </div>
+              )}
+              {(data.tts?.kokoroVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.kokoro?.voice ?? 'bf_isabella'}
+                    onValueChange={val => setForm(f => ({
+                      ...f, tts: { ...f.tts, kokoro: { ...f.tts.kokoro, voice: val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {data.tts?.kokoroVoices?.map(v => (
+                          <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">British English only. Applies to every kind routed through Kokoro.</div>
+                </>
+              ) : (
+                <div className="field-hint">This build reports no Kokoro voices.</div>
+              )}
+            </div>
+            <TtsGainField engineId="kokoro" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'chatterbox' && (
-          <div className="field mt-4">
-            <Label>Chatterbox reference voice</Label>
-            {available.chatterbox === false ? (
-              <HeavyEngineSetupGuide engine="Chatterbox" buildArg="WITH_CHATTERBOX=1" />
-            ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.chatterbox?.referenceVoice || CB_DEFAULT_VOICE}
-                  onValueChange={val => setForm(f => ({
-                    ...f,
-                    tts: { ...f.tts, chatterbox: { ...f.tts.chatterbox, referenceVoice: val === CB_DEFAULT_VOICE ? '' : val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
-                      {data.tts?.chatterboxVoices?.map(v => (
-                        <SelectItem key={v} value={v}>{v}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <div className="field-hint">
-                  ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
-                  <code>state/voices/</code>
-                  {' '}on the host (the legacy <code>state/chatterbox-voices/</code> is
-                  still read) and they’ll appear here on next reload. Personas can
-                  override this on the Personas page.
-                </div>
-              </>
-            ) : (
-              <div className="field-hint">
-                No reference voices found in{' '}
-                <code>state/voices/</code>{' '}
-                (legacy <code>state/chatterbox-voices/</code> also empty). The engine will
-                use its built-in default voice — drop a 5-second WAV into that directory
-                to enable cloning.
-              </div>
-            )}
-          </div>
-        )}
-
-        {form.tts.defaultEngine === 'pocket-tts' && (
-          <div className="field mt-4">
-            <Label>PocketTTS voice</Label>
-            {available['pocket-tts'] === false ? (
-              <HeavyEngineSetupGuide engine="PocketTTS" buildArg="WITH_POCKETTTS=1" />
-            ) : (data.tts?.pocketTtsVoices?.length || 0) > 0 ? (
-              <>
-                <Select
-                  value={form.tts.pocketTts?.voice ?? 'alba'}
-                  onValueChange={val => setForm(f => ({
-                    ...f, tts: { ...f.tts, pocketTts: { ...f.tts.pocketTts, voice: val } },
-                  }))}
-                >
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectLabel>Built-in</SelectLabel>
-                      {data.tts?.pocketTtsVoices?.map(v => (
-                        <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
-                      ))}
-                    </SelectGroup>
-                    {(data.tts?.pocketTtsCustomVoices?.length || 0) > 0 && (
+          <>
+            <div className="field mt-4">
+              <Label>Chatterbox reference voice</Label>
+              {available.chatterbox === false ? (
+                <HeavyEngineSetupGuide engine="Chatterbox" buildArg="WITH_CHATTERBOX=1" />
+              ) : (data.tts?.chatterboxVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.chatterbox?.referenceVoice || CB_DEFAULT_VOICE}
+                    onValueChange={val => setForm(f => ({
+                      ...f,
+                      tts: { ...f.tts, chatterbox: { ...f.tts.chatterbox, referenceVoice: val === CB_DEFAULT_VOICE ? '' : val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
                       <SelectGroup>
-                        <SelectLabel>Custom (cloned)</SelectLabel>
-                        {data.tts?.pocketTtsCustomVoices?.map(v => (
+                        <SelectItem value={CB_DEFAULT_VOICE}>Built-in default voice</SelectItem>
+                        {data.tts?.chatterboxVoices?.map(v => (
                           <SelectItem key={v} value={v}>{v}</SelectItem>
                         ))}
                       </SelectGroup>
-                    )}
-                  </SelectContent>
-                </Select>
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    ~5 seconds of clean speech is enough to clone a voice. Drop WAVs into{' '}
+                    <code>state/voices/</code>
+                    {' '}on the host (the legacy <code>state/chatterbox-voices/</code> is
+                    still read) and they’ll appear here on next reload. Personas can
+                    override this on the Personas page.
+                  </div>
+                </>
+              ) : (
                 <div className="field-hint">
-                  100M-param CPU-only model from kyutai-labs. Built-in voices speak
-                  English, French, German, Italian, Spanish and Portuguese. Drop a
-                  ~5-second WAV into <code>state/voices/</code> to clone a voice and it
-                  will appear under <em>Custom</em> on next reload. Personas can override
-                  this on the Personas page.
+                  No reference voices found in{' '}
+                  <code>state/voices/</code>{' '}
+                  (legacy <code>state/chatterbox-voices/</code> also empty). The engine will
+                  use its built-in default voice — drop a 5-second WAV into that directory
+                  to enable cloning.
                 </div>
-              </>
-            ) : (
-              <div className="field-hint">This build reports no PocketTTS voices.</div>
-            )}
-          </div>
+              )}
+            </div>
+            <TtsGainField engineId="chatterbox" form={form} setForm={setForm} />
+          </>
+        )}
+
+        {form.tts.defaultEngine === 'pocket-tts' && (
+          <>
+            <div className="field mt-4">
+              <Label>PocketTTS voice</Label>
+              {available['pocket-tts'] === false ? (
+                <HeavyEngineSetupGuide engine="PocketTTS" buildArg="WITH_POCKETTTS=1" />
+              ) : (data.tts?.pocketTtsVoices?.length || 0) > 0 ? (
+                <>
+                  <Select
+                    value={form.tts.pocketTts?.voice ?? 'alba'}
+                    onValueChange={val => setForm(f => ({
+                      ...f, tts: { ...f.tts, pocketTts: { ...f.tts.pocketTts, voice: val } },
+                    }))}
+                  >
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        <SelectLabel>Built-in</SelectLabel>
+                        {data.tts?.pocketTtsVoices?.map(v => (
+                          <SelectItem key={v.id} value={v.id}>{v.label} — {v.id}</SelectItem>
+                        ))}
+                      </SelectGroup>
+                      {(data.tts?.pocketTtsCustomVoices?.length || 0) > 0 && (
+                        <SelectGroup>
+                          <SelectLabel>Custom (cloned)</SelectLabel>
+                          {data.tts?.pocketTtsCustomVoices?.map(v => (
+                            <SelectItem key={v} value={v}>{v}</SelectItem>
+                          ))}
+                        </SelectGroup>
+                      )}
+                    </SelectContent>
+                  </Select>
+                  <div className="field-hint">
+                    100M-param CPU-only model from kyutai-labs. Built-in voices speak
+                    English, French, German, Italian, Spanish and Portuguese. Drop a
+                    ~5-second WAV into <code>state/voices/</code> to clone a voice and it
+                    will appear under <em>Custom</em> on next reload. Personas can override
+                    this on the Personas page.
+                  </div>
+                </>
+              ) : (
+                <div className="field-hint">This build reports no PocketTTS voices.</div>
+              )}
+            </div>
+            <TtsGainField engineId="pocket-tts" form={form} setForm={setForm} />
+          </>
         )}
 
         {form.tts.defaultEngine === 'cloud' && (() => {
@@ -1533,6 +1672,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
                 var required.
               </div>
             )}
+            <TtsGainField engineId="cloud" form={form} setForm={setForm} />
           </div>
           );
         })()}
@@ -2776,18 +2916,15 @@ const TZ_GROUPS: Array<{ region: string; zones: string[] }> = (() => {
 })();
 
 // Wall-clock preview for a zone, or '' when the zone can't be formatted.
-function clockPreview(timeZone: string) {
-  try {
-    return new Date().toLocaleTimeString('en-GB', { timeZone: timeZone || undefined, hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '';
-  }
+function clockPreview(timeZone: string, locale: StationLocale) {
+  return fmtClockMinute(new Date(), timeZone || undefined, locale);
 }
 
 function StationSection({ data, form, setForm, busy, saveSettings }: SectionProps) {
   const save = () => saveSettings({
     station: form.station,
     timezone: form.timezone,
+    locale: form.locale,
     weather: {
       lat: parseFloat(form.weather.lat),
       lng: parseFloat(form.weather.lng),
@@ -2807,14 +2944,15 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
   const serverTz = data.serverTimezone || 'server timezone';
   // '' = Auto → preview the server's zone, which is what the station runs on.
   const previewTz = form.timezone || data.serverTimezone || '';
-  const preview = clockPreview(previewTz);
+  const preview = clockPreview(previewTz, form.locale);
+  const localeLabel = form.locale === 'en-US' ? 'English (US)' : 'English (UK)';
 
   return (
     <>
       <SectionHeader
         eyebrow="station"
         title="How the DJ identifies this radio on air."
-        sub="The station name is substituted into the DJ prompt as {station}. The location sets where the DJ thinks it broadcasts from and drives the Open-Meteo weather it reads on air. The timezone sets the clock the DJ lives on. All apply live — no mixer restart."
+        sub="The station name is substituted into the DJ prompt as {station}. The location sets where the DJ thinks it broadcasts from and drives the Open-Meteo weather it reads on air. The timezone sets the clock the DJ lives on; locale controls how station times are displayed. All apply live — no mixer restart."
         metrics={[
           { n: data.values?.station || 'SUB/WAVE', l: 'station', accent: true },
         ]}
@@ -2929,7 +3067,7 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
           </Select>
           {preview && (
             <div className="field-hint">
-              Station clock: <span className="mono-num">{preview}</span> — if that doesn’t match your watch, pick your zone above.
+              Station clock: <span className="mono-num">{preview}</span> in {localeLabel} — if that doesn’t match your watch, pick your zone above.
             </div>
           )}
           <div className="field-hint">
@@ -2940,8 +3078,31 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
         </div>
       </Card>
 
+      <Card title="Localization" sub="Language variant and clock display">
+        <div className="field">
+          <Label>Station locale</Label>
+          <Select
+            value={form.locale}
+            onValueChange={val =>
+              setForm(f => ({ ...f, locale: normalizeStationLocale(val) }))
+            }
+          >
+            <SelectTrigger className="w-[260px]"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="en-GB">English (UK) — 24-hour</SelectItem>
+                <SelectItem value="en-US">English (US) — AM/PM</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+          <div className="field-hint">
+            Sets station-facing display language and clock style. US English uses AM/PM for visible clock times. Applies live.
+          </div>
+        </div>
+      </Card>
+
       <SaveBar
-        note="Station name, location, and timezone apply live."
+        note="Station name, location, timezone, and locale apply live."
         busy={busy}
         onSave={save}
         saveLabel="Save station settings"
@@ -3192,16 +3353,29 @@ interface JinglesSectionProps extends SectionProps {
   jingleText: string;
   setJingleText: (s: string) => void;
   createJingle: () => void;
+  uploadJingle: (file: File, label: string) => Promise<boolean>;
   onDelete: (filename: string | null) => void;
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
 }
 
 function JinglesSection({
   data, form, setForm, busy, jingleText, setJingleText,
-  createJingle, saveSettings, onDelete, adminFetch,
+  createJingle, uploadJingle, saveSettings, onDelete, adminFetch,
 }: JinglesSectionProps) {
   const ratioDirty = form.jingleRatio !== String(data.values?.jingleRatio);
   const jingles = data.jingles || [];
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importLabel, setImportLabel] = useState('');
+  const importRef = useRef<HTMLInputElement>(null);
+  const doImport = async () => {
+    if (!importFile) return;
+    const ok = await uploadJingle(importFile, importLabel);
+    if (ok) {
+      setImportFile(null);
+      setImportLabel('');
+      if (importRef.current) importRef.current.value = '';
+    }
+  };
 
   return (
     <>
@@ -3267,6 +3441,44 @@ function JinglesSection({
         </div>
       </Card>
 
+      <Card title="Import jingle" sub="bring your own mp3 / wav">
+        <div className="field">
+          <Label>Audio file</Label>
+          <input
+            ref={importRef}
+            type="file"
+            accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a,.aac,.opus"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportFile(e.target.files?.[0] ?? null)}
+            className="hidden"
+          />
+          <div className="flex flex-wrap items-center gap-2.5">
+            <Btn tone="solid" onClick={() => importRef.current?.click()} disabled={busy}>
+              {importFile ? 'Change file…' : 'Choose audio file…'}
+            </Btn>
+            {importFile && (
+              <span className="text-[12px] text-ink">{importFile.name}</span>
+            )}
+          </div>
+          <div className="field-hint">
+            mp3, wav, ogg, flac, m4a, aac or opus · up to 25 MB · converted and level-matched on import
+          </div>
+        </div>
+        <div className="field mt-3.5">
+          <Label>Label (optional)</Label>
+          <Input
+            value={importLabel}
+            maxLength={200}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportLabel(e.target.value)}
+            placeholder="shown in the list — defaults to the file name"
+          />
+        </div>
+        <div className="mt-3.5 flex items-center gap-2.5">
+          <Btn tone="accent" onClick={doImport} disabled={busy || !importFile}>
+            {busy ? 'Importing…' : 'Import jingle'}
+          </Btn>
+        </div>
+      </Card>
+
       <Card title="Jingles" sub={`${jingles.length} file${jingles.length === 1 ? '' : 's'}`}>
         {jingles.length === 0 && (
           <div className="py-2 text-[12px] text-muted italic">
@@ -3287,6 +3499,7 @@ function JinglesSection({
                   <span className="caption">{new Date(j.createdAt).toLocaleString('en-GB')}</span>
                 )}
                 {j.builtin && <Pill tone="accent">builtin</Pill>}
+                {j.source === 'upload' && <Pill tone="ink">uploaded</Pill>}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -3319,13 +3532,30 @@ interface SfxSectionProps {
   setSfxForm: (updater: (f: SfxForm) => SfxForm) => void;
   busy: boolean;
   createSfx: () => void;
+  uploadSfx: (file: File, name: string, description: string) => Promise<boolean>;
   onDelete: (name: string | null) => void;
   data: SettingsData | null;
   saveSettings: SaveSettings;
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
 }
 
-function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, onDelete, data, saveSettings, adminFetch }: SfxSectionProps) {
+function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, uploadSfx, onDelete, data, saveSettings, adminFetch }: SfxSectionProps) {
+  // Hooks must run before the early "loading…" return — keep them at the top.
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importName, setImportName] = useState('');
+  const [importDesc, setImportDesc] = useState('');
+  const importRef = useRef<HTMLInputElement>(null);
+  const doImport = async () => {
+    if (!importFile || !importName.trim()) return;
+    const ok = await uploadSfx(importFile, importName, importDesc);
+    if (ok) {
+      setImportFile(null);
+      setImportName('');
+      setImportDesc('');
+      if (importRef.current) importRef.current.value = '';
+    }
+  };
+
   if (!sfxData) {
     return <div className="text-[13px] text-muted italic">loading…</div>;
   }
@@ -3338,7 +3568,7 @@ function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, onDelete, d
       <SectionHeader
         eyebrow="sound effects"
         title="Stingers the DJ agent plays under its voice."
-        sub="The segment-director agent can garnish a spoken break with one of these effects, mixed beneath the voice. Built-in effects ship with the station; new ones are generated by ElevenLabs from a text prompt."
+        sub="The segment-director agent can garnish a spoken break with one of these effects, mixed beneath the voice. Built-in effects ship with the station; add your own by generating one from a text prompt (ElevenLabs) or importing an audio file."
         metrics={[{ n: String(list.length), l: 'effects', accent: true }]}
       />
 
@@ -3438,6 +3668,56 @@ function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, onDelete, d
         </div>
       </Card>
 
+      <Card title="Import sound effect" sub="bring your own mp3 / wav — no ElevenLabs key needed">
+        <div className="field">
+          <Label>Name</Label>
+          <Input
+            value={importName}
+            maxLength={60}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportName(e.target.value)}
+            placeholder="e.g. my-stinger"
+            className="max-w-[280px]"
+          />
+          <div className="field-hint">A short slug the agent references — letters, numbers and dashes.</div>
+        </div>
+        <div className="field mt-3.5">
+          <Label>Description</Label>
+          <Input
+            value={importDesc}
+            maxLength={200}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportDesc(e.target.value)}
+            placeholder="when the agent should reach for this effect"
+          />
+          <div className="field-hint">The agent reads this to decide when the effect fits a line.</div>
+        </div>
+        <div className="field mt-3.5">
+          <Label>Audio file</Label>
+          <input
+            ref={importRef}
+            type="file"
+            accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a,.aac,.opus"
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setImportFile(e.target.files?.[0] ?? null)}
+            className="hidden"
+          />
+          <div className="flex flex-wrap items-center gap-2.5">
+            <Btn tone="solid" onClick={() => importRef.current?.click()} disabled={busy}>
+              {importFile ? 'Change file…' : 'Choose audio file…'}
+            </Btn>
+            {importFile && <span className="text-[12px] text-ink">{importFile.name}</span>}
+          </div>
+          <div className="field-hint">mp3, wav, ogg, flac, m4a, aac or opus · up to 25 MB · converted to MP3 on import</div>
+        </div>
+        <div className="mt-3.5 flex items-center gap-2.5">
+          <Btn
+            tone="accent"
+            onClick={doImport}
+            disabled={busy || !importFile || !importName.trim()}
+          >
+            {busy ? 'Importing…' : 'Import sound effect'}
+          </Btn>
+        </div>
+      </Card>
+
       <Card title="Effect library" sub={`${list.length} effect${list.length === 1 ? '' : 's'}`}>
         {list.length === 0 && (
           <div className="py-2 text-[12px] text-muted italic">
@@ -3460,6 +3740,7 @@ function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, onDelete, d
                 <span className="caption">{fmtSize(s.size)}</span>
                 {s.durationSec && <span className="caption">{s.durationSec}s</span>}
                 {s.builtin && <Pill tone="accent">builtin</Pill>}
+                {s.source === 'upload' && <Pill tone="ink">uploaded</Pill>}
               </div>
             </div>
             <div className="flex items-center gap-2">
