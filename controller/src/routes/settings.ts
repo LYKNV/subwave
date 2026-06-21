@@ -17,7 +17,7 @@ import { invalidateWeatherCache } from '../context.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { tagger } from '../broadcast/tagger.js';
 import { skillCatalog } from '../skills/_agent.js';
-import { clearUserThemeCache, loadUserThemes, listThemes } from '../themes.js';
+import { clearUserThemeCache, loadUserThemes, listThemes, saveUserTheme } from '../themes.js';
 
 export const router = express.Router();
 
@@ -103,6 +103,12 @@ router.get('/settings', requireAdmin, async (req, res) => {
       llm: {
         providers: settings.LLM_PROVIDERS,
         active: llmProvider.activeModelLabel(),
+      },
+      embedding: {
+        // Embedding-capable providers only — a strict subset of llm.providers.
+        // The picker maps over this so chat-only providers (openrouter, deepseek,
+        // gateway) can't be chosen as an embedding source (#493).
+        providers: settings.EMBEDDING_PROVIDERS,
       },
       search: {
         providers: settings.SEARCH_PROVIDERS,
@@ -279,5 +285,20 @@ router.post('/themes/refresh', requireAdmin, async (req, res) => {
     res.json({ ok: true, themes });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /themes — create/overwrite a user theme as ${STATE_DIR}/themes/<id>.json.
+// Body: { id?, name, description?, mode, tokens }. The id is derived from the
+// name when absent. Validated by the shared ThemeSchema (token security regex);
+// reserved built-in ids are rejected. Returns the refreshed registry.
+// ---------------------------------------------------------------------------
+router.post('/themes', requireAdmin, async (req, res) => {
+  try {
+    const themes = await saveUserTheme(req.body || {});
+    res.json({ ok: true, themes });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });
