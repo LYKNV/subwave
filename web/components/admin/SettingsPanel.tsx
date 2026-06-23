@@ -277,6 +277,7 @@ interface SettingsData {
       enrichment?: Partial<EmbeddingEnrichmentForm>;
     };
     sfx?: { enabled?: boolean };
+    ui?: { boothBuddy?: boolean };
     scrobble?: {
       lastfm?: Partial<ScrobbleLastfmForm>;
       listenbrainz?: Partial<ScrobbleListenbrainzForm>;
@@ -2869,10 +2870,11 @@ function LibrarySection({ data, form, setForm, busy, saveSettings }: SectionProp
             <div>
               <div className="text-[13px] font-bold">Last.fm tags</div>
               <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
-                Vanilla Navidrome&apos;s <code>getArtistInfo2</code> doesn&apos;t
-                surface crowd tags. Leave off unless you&apos;re running a
-                custom Navidrome that does. Otherwise this just burns an HTTP
-                round trip per artist for nothing.
+                With a Last.fm API key configured (Scrobbling), crowd tags come
+                straight from the Last.fm API and work on vanilla Navidrome.
+                Without a key it falls back to Navidrome&apos;s{' '}
+                <code>getArtistInfo2</code>, which only surfaces tags on a custom
+                Navidrome — so leave off unless you have a key or that setup.
               </div>
             </div>
             <Seg
@@ -3142,6 +3144,28 @@ function StationSection({ data, form, setForm, busy, saveSettings }: SectionProp
           </Select>
           <div className="field-hint">
             Sets station-facing display language and clock style. US English uses AM/PM for visible clock times. Applies live.
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Booth Buddy" sub="the DJ-line mascot on the player">
+        <div className="field">
+          <Label>Show the Booth Sprite</Label>
+          <div className="flex items-center gap-2">
+            <Seg
+              options={[
+                { id: 'on', label: 'On' },
+                { id: 'off', label: 'Off' },
+              ]}
+              value={data?.values?.ui?.boothBuddy === true ? 'on' : 'off'}
+              onChange={id => { if (!busy) saveSettings({ ui: { boothBuddy: id === 'on' } }); }}
+            />
+          </div>
+          <div className="field-hint">
+            A small animated mascot that leads the DJ line on the listener player,
+            reacting to what the DJ is doing — on-air, picking, or idle — and tap it
+            for a reaction. When off, the line falls back to the classic ♪/◇ marker.
+            Applies live, no restart.
           </div>
         </div>
       </Card>

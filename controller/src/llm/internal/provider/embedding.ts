@@ -32,7 +32,15 @@ function embeddingCfg() {
     enabled: s.enabled !== false,
     provider: s.provider || llm.provider || 'ollama',
     model: s.model || '',
-    apiKey: s.apiKey || llm.apiKey || '',
+    // Key precedence: the saved settings field wins, then a dedicated
+    // `EMBEDDING_API_KEY` env var (the env path most installs use -- keys live in
+    // state/secrets.env, not settings.json), then the chat key. This is a
+    // runtime env read like config.ts does for SEARCH_API_KEY, so the env value
+    // never gets baked into the persisted settings.json. It covers every
+    // provider uniformly -- including openai-compatible/locca, which can't safely
+    // grab a provider-conventional env var (createOpenAI would otherwise reach
+    // for OPENAI_API_KEY against an arbitrary self-hosted server).
+    apiKey: s.apiKey || process.env.EMBEDDING_API_KEY || llm.apiKey || '',
     ollamaUrl: s.ollamaUrl || llm.ollamaUrl || '',
     baseUrl: s.baseUrl || llm.baseUrl || '',
   };
@@ -68,11 +76,12 @@ function defaultEmbeddingDimFor(model: string): number {
   // live controller adopts whatever dim the tagger recorded (library-db
   // adoptStoredDim). So an unknown / arbitrarily-named embedding model still
   // works — this table just seeds the schema before the first tag run (#319).
-  if (model === 'nomic-embed-text') return 768;
-  if (model === 'mxbai-embed-large') return 1024;
-  if (model === 'text-embedding-3-small') return 1536;
-  if (model === 'text-embedding-3-large') return 3072;
-  if (model === 'text-embedding-004') return 768;
+  const bare = model.includes('/') ? model.split('/').pop()! : model;
+  if (bare === 'nomic-embed-text') return 768;
+  if (bare === 'mxbai-embed-large') return 1024;
+  if (bare === 'text-embedding-3-small') return 1536;
+  if (bare === 'text-embedding-3-large') return 3072;
+  if (bare === 'text-embedding-004') return 768;
   return 768; // homelab default until a probe says otherwise
 }
 
@@ -159,7 +168,7 @@ export function buildEmbeddingModel(cfg: EmbeddingCfg) {
       // key is required — a missing one 401s with the 'unauthorized' message.
       const provider = createOpenAI({
         baseURL: 'https://openrouter.ai/api/v1',
-        apiKey: cfg.apiKey || 'unused',
+        apiKey: cfg.apiKey || process.env.OPENROUTER_API_KEY || 'unused',
         name: 'openrouter',
       });
       return provider.textEmbeddingModel(id);

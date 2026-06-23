@@ -14,6 +14,7 @@
 // API is generous and the tagger loop is already sequential + per-artist cached).
 
 import * as settings from '../settings.js';
+import * as subsonic from './subsonic.js';
 
 const TIMEOUT_MS = 5000;
 const LASTFM_API = 'https://ws.audioscrobbler.com/2.0/';
@@ -35,6 +36,16 @@ function resolveKey(): string {
 
 export function hasLastfmKey(): boolean {
   return !!resolveKey();
+}
+
+// Tri-state gate for whether to fetch Last.fm tags during enrichment, shared by
+// the bulk tagger (tag-library.phaseEnrich) and the single-track retag route so
+// they can't drift: explicit `true` always enriches; explicit `false` never
+// does; the default (null/undefined/unset) enriches only when a key is present.
+// A strict `=== true` here is what made retag skip enrichment for a
+// key-present-but-toggle-unset operator while the bulk path still ran it (#532).
+export function lastfmEnrichEnabled(cfgValue: unknown, hasKey: boolean): boolean {
+  return cfgValue === true || (cfgValue !== false && hasKey);
 }
 
 // Last.fm crowd tags for an artist, normalised to lowercase trimmed strings and
@@ -89,5 +100,34 @@ export async function getArtistTopTags(
     return [];
   } finally {
     clearTimeout(timer);
+  }
+}
+
+// Best-available crowd tags for an artist. Prefers the direct Last.fm API when
+// an api_key is configured (works on vanilla Navidrome); otherwise routes
+// through Navidrome's getArtistInfo2, which only surfaces tag[] on a custom
+// Navidrome agent (empty on vanilla). Returns [] on any miss/failure.
+//
+// This is the single chokepoint both the bulk tagger (tag-library.phaseEnrich)
+// and the single-track retag route call, so they can't drift on which source
+// they use — the drift that caused issue #532, where retag only ever hit the
+// Navidrome path and so never surfaced tags on vanilla Navidrome with a key.
+export async function getArtistTags(
+  artist: string,
+  opts: { count?: number } = {},
+): Promise<string[]> {
+  const count = opts.count ?? 10;
+  if (!artist || !artist.trim()) return [];
+  if (hasLastfmKey()) {
+    return getArtistTopTags(artist, { count });
+  }
+  try {
+    const matches = await subsonic.searchArtists(artist, { artistCount: 1 });
+    const artistId = matches?.[0]?.id;
+    if (!artistId) return [];
+    const tags = await subsonic.getArtistLastfmTags(artistId, { count });
+    return Array.isArray(tags) ? tags : [];
+  } catch {
+    return [];
   }
 }

@@ -477,6 +477,11 @@ const DEFAULTS = {
   // ${STATE_DIR}/themes/. Stored as id only; the actual token map lives with
   // the theme registry so it stays in sync with the file on disk.
   theme: { active: DEFAULT_THEME_ID },
+  // Listener-player UI toggles — purely presentational, station-wide. The web
+  // player reads these via GET /state (alongside the theme) and applies them
+  // live; no restart. `boothBuddy` gates the DJ-line mascot — OFF by default,
+  // so the line shows the classic ♪/◇ marker until an operator opts in.
+  ui: { boothBuddy: false },
   // Global DJ prompt template. '' means "use DEFAULT_DJ_PROMPT_TEMPLATE".
   djPrompt: '',
   // The persona roster. One persona is "active" at a time (activePersonaId);
@@ -629,6 +634,7 @@ const DEFAULTS = {
     // e.g. Ollama). See issue #405.
     baseUrl: '',          // openai-compatible / locca embedding server URL (with /v1)
     ollamaUrl: '',        // Ollama embedding server URL (ollama provider)
+    apiKey: '',           // empty -> inherit settings.llm.apiKey
     seedCount: 0,         // 0 → auto max(200, ceil(sqrt(library)))
     knnNeighbours: 5,
     moodVoteThreshold: 0.6,
@@ -1007,6 +1013,12 @@ export async function load() {
           ? stored.theme.active.trim()
           : DEFAULTS.theme.active,
     },
+    ui: {
+      boothBuddy:
+        typeof stored.ui?.boothBuddy === 'boolean'
+          ? stored.ui.boothBuddy
+          : DEFAULTS.ui.boothBuddy,
+    },
     personas,
     activePersonaId,
     shows,
@@ -1155,6 +1167,10 @@ export async function load() {
         typeof stored.embedding?.ollamaUrl === 'string'
           ? stored.embedding.ollamaUrl.trim()
           : DEFAULTS.embedding.ollamaUrl,
+      apiKey:
+        typeof stored.embedding?.apiKey === 'string'
+          ? stored.embedding.apiKey.trim()
+          : DEFAULTS.embedding.apiKey,
       seedCount:
         Number.isFinite(stored.embedding?.seedCount) && stored.embedding.seedCount >= 0
           ? Math.floor(stored.embedding.seedCount)
@@ -1296,6 +1312,7 @@ export function getRedacted() {
   if (clone.llm?.fallback) clone.llm.fallback.apiKey = s.llm?.fallback?.apiKey ? 'set' : '';
   if (clone.tts?.cloud) clone.tts.cloud.apiKey = s.tts?.cloud?.apiKey ? 'set' : '';
   if (clone.search) clone.search.apiKey = s.search?.apiKey ? 'set' : '';
+  if (clone.embedding) clone.embedding.apiKey = s.embedding?.apiKey ? 'set' : '';
   if (Array.isArray(clone.webhooks)) {
     for (let i = 0; i < clone.webhooks.length; i++) {
       clone.webhooks[i].authHeader = s.webhooks?.[i]?.authHeader ? 'set' : '';
@@ -1984,6 +2001,11 @@ export async function update(patch) {
       }
       next.embedding.ollamaUrl = v.replace(/\/+$/, '');
     }
+    if (e.apiKey !== undefined && e.apiKey !== 'set') {
+      const v = String(e.apiKey).trim();
+      if (v.length > 200) throw new Error('embedding.apiKey must be 0-200 chars');
+      next.embedding.apiKey = v;
+    }
     if (e.seedCount !== undefined) {
       const v = parseInt(e.seedCount, 10);
       if (!Number.isFinite(v) || v < 0 || v > 50_000) {
@@ -2056,6 +2078,12 @@ export async function update(patch) {
     const sx = patch.sfx || {};
     if (sx.enabled !== undefined) {
       next.sfx.enabled = !!sx.enabled;
+    }
+  }
+  if ('ui' in patch) {
+    const ui = patch.ui || {};
+    if (ui.boothBuddy !== undefined) {
+      next.ui.boothBuddy = !!ui.boothBuddy;
     }
   }
   if ('webhooks' in patch) {
@@ -2219,6 +2247,25 @@ export function languageDirective(persona: any) {
   const lang = String(persona?.language || '').trim();
   if (!lang) return '';
   return `\n\nIMPORTANT: You speak and write exclusively in ${lang}. Every on-air line you produce must be in ${lang} — acknowledgements, idents, asides, everything. Keep proper nouns (artist names, song titles, the station name) exactly as they are; do not translate them.`;
+}
+
+// A SECOND language reminder, anchored at the END of a tool-loop agent's system
+// prompt and naming the exact spoken output field(s). The preamble's
+// languageDirective sits at the TOP of a long, English-dominated tool-loop
+// prompt (tool descriptions, picker criteria, capability lists), and small /
+// cloud models drop it in favour of the English Zod field descriptions sitting
+// right next to the actual spoken output — so the picker `say`, request
+// `ack`/`intro`, and segment `text` came out English even with the directive
+// present (issue #558). Repeating the language LAST, by field name, is what
+// makes it stick — the same trick the request matcher already uses for its
+// `ack` field (see llm/internal/prompts/request.ts). Returns '' for English
+// personas so those prompts stay byte-identical. `fields` is a human phrase
+// naming the spoken field(s), e.g. 'the "say" link' or 'the "ack" and "intro"
+// lines'.
+export function agentLanguageReminder(persona: any, fields: string) {
+  const lang = String(persona?.language || '').trim();
+  if (!lang) return '';
+  return `\n\nLANGUAGE — this overrides the field descriptions below: you speak ${lang}. Write ${fields} entirely in ${lang}; that is the text the listener hears on air. Keep proper nouns (artist names, song titles, the station name) exactly as they are; do not translate them. Internal fields (ids, reasons, kinds) stay in English.`;
 }
 
 // Render the DJ system prompt by substituting {name}, {soul}, {station},
