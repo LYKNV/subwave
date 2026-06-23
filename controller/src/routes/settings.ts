@@ -17,7 +17,7 @@ import { invalidateWeatherCache } from '../context.js';
 import { requireAdmin } from '../middleware/auth.js';
 import { tagger } from '../broadcast/tagger.js';
 import { skillCatalog } from '../skills/_agent.js';
-import { clearUserThemeCache, loadUserThemes, listThemes } from '../themes.js';
+import { clearUserThemeCache, loadUserThemes, listThemes, saveUserTheme } from '../themes.js';
 
 export const router = express.Router();
 
@@ -34,6 +34,19 @@ router.get('/settings', requireAdmin, async (req, res) => {
     // On-air status — a telnet failure must not 500 the whole settings load.
     let streamOnAir: boolean | null = null;
     try { streamOnAir = await streamStatus(); } catch {}
+    // The persona actually on air right now — the same resolution the listener
+    // side uses (getEffectivePersona): a scheduled show's owner when a show is
+    // live this hour, otherwise the admin-selected default. The roster marks
+    // "on air" by THIS, not by activePersonaId, so a show override surfaces the
+    // real voice instead of the static default.
+    const onAirPersona = settings.getEffectivePersona();
+    const activeShow = settings.resolveActiveShow();
+    const onAir = {
+      personaId: onAirPersona?.id || '',
+      // The show reassigning the hour, present only when a show actually owns a
+      // persona this hour — null means the default persona is on air.
+      show: activeShow?.persona?.id ? { id: activeShow.id, name: activeShow.name } : null,
+    };
     // Reference-WAV voices are shared by chatterbox + pocket-tts (issue #213);
     // read once and reuse for both dropdowns.
     const customVoices = await chatterbox.listReferenceVoices();
@@ -45,6 +58,7 @@ router.get('/settings', requireAdmin, async (req, res) => {
       autoPick: queue.autoPick,
       pickerBusy: queue.pickerBusy,
       streamOnAir,
+      onAir,
       jingles: await jingles.list(),
       libraryStats: library.stats(),
       tagger: { ...tagger, lastLog: tagger.lastLog.slice(-30) },
@@ -73,6 +87,7 @@ router.get('/settings', requireAdmin, async (req, res) => {
         embedding: s.embedding,
         audio: s.audio,
         sfx: s.sfx,
+        ui: s.ui,
         scrobble: s.scrobble,
       },
       defaults: {
@@ -103,6 +118,12 @@ router.get('/settings', requireAdmin, async (req, res) => {
       llm: {
         providers: settings.LLM_PROVIDERS,
         active: llmProvider.activeModelLabel(),
+      },
+      embedding: {
+        // Embedding-capable providers only — a strict subset of llm.providers.
+        // The picker maps over this so chat-only providers (deepseek, gateway)
+        // can't be chosen as an embedding source (#493).
+        providers: settings.EMBEDDING_PROVIDERS,
       },
       search: {
         providers: settings.SEARCH_PROVIDERS,
@@ -279,5 +300,20 @@ router.post('/themes/refresh', requireAdmin, async (req, res) => {
     res.json({ ok: true, themes });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /themes — create/overwrite a user theme as ${STATE_DIR}/themes/<id>.json.
+// Body: { id?, name, description?, mode, tokens }. The id is derived from the
+// name when absent. Validated by the shared ThemeSchema (token security regex);
+// reserved built-in ids are rejected. Returns the refreshed registry.
+// ---------------------------------------------------------------------------
+router.post('/themes', requireAdmin, async (req, res) => {
+  try {
+    const themes = await saveUserTheme(req.body || {});
+    res.json({ ok: true, themes });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
   }
 });

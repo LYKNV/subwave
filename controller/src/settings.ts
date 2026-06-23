@@ -31,7 +31,7 @@ export const DEFAULT_DJ_PROMPT_TEMPLATE = `You are {name}, the on-air DJ for {st
 Hard rules:
 - Output ONLY the words to be spoken aloud. No stage directions, no asterisks, no quotes around your dialogue.
 - Keep it to 2-4 sentences unless asked for longer.
-- Never say "and now", "next up", "coming up next" — those are tells. Be more natural.
+- Never use radio-cliché tells: "and now", "next up", "coming up next", "and that was", or back-announcing with "that was [song] by [artist]". Be more natural.
 - Don't repeat the artist and title robotically. Reference them in passing if at all.
 - Reference the actual context (time, weather, what's coming) naturally.
 - Vary your opener and shape every time — never start the same way twice in a row, never use the same metaphor or framing as your last few lines.`;
@@ -55,6 +55,51 @@ export const FREQUENCIES = ['quiet', 'moderate', 'aggressive'];
 // 'extended' roughly doubles every spoken segment for a storytelling DJ.
 // See llm/dj.js LENGTH_PHRASES for the actual length directives.
 export const SCRIPT_LENGTHS = ['concise', 'extended'];
+
+// Per-persona tone dials. Each is 0-10 with 5 (DIAL_NEUTRAL) the default. A
+// model can't distinguish humour=6 from 7, so rather than inject a raw "7/10"
+// the dial maps to three bands: 0-3 low, 7-10 high, 4-6 neutral. Only a band
+// away from neutral appends a style directive (personaToneDirectives below), so
+// a persona left at the defaults renders a byte-identical prompt to before.
+export const TONE_DIALS = ['humour', 'localColour', 'warmth'] as const;
+export const DIAL_NEUTRAL = 5;
+
+const TONE_DIAL_PHRASES: Record<string, { low: string; high: string }> = {
+  humour: {
+    low: 'Play it straight; keep any wit rare and understated.',
+    high: 'Lean into dry, playful wit; an aside or a wink is welcome.',
+  },
+  localColour: {
+    low: 'Keep it universal; skip local references and place-specific colour.',
+    high: 'Lean on the local setting (the town, the weather, the hour) as texture.',
+  },
+  warmth: {
+    low: 'Keep a cool, dry distance; let the music carry the warmth.',
+    high: 'Be warm and earnest; speak to the listener like a friend.',
+  },
+};
+
+// Clamp any input to an integer 0-10, defaulting to neutral when unparseable.
+// The single chokepoint used by both normalizePersona and the seed roster.
+export function normalizeDial(v: any): number {
+  const n = Math.round(Number(v));
+  return Number.isFinite(n) ? Math.min(10, Math.max(0, n)) : DIAL_NEUTRAL;
+}
+
+// Pure: persona in, prompt fragment out. Returns '' when every dial sits in the
+// neutral band, so renderDjPrompt appends nothing and the default prompt is
+// unchanged. Unit-pinned in controller/scripts/llm-pure.test.ts.
+export function personaToneDirectives(persona: any): string {
+  if (!persona || typeof persona !== 'object') return '';
+  const lines: string[] = [];
+  for (const key of TONE_DIALS) {
+    const v = Number((persona as any)[key]);
+    if (!Number.isFinite(v)) continue;
+    if (v <= 3) lines.push(TONE_DIAL_PHRASES[key].low);
+    else if (v >= 7) lines.push(TONE_DIAL_PHRASES[key].high);
+  }
+  return lines.length ? `\n\nTone:\n- ${lines.join('\n- ')}` : '';
+}
 
 // DJ mode makes a persona behave like a working radio DJ rather than a
 // between-track narrator: it back-announces AND teases what's next, runs
@@ -131,6 +176,26 @@ export const LLM_PROVIDERS = [
   'google',
   'deepseek',
   'gateway',
+];
+
+// Subset of LLM_PROVIDERS that can actually produce text embeddings — the
+// library tagger embeds every track (music/embeddings.ts). Two chat providers
+// still route chat ONLY: deepseek and the Vercel AI gateway have no embeddings
+// endpoint. Offering them in the embedding-provider picker silently fell through
+// to a local Ollama and failed with a misleading "can't reach <provider>" error
+// (#493). `openrouter` was originally in that chat-only set, but OpenRouter
+// shipped an OpenAI-compatible embeddings endpoint, so it's back in (#522) and
+// routes through llm/internal/provider/embedding.ts. `anthropic` stays in too —
+// it has no first-party embedding model, but embedding.ts routes it to OpenAI
+// (needs OPENAI_API_KEY), as the picker hint already explains.
+export const EMBEDDING_PROVIDERS = [
+  'ollama',
+  'openai-compatible',
+  'locca',
+  'anthropic',
+  'openai',
+  'google',
+  'openrouter',
 ];
 
 // Coerce a stored Ollama context-window value. 0 disables (use Ollama's own
@@ -391,7 +456,7 @@ const DEFAULTS = {
   // 44.1→48k resample, so operators opt in rather than pay that CPU unasked.
   // The mandatory /stream.mp3 mount always serves everyone.
   stream: { opusEnabled: false },
-  weather: { lat: 52.5862, lng: -2.1288, locationName: 'Wolverhampton', units: 'metric' as 'metric' | 'imperial' },
+  weather: { lat: 30.7333, lng: 76.7794, locationName: 'Punjab', units: 'metric' as 'metric' | 'imperial' },
   // Operator-facing station name. Substituted into the DJ prompt's {station}
   // placeholder and returned by GET /dj for the landing page. The product is
   // still called SUB/WAVE — this is what the operator's station running on it
@@ -412,6 +477,11 @@ const DEFAULTS = {
   // ${STATE_DIR}/themes/. Stored as id only; the actual token map lives with
   // the theme registry so it stays in sync with the file on disk.
   theme: { active: DEFAULT_THEME_ID },
+  // Listener-player UI toggles — purely presentational, station-wide. The web
+  // player reads these via GET /state (alongside the theme) and applies them
+  // live; no restart. `boothBuddy` gates the DJ-line mascot — OFF by default,
+  // so the line shows the classic ♪/◇ marker until an operator opts in.
+  ui: { boothBuddy: false },
   // Global DJ prompt template. '' means "use DEFAULT_DJ_PROMPT_TEMPLATE".
   djPrompt: '',
   // The persona roster. One persona is "active" at a time (activePersonaId);
@@ -514,6 +584,14 @@ const DEFAULTS = {
     // reports zero listeners — the stream coasts on the auto playlist — and
     // resume as soon as someone tunes in. Off by default.
     pauseWhenEmpty: false,
+    // When on (or when LLM_DEBUG_RAW is set in the env), every outbound model
+    // request's exact body is captured to ${STATE_DIR}/logs/llm-debug.log (the
+    // last 10, newest first) and dumped to stderr — a copy-pasteable view of
+    // exactly what SUB/WAVE sends the provider, for debugging odd model
+    // behaviour. The admin toggle (admin → Debug) means no-CLI operators can
+    // flip it without editing env; the env flag can only force it on. Off by
+    // default: zero file writes / overhead when disabled.
+    debugRawRequests: false,
     // Optional backup LLM. When `enabled`, any LLM call whose primary host is
     // unreachable (connection refused / DNS / timeout — NOT a 429/5xx from a
     // host that's up) is retried once against this leg, then routed straight
@@ -556,18 +634,26 @@ const DEFAULTS = {
     // e.g. Ollama). See issue #405.
     baseUrl: '',          // openai-compatible / locca embedding server URL (with /v1)
     ollamaUrl: '',        // Ollama embedding server URL (ollama provider)
+    apiKey: '',           // empty -> inherit settings.llm.apiKey
     seedCount: 0,         // 0 → auto max(200, ceil(sqrt(library)))
     knnNeighbours: 5,
     moodVoteThreshold: 0.6,
     confidenceThreshold: 0.6,
     maxActiveLearningRounds: 3,
     enrichment: {
-      // Vanilla Navidrome's getArtistInfo2 doesn't surface Last.fm crowd
-      // tags (the agent only exposes bio + images). Until SUB/WAVE adds a
-      // direct Last.fm API path, leave this off — enabling it just wastes
-      // an HTTP round trip per artist with empty results. Operators
-      // running a custom Navidrome that does expose tag[] can flip it on.
-      lastfmTags: false,
+      // Last.fm crowd tags. Tri-state: true = always fetch, false = never,
+      // null = auto (fetch only when a Last.fm api_key is configured — see
+      // music/lastfm.ts + the gate in tag-library.ts phaseEnrich).
+      //
+      // Tags now come straight from the Last.fm REST API (artist.getTopTags)
+      // reusing the scrobbling api_key, which actually returns tag[]. The old
+      // path went through Navidrome's getArtistInfo2, where vanilla Navidrome's
+      // agent only surfaces bio + images — never tag[] — so tags always came
+      // back empty. That Navidrome path stays as the fallback when lastfmTags
+      // is forced on (true) but no api_key is set (custom Navidromes that DO
+      // expose tag[]). Default `null` avoids the wasted round trip for keyless
+      // vanilla-Navidrome installs.
+      lastfmTags: null as boolean | null,
       lyrics: true,       // fetch + include lyric excerpt in embed text
     },
   },
@@ -726,6 +812,9 @@ function normalizePersona(raw: any) {
     frequency: FREQUENCIES.includes(raw.frequency) ? raw.frequency : 'moderate',
     scriptLength: SCRIPT_LENGTHS.includes(raw.scriptLength) ? raw.scriptLength : 'concise',
     djMode: raw.djMode === true,
+    humour: normalizeDial(raw.humour),
+    localColour: normalizeDial(raw.localColour),
+    warmth: normalizeDial(raw.warmth),
     soul,
     language: typeof raw.language === 'string' ? raw.language.trim().slice(0, 60) : '',
     avatar,
@@ -780,6 +869,10 @@ function normalizeShows(raw: any, personaIds: string[]) {
     const fromYear = Number.isFinite(item.fromYear) ? Math.trunc(item.fromYear) : null;
     const toYear = Number.isFinite(item.toYear) ? Math.trunc(item.toYear) : null;
     const energy = SHOW_ENERGY.includes(item.energy) ? item.energy : '';
+    // Opt-in: hard-filter the pick pool to `genre` instead of the default soft
+    // lean. Only meaningful when a genre is set; defaults off so existing shows
+    // and soft shows are byte-for-byte unchanged.
+    const genreStrict = item.genreStrict === true;
     out.push({
       id,
       name,
@@ -791,6 +884,7 @@ function normalizeShows(raw: any, personaIds: string[]) {
       fromYear,
       toYear,
       energy,
+      genreStrict,
     });
     if (out.length >= SHOWS_LIMIT) break;
   }
@@ -919,6 +1013,12 @@ export async function load() {
           ? stored.theme.active.trim()
           : DEFAULTS.theme.active,
     },
+    ui: {
+      boothBuddy:
+        typeof stored.ui?.boothBuddy === 'boolean'
+          ? stored.ui.boothBuddy
+          : DEFAULTS.ui.boothBuddy,
+    },
     personas,
     activePersonaId,
     shows,
@@ -1016,6 +1116,10 @@ export async function load() {
         typeof stored.llm?.pauseWhenEmpty === 'boolean'
           ? stored.llm.pauseWhenEmpty
           : DEFAULTS.llm.pauseWhenEmpty,
+      debugRawRequests:
+        typeof stored.llm?.debugRawRequests === 'boolean'
+          ? stored.llm.debugRawRequests
+          : DEFAULTS.llm.debugRawRequests,
       // Backup leg — same connection fields as the primary, coerced identically.
       fallback: (() => {
         const fb = stored.llm?.fallback || {};
@@ -1063,6 +1167,10 @@ export async function load() {
         typeof stored.embedding?.ollamaUrl === 'string'
           ? stored.embedding.ollamaUrl.trim()
           : DEFAULTS.embedding.ollamaUrl,
+      apiKey:
+        typeof stored.embedding?.apiKey === 'string'
+          ? stored.embedding.apiKey.trim()
+          : DEFAULTS.embedding.apiKey,
       seedCount:
         Number.isFinite(stored.embedding?.seedCount) && stored.embedding.seedCount >= 0
           ? Math.floor(stored.embedding.seedCount)
@@ -1204,6 +1312,7 @@ export function getRedacted() {
   if (clone.llm?.fallback) clone.llm.fallback.apiKey = s.llm?.fallback?.apiKey ? 'set' : '';
   if (clone.tts?.cloud) clone.tts.cloud.apiKey = s.tts?.cloud?.apiKey ? 'set' : '';
   if (clone.search) clone.search.apiKey = s.search?.apiKey ? 'set' : '';
+  if (clone.embedding) clone.embedding.apiKey = s.embedding?.apiKey ? 'set' : '';
   if (Array.isArray(clone.webhooks)) {
     for (let i = 0; i < clone.webhooks.length; i++) {
       clone.webhooks[i].authHeader = s.webhooks?.[i]?.authHeader ? 'set' : '';
@@ -1285,7 +1394,7 @@ function validateTtsBlock(raw, where) {
   return { engine: t.engine, cloudProvider: t.cloudProvider, voice, gainDb: clampTtsGain(t.gainDb) };
 }
 
-function validatePersonasStrict(raw) {
+export function validatePersonasStrict(raw) {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > PERSONA_LIMIT) {
     throw new Error(`personas must be an array of 1-${PERSONA_LIMIT} entries`);
   }
@@ -1383,6 +1492,9 @@ function validatePersonasStrict(raw) {
       frequency: item.frequency,
       scriptLength,
       djMode,
+      humour: normalizeDial(item.humour),
+      localColour: normalizeDial(item.localColour),
+      warmth: normalizeDial(item.warmth),
       soul,
       language,
       avatar,
@@ -1429,6 +1541,8 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     if (energy && !SHOW_ENERGY.includes(energy)) {
       throw new Error(`shows[${i}].energy must be one of: ${SHOW_ENERGY.join(', ')}`);
     }
+    // Opt-in hard genre filter (vs the default soft lean). Boolean, defaults off.
+    const genreStrict = item.genreStrict === true;
     const parseYear = (v, field) => {
       if (v == null || v === '') return null;
       const n = Number(v);
@@ -1445,7 +1559,7 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
-    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy };
+    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy, genreStrict };
   });
 }
 
@@ -1809,6 +1923,9 @@ export async function update(patch) {
     if (l.pauseWhenEmpty !== undefined) {
       next.llm.pauseWhenEmpty = !!l.pauseWhenEmpty;
     }
+    if (l.debugRawRequests !== undefined) {
+      next.llm.debugRawRequests = !!l.debugRawRequests;
+    }
     // An OpenAI-compatible provider is useless without a server to talk to.
     if (next.llm.provider === 'openai-compatible' && !next.llm.baseUrl) {
       throw new Error('llm.baseUrl is required when provider is "openai-compatible"');
@@ -1884,6 +2001,11 @@ export async function update(patch) {
       }
       next.embedding.ollamaUrl = v.replace(/\/+$/, '');
     }
+    if (e.apiKey !== undefined && e.apiKey !== 'set') {
+      const v = String(e.apiKey).trim();
+      if (v.length > 200) throw new Error('embedding.apiKey must be 0-200 chars');
+      next.embedding.apiKey = v;
+    }
     if (e.seedCount !== undefined) {
       const v = parseInt(e.seedCount, 10);
       if (!Number.isFinite(v) || v < 0 || v > 50_000) {
@@ -1956,6 +2078,12 @@ export async function update(patch) {
     const sx = patch.sfx || {};
     if (sx.enabled !== undefined) {
       next.sfx.enabled = !!sx.enabled;
+    }
+  }
+  if ('ui' in patch) {
+    const ui = patch.ui || {};
+    if (ui.boothBuddy !== undefined) {
+      next.ui.boothBuddy = !!ui.boothBuddy;
     }
   }
   if ('webhooks' in patch) {
@@ -2085,6 +2213,10 @@ export function resolveActiveShow(date = new Date(), s = get()) {
     fromYear: Number.isFinite(show.fromYear) ? show.fromYear : null,
     toYear: Number.isFinite(show.toYear) ? show.toYear : null,
     energy: typeof show.energy === 'string' ? show.energy : '',
+    // When true (and a genre is set) the pick pool is hard-filtered to the
+    // genre instead of softly leaned; off-genre tracks only survive as a
+    // never-starve fallback. Defaults off.
+    genreStrict: show.genreStrict === true,
     // Empty string means "fall back to the station-wide default". The route
     // layer is responsible for resolving an empty/stale id against the live
     // theme registry; we just surface what the show declares.
@@ -2117,6 +2249,25 @@ export function languageDirective(persona: any) {
   return `\n\nIMPORTANT: You speak and write exclusively in ${lang}. Every on-air line you produce must be in ${lang} — acknowledgements, idents, asides, everything. Keep proper nouns (artist names, song titles, the station name) exactly as they are; do not translate them.`;
 }
 
+// A SECOND language reminder, anchored at the END of a tool-loop agent's system
+// prompt and naming the exact spoken output field(s). The preamble's
+// languageDirective sits at the TOP of a long, English-dominated tool-loop
+// prompt (tool descriptions, picker criteria, capability lists), and small /
+// cloud models drop it in favour of the English Zod field descriptions sitting
+// right next to the actual spoken output — so the picker `say`, request
+// `ack`/`intro`, and segment `text` came out English even with the directive
+// present (issue #558). Repeating the language LAST, by field name, is what
+// makes it stick — the same trick the request matcher already uses for its
+// `ack` field (see llm/internal/prompts/request.ts). Returns '' for English
+// personas so those prompts stay byte-identical. `fields` is a human phrase
+// naming the spoken field(s), e.g. 'the "say" link' or 'the "ack" and "intro"
+// lines'.
+export function agentLanguageReminder(persona: any, fields: string) {
+  const lang = String(persona?.language || '').trim();
+  if (!lang) return '';
+  return `\n\nLANGUAGE — this overrides the field descriptions below: you speak ${lang}. Write ${fields} entirely in ${lang}; that is the text the listener hears on air. Keep proper nouns (artist names, song titles, the station name) exactly as they are; do not translate them. Internal fields (ids, reasons, kinds) stay in English.`;
+}
+
 // Render the DJ system prompt by substituting {name}, {soul}, {station},
 // {location}, {language}. {name}/{soul} come from the supplied persona; the
 // template is the global djPrompt (falling back to DEFAULT_DJ_PROMPT_TEMPLATE).
@@ -2133,11 +2284,12 @@ export function renderDjPrompt(persona: any, ctx: any = {}) {
     .replaceAll('{soul}', persona?.soul || DJ_SOULS[0])
     .replaceAll('{station}', station)
     .replaceAll('{location}', location);
+  const tone = personaToneDirectives(persona);
   if (tpl.includes('{language}')) {
     const lang = String(persona?.language || '').trim();
-    return rendered.replaceAll('{language}', lang || 'English');
+    return rendered.replaceAll('{language}', lang || 'English') + tone;
   }
-  return rendered + languageDirective(persona);
+  return rendered + languageDirective(persona) + tone;
 }
 
 // Persona prelude shared by every tool-loop agent system prompt — the picker

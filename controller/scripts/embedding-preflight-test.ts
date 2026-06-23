@@ -29,6 +29,7 @@ process.env.STATE_DIR = mkdtempSync(join(tmpdir(), 'subwave-embed-test-'));
 const settings = await import('../src/settings.js');
 const embeddings = await import('../src/music/embeddings.js');
 const db = await import('../src/music/library-db.js');
+const embProvider = await import('../src/llm/internal/provider/embedding.js');
 
 let pass = 0;
 let fail = 0;
@@ -96,8 +97,45 @@ for (const msg of [
   ok('message points at the fix', /--embeddings|pooling|embedding model/i.test(r.message));
 }
 
-// ---- 3. library-db dim handling (#2) --------------------------------------
-console.log('\n[3] library-db honours the stored dim');
+// ---- 3. chat-only provider → no_embeddings (#493) -------------------------
+// deepseek / gateway have no embeddings endpoint; buildEmbeddingModel throws
+// synchronously (no network), so this is classified offline. (openrouter shipped
+// an embeddings endpoint and is now embedding-capable — see #522.)
+console.log('\n[3] a chat-only provider is classified no_embeddings (offline)');
+for (const provider of ['deepseek', 'gateway']) {
+  S.embedding = { enabled: true, provider, model: '', apiKey: '', baseUrl: '', ollamaUrl: '' };
+  const r = await embeddings.ensureReady();
+  ok(`${provider} → no_embeddings`, r.code === 'no_embeddings', `code=${r.code}`);
+  ok(`${provider} message names the real fix`, /chat-only|embedding-capable|Ollama/i.test(r.message));
+}
+
+// ---- 3b. openrouter BUILDS an embedding model (#522) ----------------------
+// OpenRouter shipped an OpenAI-compatible embeddings endpoint, so it must no
+// longer be rejected as chat-only. Offline: buildEmbeddingModel constructs the
+// client without any network call — we only assert it doesn't throw the
+// "no text-embedding support" error the chat-only providers above still do.
+console.log('\n[3b] openrouter builds an embedding model (offline, #522)');
+{
+  let built = false;
+  let threw = '';
+  try {
+    embProvider.buildEmbeddingModel({
+      enabled: true,
+      provider: 'openrouter',
+      model: '',
+      apiKey: 'test-key',
+      ollamaUrl: '',
+      baseUrl: '',
+    });
+    built = true;
+  } catch (e: any) {
+    threw = e?.message || String(e);
+  }
+  ok('openrouter builds without the no-embeddings error', built, threw ? `threw: ${threw.slice(0, 48)}` : 'ok');
+}
+
+// ---- 4. library-db dim handling (#2) --------------------------------------
+console.log('\n[4] library-db honours the stored dim');
 // Seed a 768-d DB the way the tagger would.
 await db.open({ embeddingDim: 768, reseed: false });
 db.setEmbeddingMeta('ollama:nomic-embed-text', 768);

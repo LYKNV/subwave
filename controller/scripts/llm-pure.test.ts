@@ -14,6 +14,8 @@ import { agentPlan } from '../src/llm/internal/strategy/plan.js';
 import { introBudgetPhrase, enforceIntroBudget } from '../src/llm/internal/prompts/intro-budget.js';
 import { embeddingBaseUrl } from '../src/llm/internal/provider/embedding.js';
 import { DEFAULT_LOCCA_EMBED_BASE_URL } from '../src/llm/internal/provider/registry.js';
+import { personaToneDirectives, normalizeDial, DIAL_NEUTRAL, validatePersonasStrict } from '../src/settings.js';
+import { showMusicLean } from '../src/llm/internal/prompts/picker.js';
 
 let failures = 0;
 function test(name: string, fn: () => void | Promise<void>) {
@@ -213,6 +215,86 @@ async function main() {
     assert.ok(sentences.endsWith('.') && sentences.split(/\s+/).length <= 10);        // last full sentence
     const hardcut = enforceIntroBudget('a b c d e f g h i j k l m n o p q r s t', 4000);
     assert.ok(hardcut.endsWith('…') && hardcut.split(/\s+/).length <= 11);            // ellipsis fallback
+  });
+
+  // ---- persona tone dials (humour / local colour / warmth) ----
+  console.log('personaToneDirectives / normalizeDial:');
+  await test('normalizeDial clamps to 0-10 int, neutral on garbage', () => {
+    assert.equal(normalizeDial(7), 7);
+    assert.equal(normalizeDial(-3), 0);
+    assert.equal(normalizeDial(99), 10);
+    assert.equal(normalizeDial(6.7), 7);
+    assert.equal(normalizeDial('abc'), DIAL_NEUTRAL);
+    assert.equal(normalizeDial(undefined), DIAL_NEUTRAL);
+  });
+  await test('neutral / missing dials append nothing (prompt stays byte-identical)', () => {
+    assert.equal(personaToneDirectives({ humour: 5, localColour: 5, warmth: 5 }), '');
+    assert.equal(personaToneDirectives({}), '');
+    assert.equal(personaToneDirectives(null), '');
+    assert.equal(personaToneDirectives({ humour: 4, localColour: 6 }), '');
+  });
+  await test('low/high bands append the matching directive, in dial order', () => {
+    assert.match(personaToneDirectives({ humour: 9 }), /playful wit/);
+    assert.match(personaToneDirectives({ humour: 1 }), /Play it straight/);
+    assert.match(personaToneDirectives({ localColour: 10 }), /local setting/);
+    assert.match(personaToneDirectives({ warmth: 0 }), /cool, dry distance/);
+    const both = personaToneDirectives({ humour: 8, warmth: 8 });
+    assert.ok(both.startsWith('\n\nTone:\n- '));
+    assert.equal(both.split('\n- ').length, 3); // header + 2 bullets
+  });
+  // The save path (validatePersonasStrict) rebuilds each persona from a field
+  // whitelist; if the dials aren't in it they are silently dropped on every
+  // save and the feature is dead end-to-end. Pin that they round-trip.
+  await test('validatePersonasStrict carries the dials through the save path', () => {
+    const base = { name: 'Nova', soul: 'late-night', frequency: 'moderate',
+      tts: { engine: 'piper', cloudProvider: 'openai', voice: '' } };
+    const [saved] = validatePersonasStrict([{ ...base, humour: 9, localColour: 0, warmth: 99 }]);
+    assert.equal(saved.humour, 9);
+    assert.equal(saved.localColour, 0);
+    assert.equal(saved.warmth, 10);            // clamped, same as normalizeDial
+    const [bare] = validatePersonasStrict([base]);
+    assert.equal(bare.humour, DIAL_NEUTRAL);   // absent dials default to neutral
+    assert.equal(bare.localColour, DIAL_NEUTRAL);
+    assert.equal(bare.warmth, DIAL_NEUTRAL);
+  });
+
+  // ---- showMusicLean: soft lean vs strict genre lock (shared by both pick paths) ----
+  console.log('showMusicLean (soft lean vs strict genre lock):');
+  const SOFT_GENRE_LINE = '\n\nMusic steer for this show — lean toward Jazz. These are preferences, not hard filters: break them only when the flow genuinely demands it.';
+  await test('no show → empty string', () => {
+    assert.equal(showMusicLean(null), '');
+    assert.equal(showMusicLean(undefined), '');
+  });
+  await test('soft genre-only show is byte-for-byte the legacy line', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz' }), SOFT_GENRE_LINE);
+  });
+  await test('genreStrict=false leaves the soft path unchanged', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz', genreStrict: false }), SOFT_GENRE_LINE);
+  });
+  await test('strict genre is a hard rule, not a soft lean', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Hip-Hop', genreStrict: true });
+    assert.match(out, /Genre lock/);
+    assert.match(out, /MUST be Hip-Hop/);
+    assert.match(out, /do not pick other genres/);
+    assert.doesNotMatch(out, /lean toward Hip-Hop/);
+    assert.doesNotMatch(out, /Music steer/);     // no soft line when only the genre is pinned
+  });
+  await test('strict carries the never-starve escape hatch', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Metal', genreStrict: true });
+    assert.match(out, /no Metal track/i);        // can stray only to avoid dead air
+  });
+  await test('strict needs a genre — genreStrict alone is inert', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genreStrict: true }), '');
+    // energy still produces a soft line; no genre lock without a genre
+    const out = showMusicLean({ name: 'x', topic: 'y', energy: 'high', genreStrict: true });
+    assert.doesNotMatch(out, /Genre lock/);
+    assert.match(out, /favour high-energy tracks/);
+  });
+  await test('strict genre coexists with soft era/energy steers', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Soul', genreStrict: true, fromYear: 1970, toYear: 1979, energy: 'medium' });
+    assert.match(out, /Genre lock for this show/);
+    assert.match(out, /Music steer for this show — prefer tracks from 1970–1979; favour medium-energy tracks/);
+    assert.doesNotMatch(out, /lean toward Soul/);  // genre is the hard rule, not a soft part
   });
 
   console.log(failures === 0 ? '\nAll llm-pure tests passed.' : `\n${failures} test(s) FAILED.`);

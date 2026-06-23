@@ -8,6 +8,8 @@
 //   ollama / unknown    → nomic-embed-text                (768d, free, local)
 //   openai / compat     → text-embedding-3-small          (1536d, ~$0.02/1M)
 //   google              → text-embedding-004              (768d)
+//   openrouter          → openai/text-embedding-3-small   (OpenAI-compatible
+//                                                          embeddings endpoint)
 //   anthropic           → falls back to openai embeddings (Anthropic has no
 //                                                          first-party API as
 //                                                          of 2026-05)
@@ -30,7 +32,15 @@ function embeddingCfg() {
     enabled: s.enabled !== false,
     provider: s.provider || llm.provider || 'ollama',
     model: s.model || '',
-    apiKey: s.apiKey || llm.apiKey || '',
+    // Key precedence: the saved settings field wins, then a dedicated
+    // `EMBEDDING_API_KEY` env var (the env path most installs use -- keys live in
+    // state/secrets.env, not settings.json), then the chat key. This is a
+    // runtime env read like config.ts does for SEARCH_API_KEY, so the env value
+    // never gets baked into the persisted settings.json. It covers every
+    // provider uniformly -- including openai-compatible/locca, which can't safely
+    // grab a provider-conventional env var (createOpenAI would otherwise reach
+    // for OPENAI_API_KEY against an arbitrary self-hosted server).
+    apiKey: s.apiKey || process.env.EMBEDDING_API_KEY || llm.apiKey || '',
     ollamaUrl: s.ollamaUrl || llm.ollamaUrl || '',
     baseUrl: s.baseUrl || llm.baseUrl || '',
   };
@@ -43,6 +53,10 @@ function defaultEmbeddingModelFor(provider: string): string {
       return 'text-embedding-3-small';
     case 'google':
       return 'text-embedding-004';
+    case 'openrouter':
+      // OpenRouter proxies many embedding backends; default to the OpenAI model
+      // since it's the most widely available and OpenAI-compatible (#522).
+      return 'openai/text-embedding-3-small';
     case 'anthropic':
       // No first-party Anthropic embedding API. We resolve via openai.
       return 'text-embedding-3-small';
@@ -62,11 +76,12 @@ function defaultEmbeddingDimFor(model: string): number {
   // live controller adopts whatever dim the tagger recorded (library-db
   // adoptStoredDim). So an unknown / arbitrarily-named embedding model still
   // works — this table just seeds the schema before the first tag run (#319).
-  if (model === 'nomic-embed-text') return 768;
-  if (model === 'mxbai-embed-large') return 1024;
-  if (model === 'text-embedding-3-small') return 1536;
-  if (model === 'text-embedding-3-large') return 3072;
-  if (model === 'text-embedding-004') return 768;
+  const bare = model.includes('/') ? model.split('/').pop()! : model;
+  if (bare === 'nomic-embed-text') return 768;
+  if (bare === 'mxbai-embed-large') return 1024;
+  if (bare === 'text-embedding-3-small') return 1536;
+  if (bare === 'text-embedding-3-large') return 3072;
+  if (bare === 'text-embedding-004') return 768;
   return 768; // homelab default until a probe says otherwise
 }
 
@@ -144,11 +159,37 @@ export function buildEmbeddingModel(cfg: EmbeddingCfg) {
       const provider = createGoogleGenerativeAI(cfg.apiKey ? { apiKey: cfg.apiKey } : {});
       return provider.textEmbeddingModel(id);
     }
-    case 'ollama':
-    default: {
+    case 'openrouter': {
+      // OpenRouter exposes an OpenAI-compatible embeddings endpoint
+      // (POST https://openrouter.ai/api/v1/embeddings), so it goes through the
+      // same createOpenAI transport as openai-compatible — just a fixed base URL
+      // (#522). The chat path uses @openrouter/ai-sdk-provider, but that builder
+      // is chat-only; embeddings route straight through OpenAI's client. A real
+      // key is required — a missing one 401s with the 'unauthorized' message.
+      const provider = createOpenAI({
+        baseURL: 'https://openrouter.ai/api/v1',
+        apiKey: cfg.apiKey || process.env.OPENROUTER_API_KEY || 'unused',
+        name: 'openrouter',
+      });
+      return provider.textEmbeddingModel(id);
+    }
+    case 'ollama': {
       const provider = createOllama({ baseURL: ollamaBaseUrl(cfg as any) });
       return provider.textEmbeddingModel(id);
     }
+    default:
+      // deepseek / gateway (and any future chat-only provider) have no embeddings
+      // endpoint. Previously these fell through to the ollama branch, silently
+      // pointed at a local Ollama, and failed with a misleading "can't reach
+      // <provider>" (#493). Throw an honest error so the probe + tagger preflight
+      // name the real problem. The picker already hides these
+      // (settings.EMBEDDING_PROVIDERS) — this guards the API/JSON path.
+      // (openrouter used to be here too, but it shipped embeddings — see above, #522.)
+      throw new Error(
+        `Provider "${cfg.provider}" has no text-embedding support. Pick an ` +
+          `embedding-capable provider in Settings → Library tagger → Embedding ` +
+          `(ollama, openai, google, openrouter, locca, or openai-compatible).`,
+      );
   }
 }
 

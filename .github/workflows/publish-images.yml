@@ -1,6 +1,6 @@
 name: Publish images
 
-# Builds and pushes the five first-party SUB/WAVE images to GHCR.
+# Builds and pushes the first-party SUB/WAVE images to GHCR.
 #
 # Triggers:
 #   - push of a tag like v1.2.3 → versioned release (also tagged :latest)
@@ -11,6 +11,8 @@ name: Publish images
 #   ghcr.io/<owner>/subwave-broadcast   (icecast2 + liquidsoap + radio.liq + sounds/)
 #   ghcr.io/<owner>/subwave-controller
 #   ghcr.io/<owner>/subwave-web
+#   ghcr.io/<owner>/subwave-aio         (whole stack in one container — the Unraid
+#                                        Community Applications one-click image)
 #   ghcr.io/<owner>/subwave-tts-heavy   (optional Chatterbox + PocketTTS sidecar, ~3-4GB)
 #
 # Platforms: the core four images (caddy, broadcast, controller, web) are
@@ -49,6 +51,18 @@ jobs:
           - image: subwave-web
             dockerfile: web/Dockerfile
             platforms: linux/amd64,linux/arm64
+          # The Unraid one-click image: the whole stack (icecast2 + liquidsoap,
+          # controller, web, Caddy) in one container, supervised by
+          # docker/aio/supervisor.sh. amd64-only (x86-64 — every Unraid box, the
+          # target for this image). arm64 is deliberately NOT built here: the
+          # bundled Next.js webbuild fails its arm64 cross-build under QEMU
+          # because lightningcss (Tailwind) can't load its native
+          # `lightningcss.linux-arm64-gnu.node` binary in the emulated stage.
+          # Native-arm64 users can still run the split-stack images, which stay
+          # multi-arch. Revisit if the lightningcss/QEMU issue is resolved.
+          - image: subwave-aio
+            dockerfile: docker/Dockerfile.aio
+            platforms: linux/amd64
           - image: subwave-tts-heavy
             dockerfile: docker/Dockerfile.tts-heavy
             platforms: linux/amd64
