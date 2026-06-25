@@ -109,6 +109,7 @@ const EMBED_MODEL_SUGGESTIONS: Record<string, { id: string; dim: number }[]> = {
 const SEARCH_PROVIDER_LABELS: Record<string, string> = {
   duckduckgo: 'DuckDuckGo (free, no key)',
   tavily: 'Tavily (paid web search)',
+  searxng: 'SearXNG (self-hosted)',
 };
 
 const searchProviderLabel = (id: string | undefined): string =>
@@ -168,6 +169,7 @@ interface LlmForm {
 interface SearchForm {
   provider: string;
   apiKey: string;
+  baseUrl: string;
 }
 
 interface EmbeddingEnrichmentForm {
@@ -460,6 +462,7 @@ export default function SettingsPanel() {
         // GET /settings returns the apiKey redacted to 'set' | '' — that
         // round-trips through POST harmlessly (settings.update ignores 'set').
         apiKey: v.search?.apiKey ?? '',
+        baseUrl: v.search?.baseUrl ?? '',
       },
       embedding: {
         enabled: v.embedding?.enabled ?? true,
@@ -2504,6 +2507,26 @@ interface SearchSectionProps extends SectionProps {
 function SearchSection({ data, form, setForm, busy, saveSettings, adminFetch }: SearchSectionProps) {
   const [tavilyKeyTest, setTavilyKeyTest] = useState<{ ok: boolean; message: string; latencyMs: number } | null>(null);
   const [tavilyKeyTesting, setTavilyKeyTesting] = useState(false);
+  const [testingSearxng, setTestingSearxng] = useState(false);
+  const [searxngTestResult, setSearxngTestResult] = useState<{ ok: boolean; results?: number; error?: string } | null>(null);
+
+  const handleTestSearxng = async () => {
+    setTestingSearxng(true);
+    setSearxngTestResult(null);
+    try {
+      const res = await adminFetch('/settings/search/test-searxng', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ baseUrl: form.search.baseUrl }),
+      });
+      const j = await res.json();
+      setSearxngTestResult(j);
+    } catch (err: any) {
+      setSearxngTestResult({ ok: false, error: err?.message || 'request failed' });
+    } finally {
+      setTestingSearxng(false);
+    }
+  };
 
   const save = () => saveSettings({
     search: {
@@ -2513,17 +2536,22 @@ function SearchSection({ data, form, setForm, busy, saveSettings, adminFetch }: 
       ...(form.search.apiKey && form.search.apiKey !== 'set'
         ? { apiKey: form.search.apiKey }
         : {}),
+      ...(form.search.provider === 'searxng'
+        ? { baseUrl: form.search.baseUrl ?? '' }
+        : {}),
     },
   });
 
   const savedSearch = data.values?.search || {};
-  const providers = data.search?.providers || ['duckduckgo', 'tavily'];
+  const providers = data.search?.providers || ['duckduckgo', 'tavily', 'searxng'];
   const provider = form.search.provider;
   const searchDirty = provider !== savedSearch.provider
     || (provider === 'tavily'
         && form.search.apiKey
         && form.search.apiKey !== 'set'
-        && form.search.apiKey !== (savedSearch.apiKey || ''));
+        && form.search.apiKey !== (savedSearch.apiKey || ''))
+    || (provider === 'searxng'
+        && (form.search.baseUrl ?? '') !== (savedSearch.baseUrl || ''));
   const tavilyKeySet = form.search.apiKey === 'set' || !!data.env?.SEARCH_API_KEY;
 
   const testTavilyKey = async () => {
@@ -2597,7 +2625,9 @@ function SearchSection({ data, form, setForm, busy, saveSettings, adminFetch }: 
             <div className="field-hint">
               {provider === 'duckduckgo'
                 ? 'DuckDuckGo Instant Answer, free and keyless. Useful for definitions and well-known entities; silent otherwise. The segment director treats silence as a valid outcome.'
-                : 'Tavily, paid web search with full results and an answer summary. Needs an API key.'}
+                : provider === 'tavily'
+                ? 'Tavily, paid web search with full results and an answer summary. Needs an API key.'
+                : 'SearXNG, self-hosted meta-search aggregating Google, Brave, DDG and more. No API key needed — just a running SearXNG instance.'}
             </div>
           </div>
 
@@ -2635,6 +2665,39 @@ function SearchSection({ data, form, setForm, busy, saveSettings, adminFetch }: 
                 </Btn>
               </div>
               {tavilyKeyTest && <KeyTestResult result={tavilyKeyTest} />}
+            </>
+          )}
+
+          {provider === 'searxng' && (
+            <>
+              <div className="field">
+                <Label>SearXNG URL</Label>
+                <div className="flex gap-2">
+                  <Input
+                    type="url"
+                    placeholder="http://192.168.0.112:8888"
+                    value={form.search.baseUrl ?? ''}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                      setForm(f => ({ ...f, search: { ...f.search, baseUrl: e.target.value } }))
+                    }
+                    className="max-w-[360px]"
+                  />
+                  <Btn sm onClick={handleTestSearxng} disabled={!form.search?.baseUrl || testingSearxng}>
+                    {testingSearxng ? 'Testing…' : 'Test'}
+                  </Btn>
+                </div>
+                {searxngTestResult && (
+                  <p className={`text-sm ${searxngTestResult.ok ? 'text-green-600' : 'text-destructive'}`}>
+                    {searxngTestResult.ok
+                      ? `Connected · ${searxngTestResult.results} results`
+                      : `Failed: ${searxngTestResult.error}`}
+                  </p>
+                )}
+                <div className="field-hint">
+                  Self-hosted SearXNG instance. No API key required. Ensure JSON format is
+                  enabled in your SearXNG <code>settings.yml</code>.
+                </div>
+              </div>
             </>
           )}
         </div>

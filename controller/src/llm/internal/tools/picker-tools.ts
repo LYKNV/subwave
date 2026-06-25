@@ -371,6 +371,9 @@ export function buildPickerTools({
               if (a) songs = await subsonic.search(`${a.name} ${guess.title}`, { songCount: 25 });
             }
             if (songs.length === 0) songs = await subsonic.search(guess.title, { songCount: 25 });
+            if (songs.length === 0 && guess.keyword && guess.keyword !== guess.title) {
+              songs = await subsonic.search(guess.keyword, { songCount: 25 });
+            }
             return { identified: guess, candidates: collect(songs) };
           } catch (err) { return { error: err.message }; }
         },
