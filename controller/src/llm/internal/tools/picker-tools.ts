@@ -85,7 +85,6 @@ export function buildPickerTools({
   recentKeys = new Set<string>(),
   audioWaypoint = null,
   resolveReferences = false,
-  maxDurationSec = null,
   genreLock = null,
   eraLock = null,
 }: {
@@ -102,11 +101,6 @@ export function buildPickerTools({
   // When set, candidates are year-filtered (preferEra, never-starve) before
   // recency + cap. null / both-bounds-null = no era lock.
   eraLock?: { fromYear?: number | null; toYear?: number | null } | null;
-  // Hard length cap (seconds) for autonomous picks — the active show's override
-  // or the station default (issue #447). null = no cap. Deliberately NOT set on
-  // the request path (djAgentRequest) so an explicit listener ask for a long
-  // mix still plays.
-  maxDurationSec?: number | null;
   // The active sonic journey's current waypoint vector (broadcast/dj-agent.ts).
   // When present, the tracksTowardJourney tool below is registered, closing
   // over it — the agent never sees the raw vector, only the tracks near it.
@@ -139,7 +133,6 @@ export function buildPickerTools({
       recentKeys,
       seenIds: new Set(seen.keys()),
       cap,
-      maxDurationSec,
     });
     const out: any[] = [];
     for (const s of accepted) {
