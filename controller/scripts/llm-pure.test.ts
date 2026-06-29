@@ -7,7 +7,7 @@
 // node:assert-via-tsx style of scripts/picker-recency-regression.ts.
 
 import assert from 'node:assert/strict';
-import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError } from '../src/llm/internal/core/pure.js';
+import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded } from '../src/llm/internal/core/pure.js';
 import { withDeadline } from '../src/llm/internal/core/retry.js';
 import { providerOptions, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, forcedToolChoice } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
@@ -85,6 +85,35 @@ async function main() {
   await test('plain 5xx / socket errors are NOT quota/auth (still same-leg retry)', () => {
     assert.equal(isQuotaOrAuthError({ statusCode: 503 }), false);
     assert.equal(isQuotaOrAuthError({ code: 'ECONNRESET' }), false);
+  });
+
+  // ---- upstream-overload gate: STAYS transient (retry first), THEN fails over (#671) ----
+  console.log('isUpstreamOverloaded (reachable gateway relays a saturated upstream → retry, then fail over):');
+  await test('OpenRouter "Upstream error from <provider>: ResourceExhausted" → upstream-overload', () => {
+    // The exact shape from issue #671: OpenRouter relaying a saturated Nvidia upstream.
+    const e: any = { statusCode: 429, message: 'Upstream error from Nvidia: ResourceExhausted: Worker local total request limit reached (32/32)' };
+    assert.equal(isUpstreamOverloaded(e), true);
+    assert.equal(isTransient(e), true);          // stays transient — a brief blip clears on the chosen model
+    assert.equal(isUnreachable(e), false);        // gateway answered, host is up
+    assert.equal(isQuotaOrAuthError(e), false);   // not the user's quota — the upstream is saturated
+  });
+  await test('Anthropic 529 "Overloaded" → upstream-overload (529 is outside the transient status set)', () => {
+    assert.equal(isUpstreamOverloaded({ statusCode: 529 }), true);
+    assert.equal(isUpstreamOverloaded({ message: 'Overloaded' }), true);
+  });
+  await test('gRPC RESOURCE_EXHAUSTED / "no instances available" → upstream-overload', () => {
+    assert.equal(isUpstreamOverloaded({ message: 'RESOURCE_EXHAUSTED: model is overloaded' }), true);
+    assert.equal(isUpstreamOverloaded({ message: 'No instances available for this model' }), true);
+  });
+  await test('cause.message / cause.statusCode are unwrapped', () => {
+    assert.equal(isUpstreamOverloaded({ cause: { message: 'Upstream error from Together: overloaded' } }), true);
+    assert.equal(isUpstreamOverloaded({ cause: { statusCode: 529 } }), true);
+  });
+  await test('plain 503 / quota / socket errors are NOT upstream-overload (no false failover)', () => {
+    assert.equal(isUpstreamOverloaded({ statusCode: 503 }), false);
+    assert.equal(isUpstreamOverloaded({ statusCode: 429, message: 'rate limit exceeded, slow down' }), false);
+    assert.equal(isUpstreamOverloaded({ code: 'ECONNRESET' }), false);
+    assert.equal(isUpstreamOverloaded(null), false);
   });
 
   // ---- per-provider thinking knob (the single most regression-prone mapping) ----
@@ -347,9 +376,9 @@ async function main() {
   });
   await test('strict genre is a hard rule, not a soft lean', () => {
     const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Hip-Hop', genreStrict: true });
-    assert.match(out, /Genre lock/);
-    assert.match(out, /MUST be Hip-Hop/);
-    assert.match(out, /do not pick other genres/);
+    assert.match(out, /Hip-Hop-only/);                              // the strict "{genre}-only" lock (#618)
+    assert.match(out, /keep your picks and your talk in Hip-Hop/);  // stay-in-genre instruction
+    assert.match(out, /only step outside if there is genuinely no Hip-Hop track/); // hard rule + escape hatch
     assert.doesNotMatch(out, /lean toward Hip-Hop/);
     assert.doesNotMatch(out, /Music steer/);     // no soft line when only the genre is pinned
   });
@@ -361,12 +390,12 @@ async function main() {
     assert.equal(showMusicLean({ name: 'x', topic: 'y', genreStrict: true }), '');
     // energy still produces a soft line; no genre lock without a genre
     const out = showMusicLean({ name: 'x', topic: 'y', energy: 'high', genreStrict: true });
-    assert.doesNotMatch(out, /Genre lock/);
+    assert.doesNotMatch(out, /-only —/);   // no genre lock without a genre
     assert.match(out, /favour high-energy tracks/);
   });
   await test('strict genre coexists with soft era/energy steers', () => {
     const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Soul', genreStrict: true, fromYear: 1970, toYear: 1979, energy: 'medium' });
-    assert.match(out, /Genre lock for this show/);
+    assert.match(out, /Soul-only/);   // strict genre lock (#618)
     assert.match(out, /Music steer for this show — prefer tracks from 1970–1979; favour medium-energy tracks/);
     assert.doesNotMatch(out, /lean toward Soul/);  // genre is the hard rule, not a soft part
   });
