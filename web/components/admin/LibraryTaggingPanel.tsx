@@ -223,6 +223,11 @@ function beautifyLog(raw: string): { text: string; cls: string } {
   if (/^\[exit 0\]/.test(raw)) return { text: '✅  Finished', cls: 'text-emerald-500 font-semibold' };
   if (/^\[exit/.test(raw)) return { text: `⏹  Stopped (${raw.replace(/^\[exit\s*|\]\s*$/g, '')})`, cls: 'text-vermilion font-semibold' };
   const s = raw.replace(/^\[(tag|analyze|stats|scheduler|error)\]\s*/, '');
+  // Raw LLM-request dumps (the `[llm-debug-raw]` header and its JSON body) are
+  // verbose debug output, not status lines — never keyword-scan them. A song
+  // title carried inside the body (e.g. "Closer (Cotto's Can't Stop Remix)")
+  // would otherwise false-trigger the failure warning below.
+  if (/^\[llm-debug-raw\]/.test(s) || /^\s*\{/.test(s)) return { text: s, cls: 'text-muted' };
   const low = s.toLowerCase();
   // Real failures (but not "0 failed" / "fail=0") → vermilion warning.
   if (/(fail(ed)?|error|unreachable|can'?t|missing)/.test(low) && !/fail=0|0 failed/.test(low)) {
@@ -587,7 +592,7 @@ export default function TaggingPanel(p: TaggingPanelProps) {
       {/* log drawer — reuses the theme-aware .term surface; each line is dressed
           up for humans (emoji + friendly phrasing + tint) via beautifyLog */}
       {p.logOpen && (
-        <pre ref={logRef} className="term m-0 max-h-56 overflow-y-auto !border-t !border-l-0 border-separator-strong">
+        <pre ref={logRef} className="term term-crt m-0 max-h-56 overflow-y-auto !border-t !border-l-0 border-separator-strong">
           {(p.tagger?.lastLog ?? []).length
             ? (p.tagger?.lastLog ?? []).map((line, i) => {
                 const f = beautifyLog(line);
