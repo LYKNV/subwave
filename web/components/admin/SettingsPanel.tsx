@@ -126,11 +126,12 @@ interface TtsForm {
   chatterbox: { referenceVoice: string };
   pocketTts: { voice: string };
   cloud: CloudTtsCfg;
+  remote: { url: string };
   // Per-engine voice-level trim in dB, keyed by engine id (note the hyphen in
-  // `pocket-tts`). Always carries all 5 known engines, 0 = unity = no change.
+  // `pocket-tts`). Always carries all 6 known engines, 0 = unity = no change.
   gainDb: Record<string, number>;
-  // Per-engine speech-rate multiplier, keyed by engine id. Always carries all 5
-  // known engines, 1.0 = unity = no change. Inert for chatterbox/pocket-tts.
+  // Per-engine speech-rate multiplier, keyed by engine id. Always carries all 6
+  // known engines, 1.0 = unity = no change. Inert for chatterbox/pocket-tts/remote.
   speed: Record<string, number>;
 }
 
@@ -214,11 +215,19 @@ interface ArchiveForm {
 
 interface StreamForm {
   opusEnabled: boolean;
+  opusBitrate: string;
+  flacEnabled: boolean;
+  aacEnabled: boolean;
+  aacBitrate: string;
+  bitrate: string;
 }
 
-// Keep in sync with ARCHIVE_BITRATES in controller/src/settings.ts — radio.liq
+// Keep in sync with MP3_BITRATES in controller/src/settings.ts — radio.liq
 // has a literal `%mp3(bitrate=…)` branch per value, so this set is fixed.
-const ARCHIVE_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+const MP3_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+// Keep in sync with OPUS_BITRATES / AAC_BITRATES in controller/src/settings.ts.
+const OPUS_BITRATES = [96, 128, 192, 256, 320] as const;
+const AAC_BITRATES = [128, 192, 256] as const;
 
 interface FormState {
   jingleRatio: string;
@@ -267,7 +276,14 @@ interface SettingsData {
     maxTrackSeconds?: number;
     minTrackSeconds?: number;
     archive?: { enabled?: boolean; bitrate?: number };
-    stream?: { opusEnabled?: boolean };
+    stream?: {
+      opusEnabled?: boolean;
+      opusBitrate?: number;
+      flacEnabled?: boolean;
+      aacEnabled?: boolean;
+      aacBitrate?: number;
+      bitrate?: number;
+    };
     station?: string;
     timezone?: string;
     locale?: StationLocale;
@@ -279,6 +295,7 @@ interface SettingsData {
       chatterbox?: { referenceVoice?: string };
       pocketTts?: { voice?: string };
       cloud?: Partial<CloudTtsCfg>;
+      remote?: { url?: string };
       gainDb?: Record<string, number>;
       speed?: Record<string, number>;
     };
@@ -411,6 +428,11 @@ export default function SettingsPanel() {
       },
       stream: {
         opusEnabled: v.stream?.opusEnabled ?? true,
+        opusBitrate: String(v.stream?.opusBitrate ?? 96),
+        flacEnabled: v.stream?.flacEnabled ?? false,
+        aacEnabled: v.stream?.aacEnabled ?? false,
+        aacBitrate: String(v.stream?.aacBitrate ?? 192),
+        bitrate: String(v.stream?.bitrate ?? 192),
       },
       station: v.station ?? '',
       timezone: v.timezone ?? '',
@@ -433,7 +455,8 @@ export default function SettingsPanel() {
           voice: v.tts?.cloud?.voice ?? '',
           baseUrl: v.tts?.cloud?.baseUrl ?? '',
         },
-        // Per-engine voice level (dB). Zero default for all 5 engine ids, then
+        remote: { url: v.tts?.remote?.url ?? '' },
+        // Per-engine voice level (dB). Zero default for all 6 engine ids, then
         // overlay any saved values. Keyed by engine id — `pocket-tts` (hyphen).
         gainDb: {
           piper: 0,
@@ -441,9 +464,10 @@ export default function SettingsPanel() {
           chatterbox: 0,
           'pocket-tts': 0,
           cloud: 0,
+          remote: 0,
           ...(v.tts?.gainDb || {}),
         },
-        // Per-engine speech speed (×). Unity default for all 5, then overlay
+        // Per-engine speech speed (×). Unity default for all 6, then overlay
         // any saved values. Keyed by engine id — `pocket-tts` (hyphen).
         speed: {
           piper: 1,
@@ -451,6 +475,7 @@ export default function SettingsPanel() {
           chatterbox: 1,
           'pocket-tts': 1,
           cloud: 1,
+          remote: 1,
           ...(v.tts?.speed || {}),
         },
       },
@@ -862,7 +887,7 @@ export default function SettingsPanel() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {ARCHIVE_BITRATES.map(br => (
+                          {MP3_BITRATES.map(br => (
                             <SelectItem key={br} value={String(br)}>
                               {br} kbps
                             </SelectItem>
@@ -1004,10 +1029,96 @@ export default function SettingsPanel() {
             )}
 
             {form && (
-              <Card title="Opus stream" sub="/stream.opus (Ogg-Opus 96 kbps)">
+              <Card title="Opus stream" sub="/stream.opus (Ogg-Opus)">
+                <div className="grid gap-3">
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Serve the secondary Opus mount</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Seg
+                        options={[
+                          { id: 'on', label: 'On' },
+                          { id: 'off', label: 'Off' },
+                        ]}
+                        value={form.stream.opusEnabled ? 'on' : 'off'}
+                        onChange={id =>
+                          setForm(f =>
+                            f ? { ...f, stream: { ...f.stream, opusEnabled: id === 'on' } } : f,
+                          )
+                        }
+                      />
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({ stream: { opusEnabled: form.stream.opusEnabled } })
+                        }
+                        disabled={busy}
+                      >
+                        Save
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      Off by default. Only Chrome/Edge listeners ever pick Opus (Safari, iOS and
+                      Firefox stay on the universal MP3 mount); for them it&apos;s equal-or-better
+                      quality at ~half the bandwidth, but it adds a continuous second encoder + a
+                      44.1→48 kHz resample. Turn it on if you have Chrome/Edge listeners and want
+                      the bandwidth saving. The mandatory <code>/stream.mp3</code> mount serves
+                      everyone either way.
+                    </div>
+                  </div>
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Bitrate</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={form.stream.opusBitrate}
+                        onValueChange={v =>
+                          setForm(f => (f ? { ...f, stream: { ...f.stream, opusBitrate: v } } : f))
+                        }
+                      >
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OPUS_BITRATES.map(br => (
+                            <SelectItem key={br} value={String(br)}>
+                              {br} kbps
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({
+                            stream: { opusBitrate: parseInt(form.stream.opusBitrate, 10) },
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        Save bitrate
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      96 kbps is transparent for most music; 256/320 suits hifi listeners
+                      (current: {data?.values?.stream?.opusBitrate ?? '—'} kbps). Raising it
+                      increases bandwidth for <em>every</em> Chrome/Edge listener, since the web
+                      player auto-selects this mount.
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="FLAC stream" sub="/stream.flac (Ogg FLAC, lossless)">
                 <div className="field">
                   <div className="flex items-center gap-2">
-                    <Label>Serve the secondary Opus mount</Label>
+                    <Label>Serve the lossless FLAC mount</Label>
                     <Pill tone="ink">restart required</Pill>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1016,30 +1127,179 @@ export default function SettingsPanel() {
                         { id: 'on', label: 'On' },
                         { id: 'off', label: 'Off' },
                       ]}
-                      value={form.stream.opusEnabled ? 'on' : 'off'}
+                      value={form.stream.flacEnabled ? 'on' : 'off'}
                       onChange={id =>
                         setForm(f =>
-                          f ? { ...f, stream: { ...f.stream, opusEnabled: id === 'on' } } : f,
+                          f ? { ...f, stream: { ...f.stream, flacEnabled: id === 'on' } } : f,
                         )
                       }
                     />
                     <Btn
                       sm
                       onClick={() =>
-                        saveSettings({ stream: { opusEnabled: form.stream.opusEnabled } })
+                        saveSettings({ stream: { flacEnabled: form.stream.flacEnabled } })
                       }
                       disabled={busy}
                     >
                       Save
                     </Btn>
                   </div>
+                  {form.stream.flacEnabled && (
+                    <div className="field-hint">
+                      Point a player at{' '}
+                      <code>
+                        {typeof window !== 'undefined' ? window.location.origin : ''}
+                        /stream.flac
+                      </code>
+                    </div>
+                  )}
                   <div className="field-hint">
-                    Off by default. Only Chrome/Edge listeners ever pick Opus (Safari, iOS and
-                    Firefox stay on the universal MP3 mount); for them it&apos;s equal-or-better
-                    quality at ~half the bandwidth, but it adds a continuous second encoder + a
-                    44.1→48 kHz resample. Turn it on if you have Chrome/Edge listeners and want
-                    the bandwidth saving. The mandatory <code>/stream.mp3</code> mount serves
-                    everyone either way.
+                    Off by default. A continuous third encoder that losslessly captures the
+                    broadcast bus at ~800–900 kbps (≈4× the MP3 mount). It&apos;s a true lossless
+                    tier <strong>only when your source files are themselves lossless</strong>{' '}
+                    (FLAC/ALAC/WAV); for a lossy-source library (e.g. AAC/MP3) it faithfully
+                    carries lossy audio and adds no fidelity over MP3/Opus. Meant for external
+                    players (VLC, foobar2000, a network streamer) — the web and mobile players
+                    stay on MP3/Opus and won&apos;t auto-select it. The mandatory{' '}
+                    <code>/stream.mp3</code> mount always serves everyone.
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="AAC stream" sub="/stream.aac (AAC-LC, ADTS)">
+                <div className="grid gap-3">
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Serve the AAC mount</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Seg
+                        options={[
+                          { id: 'on', label: 'On' },
+                          { id: 'off', label: 'Off' },
+                        ]}
+                        value={form.stream.aacEnabled ? 'on' : 'off'}
+                        onChange={id =>
+                          setForm(f =>
+                            f ? { ...f, stream: { ...f.stream, aacEnabled: id === 'on' } } : f,
+                          )
+                        }
+                      />
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({ stream: { aacEnabled: form.stream.aacEnabled } })
+                        }
+                        disabled={busy}
+                      >
+                        Save
+                      </Btn>
+                    </div>
+                    {form.stream.aacEnabled && (
+                      <div className="field-hint">
+                        Point a player at{' '}
+                        <code>
+                          {typeof window !== 'undefined' ? window.location.origin : ''}
+                          /stream.aac
+                        </code>
+                      </div>
+                    )}
+                    <div className="field-hint">
+                      Off by default. A continuous AAC-LC encoder whose purpose is reach —
+                      players and hardware that decode AAC but not Opus. Aimed at external
+                      players; the web and mobile players stay on MP3/Opus and won&apos;t
+                      auto-select it. The mandatory <code>/stream.mp3</code> mount serves
+                      everyone either way.
+                    </div>
+                  </div>
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Bitrate</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={form.stream.aacBitrate}
+                        onValueChange={v =>
+                          setForm(f => (f ? { ...f, stream: { ...f.stream, aacBitrate: v } } : f))
+                        }
+                      >
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {AAC_BITRATES.map(br => (
+                            <SelectItem key={br} value={String(br)}>
+                              {br} kbps
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({
+                            stream: { aacBitrate: parseInt(form.stream.aacBitrate, 10) },
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        Save bitrate
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      AAC-LC is transparent around 256 kbps (current:{' '}
+                      {data?.values?.stream?.aacBitrate ?? '—'} kbps).
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="Stream MP3 bitrate" sub="/stream.mp3">
+                <div className="field">
+                  <div className="flex items-center gap-2">
+                    <Label>Bitrate</Label>
+                    <Pill tone="ink">restart required</Pill>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={form.stream.bitrate}
+                      onValueChange={v =>
+                        setForm(f => (f ? { ...f, stream: { ...f.stream, bitrate: v } } : f))
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MP3_BITRATES.map(br => (
+                          <SelectItem key={br} value={String(br)}>
+                            {br} kbps
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Btn
+                      sm
+                      onClick={() =>
+                        saveSettings({
+                          stream: { bitrate: parseInt(form.stream.bitrate, 10) },
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Save bitrate
+                    </Btn>
+                  </div>
+                  <div className="field-hint">
+                    Higher bitrate = better quality, more listener bandwidth
+                    (current: {data?.values?.stream?.bitrate ?? '—'} kbps). 192 kbps is the
+                    original default.
                   </div>
                 </div>
               </Card>
@@ -1260,7 +1520,7 @@ const CB_DEFAULT_VOICE = '__cb_default__';
 
 // Voice-level (dB) trim. Engine ids match the server contract exactly — note the
 // hyphen in `pocket-tts`. Range mirrors the server clamp (TTS_GAIN_CLAMP_DB=12).
-const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'] as const;
+const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud', 'remote'] as const;
 const TTS_GAIN_MIN = -12;
 const TTS_GAIN_MAX = 12;
 const TTS_GAIN_STEP = 0.5;
@@ -1316,11 +1576,11 @@ function TtsGainField({
 }
 
 // Speech-rate trim. Range mirrors the server clamp (clampTtsSpeed: 0.5–2.0×).
-// Only Piper/Kokoro/cloud honour speed — chatterbox/pocket-tts ignore it.
+// Only Piper/Kokoro/cloud honour speed — chatterbox/pocket-tts/remote ignore it.
 const TTS_SPEED_MIN = 0.5;
 const TTS_SPEED_MAX = 2;
 const TTS_SPEED_STEP = 0.05;
-const TTS_SPEED_UNSUPPORTED = new Set(['chatterbox', 'pocket-tts']);
+const TTS_SPEED_UNSUPPORTED = new Set(['chatterbox', 'pocket-tts', 'remote']);
 
 function formatSpeed(v: number): string {
   return `${v.toFixed(2)}×`;
@@ -1505,7 +1765,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
   };
   const engines = data.tts?.engines || ['piper'];
   const available = data.tts?.available || {};
-  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', chatterbox: 'Chatterbox', 'pocket-tts': 'PocketTTS', cloud: 'Cloud' };
+  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', chatterbox: 'Chatterbox', 'pocket-tts': 'PocketTTS', cloud: 'Cloud', remote: 'Remote' };
 
   const save = async () => {
     await saveSettings({
@@ -1521,6 +1781,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
           voice: form.tts.cloud.voice,
           baseUrl: form.tts.cloud.baseUrl,
         },
+        remote: { url: form.tts.remote.url },
         // Per-engine voice-level trim. Always sent (server clamps + drops unknown
         // keys); keyed by engine id, `pocket-tts` with the hyphen.
         gainDb: form.tts.gainDb,
@@ -1564,6 +1825,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     chatterbox?: { referenceVoice?: string };
     pocketTts?: { voice?: string };
     cloud?: SavedCloud;
+    remote?: { url?: string };
     gainDb?: Record<string, number>;
     speed?: Record<string, number>;
   } = data.values?.tts || {};
@@ -1572,6 +1834,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
   const savedChatterboxVoice: string = savedTts.chatterbox?.referenceVoice || '';
   const savedPocketTtsVoice: string = savedTts.pocketTts?.voice || '';
   const savedCloud: SavedCloud = savedTts.cloud || {};
+  const savedRemoteUrl: string = savedTts.remote?.url || '';
   const savedEngineLabel = ENGINE_LABELS[savedEngine] || savedEngine;
   const formEngineLabel = ENGINE_LABELS[form.tts.defaultEngine] || form.tts.defaultEngine;
 
@@ -1596,6 +1859,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     || (form.tts.cloud.model || '').trim() !== (savedCloud.model || '').trim()
     || (form.tts.cloud.voice || '').trim() !== (savedCloud.voice || '').trim()
     || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim()
+    || (form.tts.remote.url || '').trim() !== savedRemoteUrl
     || gainDirty
     || speedDirty;
 
@@ -1616,6 +1880,10 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     activeDetail = <>
       {savedCloud.provider || '—'} · model <code>{savedCloud.model || '—'}</code>
       {savedCloud.voice ? <> · voice <code>{savedCloud.voice}</code></> : null}.
+    </>;
+  } else if (savedEngine === 'remote') {
+    activeDetail = <>
+      Endpoint <code>{savedRemoteUrl || 'not configured'}</code>. Falls back to Piper if the URL isn’t set or the sidecar is down.
     </>;
   }
   const savedEngineMissing = available[savedEngine] === false;
@@ -2015,6 +2283,43 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
           );
         })()}
 
+        {form.tts.defaultEngine === 'remote' && (() => {
+          const remoteAvail = available.remote;
+          return (
+          <div className="mt-4">
+            {remoteAvail === false && (
+              <div className="mb-3.5 border border-[var(--danger)] px-3 py-2.5 text-[11px] leading-[1.6] text-[var(--danger)]">
+                The remote endpoint isn&apos;t currently reachable. Check the URL
+                below and make sure the sidecar is running. The engine falls
+                back to <strong>Piper</strong> until it&apos;s up.
+              </div>
+            )}
+            <div className="field">
+              <Label>Server URL</Label>
+              <Input
+                value={form.tts.remote.url}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  setForm(f => ({ ...f, tts: { ...f.tts, remote: { ...f.tts.remote, url: e.target.value } } }))
+                }
+                placeholder="http://192.168.1.101:5001"
+                className="max-w-[360px]"
+              />
+              <div className="field-hint">
+                Any self-hosted TTS server that renders audio over HTTP — POST{' '}
+                <code>/speak</code> returns the audio in the response body, gated
+                on a <code>/health</code> probe (Qwen3-TTS clone, F5-TTS,
+                CosyVoice, your own server…). The audio comes back over the wire,
+                so no shared volume is needed. Must be reachable from the
+                controller container — use the host&apos;s LAN or Tailscale IP,
+                not <code>127.0.0.1</code>.
+              </div>
+            </div>
+            <TtsGainField engineId="remote" form={form} setForm={setForm} />
+            <TtsSpeedField engineId="remote" form={form} setForm={setForm} />
+          </div>
+          );
+        })()}
+
           {/* Audition the selected engine + its configured voice + speed. */}
           {(() => {
             const e = form.tts.defaultEngine;
@@ -2023,6 +2328,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
               : e === 'chatterbox' ? (form.tts.chatterbox?.referenceVoice || '')
               : e === 'pocket-tts' ? (form.tts.pocketTts?.voice || '')
               : e === 'cloud' ? (form.tts.cloud.voice || '')
+              : e === 'remote' ? ''
               : '';
             return (
               <div className="field">

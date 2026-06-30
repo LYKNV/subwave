@@ -123,13 +123,17 @@ export function effectiveFrequency(persona: any = getEffectivePersona()) {
 //
 // `cloud` routes through the AI SDK (OpenAI / ElevenLabs speech models) —
 // see llm/speech.js. `piper`, `kokoro`, `chatterbox`, and `pocket-tts` are
-// local engines. Chatterbox and PocketTTS are opt-in — the default controller
-// image doesn't bundle either; build the image with `--build-arg WITH_CHATTERBOX=1`
-// or `--build-arg WITH_POCKETTTS=1` (see docker/Dockerfile.controller) to
-// include the runtime. The dispatcher gates each engine on isAvailable() so
-// settings can reference it safely even when the runtime is absent (the
-// engine just falls back to Piper).
-export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'];
+// local engines. `remote` is a first-class self-hosted HTTP engine: it POSTs
+// to a configurable /speak endpoint and gets the rendered audio back in the
+// response body (no shared volume, so the endpoint can live on any host),
+// gated on a /health probe. Configure the URL in settings.tts.remote.url.
+// Chatterbox and PocketTTS are opt-in — the
+// default controller image doesn't bundle either; build the image with
+// `--build-arg WITH_CHATTERBOX=1` or `--build-arg WITH_POCKETTTS=1` (see
+// docker/Dockerfile.controller) to include the runtime. The dispatcher gates
+// each engine on isAvailable() so settings can reference it safely even when
+// the runtime is absent (the engine just falls back to Piper).
+export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud', 'remote'];
 
 // DJ-voice level trim, in dB. A per-engine gain levels the loudness gap between
 // TTS engines (only PocketTTS self-normalises today, so it sits quieter than
@@ -478,8 +482,29 @@ const SKILL_SLUG_RE = /^[a-z0-9-]{1,40}$/;
 
 const PERSONA_LIMIT = 12;
 const SHOWS_LIMIT = 64;
+const PLAYLISTS_PER_SHOW = 10;
 const SKILLS_PER_PERSONA_LIMIT = 20;
 const WEBHOOKS_LIMIT = 16;
+
+// A show can anchor to one or more Navidrome playlists: the playlist union
+// becomes the show's candidate pool. Stored as Subsonic playlist ids; deduped,
+// trimmed, capped. Never validated against the live Navidrome here (offline
+// validation, same as `genre` free-text) — an id that no longer exists simply
+// contributes nothing at pick time (never-starve). Empty = no anchor.
+function coercePlaylistIds(raw: any): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const id = v.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= PLAYLISTS_PER_SHOW) break;
+  }
+  return out;
+}
 
 // Event names the outbound webhook fan-out can subscribe to. Kept in sync
 // with broadcast/webhooks.ts WEBHOOK_EVENTS — duplicated here so settings.ts
@@ -606,10 +631,16 @@ export const SEED_PERSONAS = [
   },
 ];
 
-// Allowed archive bitrates. Matches the literal branches in radio.liq —
+// Allowed MP3 bitrates — shared by the hourly archive and the live
+// /stream.mp3 mount. Matches the literal branches in radio.liq —
 // %mp3(bitrate=…) needs a parse-time int, so the encoder is pre-baked for
 // this small set. Add a branch in radio.liq if you add a value here.
-export const ARCHIVE_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+export const MP3_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+// Opus + AAC encoders share the same parse-time-literal constraint as %mp3, so
+// each is pre-baked for a small set in radio.liq. Add a branch there if you add
+// a value here.
+export const OPUS_BITRATES = [96, 128, 192, 256, 320] as const;
+export const AAC_BITRATES = [128, 192, 256] as const;
 
 const DEFAULTS = {
   jingleRatio: 30, // 1 jingle per N music tracks
@@ -632,7 +663,14 @@ const DEFAULTS = {
   // Safari/iOS/Firefox on MP3), and it adds a continuous Opus encoder + a
   // 44.1→48k resample, so operators opt in rather than pay that CPU unasked.
   // The mandatory /stream.mp3 mount always serves everyone.
-  stream: { opusEnabled: false },
+  stream: {
+    opusEnabled: false,
+    opusBitrate: 96,
+    flacEnabled: false,
+    aacEnabled: false,
+    aacBitrate: 192,
+    bitrate: 192,
+  },
   weather: { lat: 30.7333, lng: 76.7794, locationName: 'Punjab', units: 'metric' as 'metric' | 'imperial' },
   // Operator-facing station name. Substituted into the DJ prompt's {station}
   // placeholder and returned by GET /dj for the landing page. The product is
@@ -703,17 +741,22 @@ const DEFAULTS = {
       // provider === 'openai-compatible'.
       baseUrl: '',
     },
+    // Remote engine — a user-configured self-hosted TTS endpoint that renders
+    // audio over HTTP (POST /speak → audio body, gated on a /health probe).
+    // The TTS equivalent of the LLM's custom base URL. Empty → engine reports
+    // unavailable; the dispatcher falls back.
+    remote: { url: '' },
     // Per-engine voice level trim (dB), applied via Liquidsoap's liq_amplify on
     // every spoken segment that resolves to that engine. Levels the loudness gap
     // between engines (e.g. boost PocketTTS to match raw Piper). Stacks with each
     // persona's own tts.gainDb. All 0 = unity = today's behaviour. See
     // TTS_GAIN_CLAMP_DB and audio/tts.ts:voiceGainDb().
-    gainDb: { piper: 0, kokoro: 0, chatterbox: 0, 'pocket-tts': 0, cloud: 0 },
+    gainDb: { piper: 0, kokoro: 0, chatterbox: 0, 'pocket-tts': 0, cloud: 0, remote: 0 },
     // Per-engine speech-rate multiplier (0.5–2.0×, 1.0 = no change), composed
     // on top of the daypart energy and each persona's own tts.speed in
     // audio/tts.ts:speak(). Only Piper/Kokoro/cloud honour it; chatterbox/
-    // pocket-tts ignore speed so their entries are inert. See clampTtsSpeed().
-    speed: { piper: 1, kokoro: 1, chatterbox: 1, 'pocket-tts': 1, cloud: 1 },
+    // pocket-tts/remote ignore speed so their entries are inert. See clampTtsSpeed().
+    speed: { piper: 1, kokoro: 1, chatterbox: 1, 'pocket-tts': 1, cloud: 1, remote: 1 },
   },
   llm: {
     provider: 'ollama',
@@ -955,7 +998,9 @@ const BOUNDS = {
   maxTrackSeconds: { min: 0, max: 36000, type: 'int' },
 };
 
-const ARCHIVE_BITRATE_SET = new Set<number>(ARCHIVE_BITRATES);
+const MP3_BITRATE_SET = new Set<number>(MP3_BITRATES);
+const OPUS_BITRATE_SET = new Set<number>(OPUS_BITRATES);
+const AAC_BITRATE_SET = new Set<number>(AAC_BITRATES);
 
 let cache: any = null;
 
@@ -1023,9 +1068,11 @@ function normalizeTts(raw: any) {
     voice = '';
   // openai-compatible voices are server-specific (often arbitrary cloning ref
   // names) — no canonical default; leave empty so generateSpeech omits the
-  // field and the server picks its own.
+  // field and the server picks its own. Remote engine voices likewise:
+  // server-specific (id, reference-wav filename, or VoiceDesign prompt), no
+  // Subwave-side default.
   if (!voice && engine === 'cloud' && cloudProvider !== 'openai-compatible') voice = 'alloy';
-  if (!voice && engine !== 'cloud' && engine !== 'chatterbox' && engine !== 'piper') voice = 'bf_isabella';
+  if (!voice && engine !== 'cloud' && engine !== 'chatterbox' && engine !== 'piper' && engine !== 'remote') voice = 'bf_isabella';
   return { engine, cloudProvider, voice, gainDb: clampTtsGain(raw?.gainDb), speed: clampTtsSpeed(raw?.speed) };
 }
 
@@ -1111,6 +1158,12 @@ function normalizeShows(raw: any, personaIds: string[]) {
     // maxTrackSeconds; 0 = unlimited (opt this show back out of the cap so a
     // long-form mix show can air hour-long sets); >0 = this show's own cap.
     const maxTrackSeconds = coerceMaxTrackSeconds(rawMaxTrackSec(item), true);
+    // Optional Navidrome playlist anchor — the union of these playlists becomes
+    // the show's candidate pool. playlistStrict (default off) makes the playlist
+    // the show's ENTIRE universe; soft just lets it dominate. Both default empty
+    // so existing shows are byte-for-byte unchanged.
+    const playlistIds = coercePlaylistIds(item.playlistIds);
+    const playlistStrict = item.playlistStrict === true;
     out.push({
       id,
       name,
@@ -1124,6 +1177,8 @@ function normalizeShows(raw: any, personaIds: string[]) {
       energy,
       genreStrict,
       maxTrackSeconds,
+      playlistIds,
+      playlistStrict,
     });
     if (out.length >= SHOWS_LIMIT) break;
   }
@@ -1198,7 +1253,7 @@ export async function load() {
   );
 
   const archiveBitrate =
-    typeof stored.archive?.bitrate === 'number' && ARCHIVE_BITRATE_SET.has(stored.archive.bitrate)
+    typeof stored.archive?.bitrate === 'number' && MP3_BITRATE_SET.has(stored.archive.bitrate)
       ? stored.archive.bitrate
       : DEFAULTS.archive.bitrate;
 
@@ -1218,6 +1273,28 @@ export async function load() {
         typeof stored.stream?.opusEnabled === 'boolean'
           ? stored.stream.opusEnabled
           : DEFAULTS.stream.opusEnabled,
+      opusBitrate:
+        typeof stored.stream?.opusBitrate === 'number' &&
+        OPUS_BITRATE_SET.has(stored.stream.opusBitrate)
+          ? stored.stream.opusBitrate
+          : DEFAULTS.stream.opusBitrate,
+      flacEnabled:
+        typeof stored.stream?.flacEnabled === 'boolean'
+          ? stored.stream.flacEnabled
+          : DEFAULTS.stream.flacEnabled,
+      aacEnabled:
+        typeof stored.stream?.aacEnabled === 'boolean'
+          ? stored.stream.aacEnabled
+          : DEFAULTS.stream.aacEnabled,
+      aacBitrate:
+        typeof stored.stream?.aacBitrate === 'number' &&
+        AAC_BITRATE_SET.has(stored.stream.aacBitrate)
+          ? stored.stream.aacBitrate
+          : DEFAULTS.stream.aacBitrate,
+      bitrate:
+        typeof stored.stream?.bitrate === 'number' && MP3_BITRATE_SET.has(stored.stream.bitrate)
+          ? stored.stream.bitrate
+          : DEFAULTS.stream.bitrate,
     },
     weather: {
       lat: stored.weather?.lat ?? DEFAULTS.weather.lat,
@@ -1319,6 +1396,12 @@ export async function load() {
           typeof stored.tts?.cloud?.baseUrl === 'string'
             ? stored.tts.cloud.baseUrl.trim()
             : DEFAULTS.tts.cloud.baseUrl,
+      },
+      remote: {
+        url:
+          typeof stored.tts?.remote?.url === 'string'
+            ? stored.tts.remote.url.trim()
+            : DEFAULTS.tts.remote.url,
       },
       // Per-engine gain map — one clean gain per known engine, missing keys → 0,
       // unknown keys dropped. So an older save (no gainDb) loads at unity.
@@ -1660,6 +1743,11 @@ function validateTtsBlock(raw, where) {
     } else if (voice.length < 1 || voice.length > 100) {
       throw new Error(`${where}.tts.voice must be 1-100 chars`);
     }
+  } else if (t.engine === 'remote') {
+    // Remote engine voices are server-specific — the sidecar interprets them
+    // (built-in id, reference-wav filename, or VoiceDesign prompt). Empty is
+    // valid: the sidecar picks its own default.
+    if (voice.length > 100) throw new Error(`${where}.tts.voice must be 0-100 chars`);
   } else {
     // piper: empty = use the baked-in default voice. Otherwise the value must
     // be an .onnx filename (no path separators) referencing a model the operator
@@ -1862,10 +1950,27 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
       }
       maxTrackSeconds = n;
     }
+    // Optional Navidrome playlist anchor. Shape-checked only (array of strings,
+    // capped) — ids are resolved against the live Navidrome at pick time, never
+    // here, so a stale id is tolerated. playlistStrict is a plain boolean.
+    let playlistIds: string[] = [];
+    if (item.playlistIds !== undefined && item.playlistIds !== null) {
+      if (!Array.isArray(item.playlistIds)) {
+        throw new Error(`shows[${i}].playlistIds must be an array of strings`);
+      }
+      if (item.playlistIds.length > PLAYLISTS_PER_SHOW) {
+        throw new Error(`shows[${i}].playlistIds must have at most ${PLAYLISTS_PER_SHOW} entries`);
+      }
+      for (const v of item.playlistIds) {
+        if (typeof v !== 'string') throw new Error(`shows[${i}].playlistIds entries must be strings`);
+      }
+      playlistIds = coercePlaylistIds(item.playlistIds);
+    }
+    const playlistStrict = item.playlistStrict === true;
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
-    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy, genreStrict, maxTrackSeconds };
+    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy, genreStrict, maxTrackSeconds, playlistIds, playlistStrict };
   });
 }
 
@@ -2011,9 +2116,9 @@ export async function update(patch) {
     }
     if (a.bitrate !== undefined) {
       const v = parseInt(a.bitrate, 10);
-      if (!Number.isFinite(v) || !ARCHIVE_BITRATE_SET.has(v)) {
+      if (!Number.isFinite(v) || !MP3_BITRATE_SET.has(v)) {
         throw new Error(
-          `archive.bitrate must be one of: ${ARCHIVE_BITRATES.join(', ')}`,
+          `archive.bitrate must be one of: ${MP3_BITRATES.join(', ')}`,
         );
       }
       if (v !== cur.archive.bitrate) {
@@ -2028,6 +2133,56 @@ export async function update(patch) {
       const v = !!st.opusEnabled;
       if (v !== cur.stream.opusEnabled) {
         next.stream.opusEnabled = v;
+        restart = true;
+      }
+    }
+    if (st.opusBitrate !== undefined) {
+      const v = parseInt(st.opusBitrate, 10);
+      if (!Number.isFinite(v) || !OPUS_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.opusBitrate must be one of: ${OPUS_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.opusBitrate) {
+        next.stream.opusBitrate = v;
+        restart = true;
+      }
+    }
+    if (st.flacEnabled !== undefined) {
+      const v = !!st.flacEnabled;
+      if (v !== cur.stream.flacEnabled) {
+        next.stream.flacEnabled = v;
+        restart = true;
+      }
+    }
+    if (st.aacEnabled !== undefined) {
+      const v = !!st.aacEnabled;
+      if (v !== cur.stream.aacEnabled) {
+        next.stream.aacEnabled = v;
+        restart = true;
+      }
+    }
+    if (st.aacBitrate !== undefined) {
+      const v = parseInt(st.aacBitrate, 10);
+      if (!Number.isFinite(v) || !AAC_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.aacBitrate must be one of: ${AAC_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.aacBitrate) {
+        next.stream.aacBitrate = v;
+        restart = true;
+      }
+    }
+    if (st.bitrate !== undefined) {
+      const v = parseInt(st.bitrate, 10);
+      if (!Number.isFinite(v) || !MP3_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.bitrate must be one of: ${MP3_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.bitrate) {
+        next.stream.bitrate = v;
         restart = true;
       }
     }
@@ -2221,6 +2376,28 @@ export async function update(patch) {
       // save the provider without one. Mirrors the LLM-side check below.
       if (next.tts.cloud.provider === 'openai-compatible' && !next.tts.cloud.baseUrl) {
         throw new Error('tts.cloud.baseUrl is required when provider is "openai-compatible"');
+      }
+    }
+    if (t.remote !== undefined) {
+      const r = t.remote || {};
+      if (r.url !== undefined) {
+        const v = String(r.url).trim();
+        if (v.length > 200) throw new Error('tts.remote.url must be 0-200 chars');
+        if (v) {
+          // Full parse (not just a prefix test) so a malformed host/port —
+          // e.g. http://host:notaport or http://host:99999 — is rejected at
+          // save time instead of silently failing the /health probe later.
+          let parsed: URL;
+          try {
+            parsed = new URL(v);
+          } catch {
+            throw new Error('tts.remote.url must be a valid http:// or https:// URL');
+          }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('tts.remote.url must start with http:// or https://');
+          }
+        }
+        next.tts.remote.url = v.replace(/\/+$/, ''); // strip trailing slashes
       }
     }
     if (t.gainDb !== undefined) {
@@ -2586,6 +2763,11 @@ export function resolveActiveShow(date = new Date(), s = get()) {
     // Per-show track-length cap override (seconds). null = inherit the station
     // default; 0 = unlimited; >0 = own cap. See effectiveMaxTrackSec().
     maxTrackSeconds: show.maxTrackSeconds != null ? show.maxTrackSeconds : null,
+    // Navidrome playlist anchor: the union of these playlists becomes the show's
+    // candidate pool (music/show-playlist.ts). playlistStrict makes it the show's
+    // entire universe; soft just lets it dominate. Empty array = no anchor.
+    playlistIds: Array.isArray(show.playlistIds) ? show.playlistIds.filter((v: any) => typeof v === 'string') : [],
+    playlistStrict: show.playlistStrict === true,
     // Empty string means "fall back to the station-wide default". The route
     // layer is responsible for resolving an empty/stale id against the live
     // theme registry; we just surface what the show declares.
@@ -2692,6 +2874,11 @@ const LIQ_CROSSFADE_PATH = `${STATE_DIR}/liquidsoap_crossfade.txt`;
 const LIQ_ARCHIVE_ENABLED_PATH = `${STATE_DIR}/liquidsoap_archive_enabled.txt`;
 const LIQ_ARCHIVE_BITRATE_PATH = `${STATE_DIR}/liquidsoap_archive_bitrate.txt`;
 const LIQ_OPUS_ENABLED_PATH = `${STATE_DIR}/liquidsoap_opus_enabled.txt`;
+const LIQ_OPUS_BITRATE_PATH = `${STATE_DIR}/liquidsoap_opus_bitrate.txt`;
+const LIQ_FLAC_ENABLED_PATH = `${STATE_DIR}/liquidsoap_flac_enabled.txt`;
+const LIQ_AAC_ENABLED_PATH = `${STATE_DIR}/liquidsoap_aac_enabled.txt`;
+const LIQ_AAC_BITRATE_PATH = `${STATE_DIR}/liquidsoap_aac_bitrate.txt`;
+const LIQ_STREAM_BITRATE_PATH = `${STATE_DIR}/liquidsoap_stream_bitrate.txt`;
 const LIQ_STATION_NAME_PATH = `${STATE_DIR}/liquidsoap_station_name.txt`;
 
 export async function writeLiquidsoapSettings(s) {
@@ -2700,6 +2887,11 @@ export async function writeLiquidsoapSettings(s) {
   await writeFile(LIQ_ARCHIVE_ENABLED_PATH, s.archive.enabled ? 'true' : 'false');
   await writeFile(LIQ_ARCHIVE_BITRATE_PATH, String(s.archive.bitrate));
   await writeFile(LIQ_OPUS_ENABLED_PATH, s.stream.opusEnabled ? 'true' : 'false');
+  await writeFile(LIQ_OPUS_BITRATE_PATH, String(s.stream.opusBitrate));
+  await writeFile(LIQ_FLAC_ENABLED_PATH, s.stream.flacEnabled ? 'true' : 'false');
+  await writeFile(LIQ_AAC_ENABLED_PATH, s.stream.aacEnabled ? 'true' : 'false');
+  await writeFile(LIQ_AAC_BITRATE_PATH, String(s.stream.aacBitrate));
+  await writeFile(LIQ_STREAM_BITRATE_PATH, String(s.stream.bitrate));
   await writeFile(LIQ_STATION_NAME_PATH, s.station || DEFAULTS.station);
 }
 
@@ -2712,7 +2904,8 @@ export async function ensureLiquidsoapSettingsFile() {
     !existsSync(LIQ_CROSSFADE_PATH) ||
     !existsSync(LIQ_ARCHIVE_ENABLED_PATH) ||
     !existsSync(LIQ_ARCHIVE_BITRATE_PATH) ||
-    !existsSync(LIQ_OPUS_ENABLED_PATH)
+    !existsSync(LIQ_OPUS_ENABLED_PATH) ||
+    !existsSync(LIQ_STREAM_BITRATE_PATH)
   ) {
     await writeLiquidsoapSettings(s);
   }
