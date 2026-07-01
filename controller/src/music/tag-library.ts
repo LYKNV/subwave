@@ -45,7 +45,7 @@ import { config } from '../config.js';
 import { loadSecretsIntoEnv } from '../setup/secrets.js';
 import { loadSetupConfig } from '../setup/config.js';
 import { activeModelLabel, primaryLeg, fallbackLeg, probeLegReachable } from '../llm/provider.js';
-import { isUnreachable, isQuotaOrAuthError } from '../llm/sdk.js';
+import { isUnreachable, isQuotaOrAuthError, errReason } from '../llm/sdk.js';
 import { tagBatch, tagOne, TAGGER_BATCH_SYSTEM, type TagResult } from './tagger-core.js';
 import { runAnalysisPass } from './analyze.js';
 import { reportProgress, formatPhaseBreakdown, sortedPhaseTimings } from './tagger-progress.js';
@@ -269,9 +269,11 @@ async function main() {
   // Tunables from settings.embedding, CLI flags override where present.
   const embedCfg: any = (settings.get() as any).embedding ?? {};
   const maxRounds = flags.maxRounds ?? Math.max(0, embedCfg.maxActiveLearningRounds ?? 3);
-  const knnK = Math.max(1, embedCfg.knnNeighbours ?? 5);
-  const moodVoteThreshold = clamp01(embedCfg.moodVoteThreshold ?? 0.6);
-  const confidenceThreshold = clamp01(embedCfg.confidenceThreshold ?? 0.6);
+  // Fallbacks kept in sync with DEFAULTS.embedding in settings.ts (settings.get()
+  // normally supplies these; the ?? only bites if the field is entirely absent).
+  const knnK = Math.max(1, embedCfg.knnNeighbours ?? 10);
+  const moodVoteThreshold = clamp01(embedCfg.moodVoteThreshold ?? 0.4);
+  const confidenceThreshold = clamp01(embedCfg.confidenceThreshold ?? 0.35);
   const seedCountCfg =
     typeof embedCfg.seedCount === 'number' && embedCfg.seedCount > 0
       ? embedCfg.seedCount
@@ -285,15 +287,23 @@ async function main() {
       `moodVote=${moodVoteThreshold} confidence=${confidenceThreshold}`,
   );
 
-  // A re-scan re-embed rebuilds vectors only for the already-embedded population —
-  // snapshot it BEFORE the drop (afterwards every track looks unembedded). A
-  // normal --reseed run rebuilds vectors as part of its forward pass and doesn't
-  // need the snapshot. Used by the plan.reEmbed branch below.
+  // A re-scan re-embed rebuilds the vector population; a normal --reseed run does
+  // it as part of its forward pass and doesn't need the snapshot below.
   let reembedIds: string[] = [];
   if (flags.reseed) {
+    // Snapshot the set to rebuild. A SAME-dim reseed still has the old vectors
+    // here, so embeddedIds() captures exactly the already-embedded population. A
+    // DIM-CHANGE reseed already had track_vectors dropped inside open()/migrate
+    // (the old vectors are unusable at the new width), so this comes back empty.
     if (flags.rescan) reembedIds = db.embeddedIds();
     console.log('[tag] --reseed: dropping track_vectors, re-embedding from scratch');
     db.dropVectors();
+    // Dim change wiped the vectors before we could snapshot them. The UI pass is
+    // "Re-embed all tracks" (its whole purpose is a model change, which usually
+    // changes the dim), so rebuild every track that now needs a vector — after
+    // the reset that's the whole library. Without this the pass silently rebuilt
+    // 0 vectors on exactly the model swap it advertises.
+    if (flags.rescan && reembedIds.length === 0) reembedIds = db.unembeddedIds();
   }
 
   const promptHash = embeddings.promptVocabHash(TAGGER_BATCH_SYSTEM);
@@ -572,10 +582,12 @@ async function main() {
   } // end forward "Tag moods" step (plan.forwardTag)
 
   // ---- Re-scan: RE-EMBED (model swap) ------------------------------------
-  // Rebuild vectors for the already-embedded population only (snapshotted before
-  // the drop above) — never the untagged remainder. phaseEmbed also re-embeds any
-  // tagged row that lost its vector, so the KNN graph the existing tags anchor is
-  // fully restored under the new model.
+  // Rebuild vectors under the new embedding model. A same-dim swap rebuilds the
+  // already-embedded population (snapshotted before the drop above); a dim-change
+  // swap rebuilds every track that needs a vector (the whole library) because the
+  // old vectors were dropped at open() before they could be snapshotted. Either
+  // way the KNN graph the existing tags anchor is fully restored under the new
+  // model.
   if (plan.reEmbed) {
     console.log(`[tag] re-embed: rebuilding ${reembedIds.length} vectors from scratch`);
     await phaseEmbed(reembedIds, flags.batchSize);
@@ -633,7 +645,14 @@ async function main() {
 }
 
 function autoSeedCount(librarySize: number): number {
-  return Math.max(200, Math.ceil(Math.sqrt(librarySize)));
+  // ~4% of the library, floored at 200 (small libraries still get a workable
+  // anchor set) and capped at 2500 (a 100k-track library shouldn't pay for 10k
+  // LLM seed tags — propagation carries the rest). Denser than the old
+  // ceil(sqrt(N)), which flatlined at 200 for everything up to ~40k tracks and
+  // left too few anchors for KNN propagation to fire before active-learning.
+  // A denser seed set is often net-cheaper: more seeds → higher propagation
+  // coverage → a smaller (expensive) active-learning residual.
+  return Math.max(200, Math.min(2500, Math.round(librarySize * 0.04)));
 }
 
 function finish(
@@ -881,9 +900,24 @@ async function processBatch(
     // 429s) against a leg that won't answer. The surviving consumer redoes the
     // requeued batch.
     if (consumer.pin && (isUnreachable(err) || isQuotaOrAuthError(err))) throw err;
-    console.error(
-      `[tag] LLM batch failed (${songs.length} tracks) on ${consumer.label}: ${err.message} — falling back to per-track`,
-    );
+    // A "batch length mismatch" is NOT a failure. Some models (e.g. Mercury, and
+    // small local models) don't return one structured-output entry per input
+    // track, so we tag each track individually this batch — same seed set, same
+    // cost envelope (only the seeds ever hit the LLM), just slower. Log it as an
+    // expected degrade, not an error, so it doesn't read as something broken.
+    // Genuine batch errors keep the error-level line with their message.
+    const perTrackDegrade = /batch length mismatch/i.test(err.message || '');
+    if (perTrackDegrade) {
+      console.warn(
+        `[tag] ${consumer.label} didn't return one entry per track — tagging ` +
+          `${songs.length} tracks individually this batch (expected for some ` +
+          `models; not an error, just slower)`,
+      );
+    } else {
+      console.error(
+        `[tag] LLM batch failed (${songs.length} tracks) on ${consumer.label}: ${err.message} — falling back to per-track`,
+      );
+    }
     results = [];
     for (const song of input) {
       try {
@@ -932,7 +966,7 @@ async function runConsumer(
   total: number,
   state: TagState,
   phaseInfo: TagPhaseInfo,
-  onDrop: (() => number) | null,
+  onDrop: ((err: any) => number) | null,
 ): Promise<void> {
   for (;;) {
     const batch = batches.shift();
@@ -941,12 +975,17 @@ async function runConsumer(
       const n = await processBatch(batch, consumer, promptHash, source, state);
       state.tagged += n;
       state.byLeg[consumer.label] = (state.byLeg[consumer.label] || 0) + n;
-    } catch {
-      // processBatch only throws on a pinned-leg host outage.
+    } catch (err: any) {
+      // processBatch rethrows only when a pinned leg can't recover this run:
+      // the host is down (isUnreachable) OR the provider refused the leg with a
+      // quota / credit / usage-limit / auth error (isQuotaOrAuthError, #438).
+      // Name the real reason — logging every drop as "unreachable" misdirected an
+      // operator whose OpenRouter credits had simply run out (Discord).
       batches.unshift(batch);
-      const remaining = onDrop ? onDrop() : 0;
+      const remaining = onDrop ? onDrop(err) : 0;
+      const reason = isQuotaOrAuthError(err) ? 'quota/credit/auth rejected' : 'host unreachable';
       console.log(
-        `[tag] LLM leg ${consumer.label} unreachable — dropping it (${remaining} leg(s) left)`,
+        `[tag] LLM leg ${consumer.label} dropped — ${reason}: ${errReason(err)} (${remaining} leg(s) left)`,
       );
       return;
     }
@@ -994,13 +1033,20 @@ async function llmTagInBatches(
     await runConsumer(batches, consumers[0], promptHash, source, ids.length, state, phaseInfo, null);
   } else {
     let alive = consumers.length;
+    let quotaOrAuthDrop = false;
     await Promise.all(
       consumers.map(c =>
-        runConsumer(batches, c, promptHash, source, ids.length, state, phaseInfo, () => --alive)),
+        runConsumer(batches, c, promptHash, source, ids.length, state, phaseInfo, (err: any) => {
+          if (isQuotaOrAuthError(err)) quotaOrAuthDrop = true;
+          return --alive;
+        })),
     );
     if (batches.length > 0) {
       const abandoned = batches.reduce((n, b) => n + b.length, 0);
-      console.log(`[tag] all LLM legs unreachable — ${abandoned} tracks left for next run`);
+      const hint = quotaOrAuthDrop
+        ? ' — a leg was refused for quota/credit/auth; check the provider credit balance, spend cap, or API key'
+        : '';
+      console.log(`[tag] all LLM legs dropped — ${abandoned} tracks left for next run${hint}`);
     }
   }
   return { tagged: state.tagged, callCount: state.callCount, byLeg: state.byLeg };
