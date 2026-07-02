@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.34.0](https://github.com/perminder-klair/subwave/compare/v0.33.0...v0.34.0) (2026-07-02)
+
+
+### Features
+
+* **admin:** library tagging & embedding-config UX for new operators ([#730](https://github.com/perminder-klair/subwave/issues/730)) ([583ef82](https://github.com/perminder-klair/subwave/commit/583ef82927326fa0abd34869f2305c984df6fd93))
+* **analyzer:** split acoustic analyzer into a default-on standalone sidecar image ([#717](https://github.com/perminder-klair/subwave/issues/717)) ([1f790aa](https://github.com/perminder-klair/subwave/commit/1f790aaca5fdd42415cd14b50c5467a1defe6e8d))
+* **llm:** add configurable per-call max output tokens ([#712](https://github.com/perminder-klair/subwave/issues/712)) ([#719](https://github.com/perminder-klair/subwave/issues/719)) ([9d72caa](https://github.com/perminder-klair/subwave/commit/9d72caa3e640a8d3f977eb371cc1a0ce7a223bf8))
+* **personas:** expand persona limits — soul 400→1000, roster 12→24 ([#722](https://github.com/perminder-klair/subwave/issues/722)) ([#728](https://github.com/perminder-klair/subwave/issues/728)) ([513bfe8](https://github.com/perminder-klair/subwave/commit/513bfe8e70e37a42651de7dd6adc9ae46559e7c3))
+* **stations:** add ClippyZone FM ([#733](https://github.com/perminder-klair/subwave/issues/733)) ([a84e78e](https://github.com/perminder-klair/subwave/commit/a84e78e45eaaeb7803541e49219068e8b73ffd8f))
+
+
+### Bug Fixes
+
+* **admin:** restore Save button when editing the system prompt ([#724](https://github.com/perminder-klair/subwave/issues/724)) ([#729](https://github.com/perminder-klair/subwave/issues/729)) ([d483318](https://github.com/perminder-klair/subwave/commit/d4833186a2fb62e7a07dbc8f24f6af6465455187))
+* **analyzer:** lend gcc to the diffq sdist build in heavy images ([#737](https://github.com/perminder-klair/subwave/issues/737)) ([51dc493](https://github.com/perminder-klair/subwave/commit/51dc493ea82df2519f57b90303d56bf23aa4639e))
+* **analyzer:** pass HF_TOKEN through to the analyzer sidecar ([#739](https://github.com/perminder-klair/subwave/issues/739)) ([1bc8983](https://github.com/perminder-klair/subwave/commit/1bc89831908799976a84b651a17e8bbda38072d9))
+* **embeddings:** make embedding-model changes actually work (fresh + populated) ([#721](https://github.com/perminder-klair/subwave/issues/721)) ([aadd954](https://github.com/perminder-klair/subwave/commit/aadd954479d6fc2f820f9d4fe5d5f97539778575))
+* **picker:** skip mood-name playlist match when a show pins playlists ([#718](https://github.com/perminder-klair/subwave/issues/718)) ([9cda732](https://github.com/perminder-klair/subwave/commit/9cda732ab864f2282eff2ddc930c368d07f10a15))
+* **queue:** replace _autoMisses heuristic with Liquidsoap telnet sync… ([#637](https://github.com/perminder-klair/subwave/issues/637)) ([b0e3936](https://github.com/perminder-klair/subwave/commit/b0e39364fc788e07a1bc5f083ce4057f9be8e09a))
+* **tagger:** mute raw-debug stderr mirror in the standalone tagger ([#740](https://github.com/perminder-klair/subwave/issues/740)) ([b7d6c0c](https://github.com/perminder-klair/subwave/commit/b7d6c0caa4188c25eac206a08206f9f7e6ba16ec))
+
 ## [0.33.0](https://github.com/perminder-klair/subwave/compare/v0.32.0...v0.33.0) (2026-06-30)
 
 
