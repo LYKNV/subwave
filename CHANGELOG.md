@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.34.1](https://github.com/perminder-klair/subwave/compare/v0.34.0...v0.34.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* **aio:** install python3-dev for the diffq sdist build in heavy AIO image ([#744](https://github.com/perminder-klair/subwave/issues/744)) ([a31b2b7](https://github.com/perminder-klair/subwave/commit/a31b2b7620f9b1752df2d98daf3cc643db8e28cb))
+
 ## [0.34.0](https://github.com/perminder-klair/subwave/compare/v0.33.0...v0.34.0) (2026-07-02)
 
 
