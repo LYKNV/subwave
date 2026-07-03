@@ -7,7 +7,7 @@
 // node:assert-via-tsx style of scripts/picker-recency-regression.ts.
 
 import assert from 'node:assert/strict';
-import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, errReason } from '../src/llm/internal/core/pure.js';
+import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, errReason, nearestId } from '../src/llm/internal/core/pure.js';
 import { withDeadline } from '../src/llm/internal/core/retry.js';
 import { providerOptions, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, forcedToolChoice } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
@@ -402,33 +402,38 @@ async function main() {
   await test('soft genre-only show is byte-for-byte the legacy line', () => {
     assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz' }), SOFT_GENRE_LINE);
   });
-  await test('genreStrict=false leaves the soft path unchanged', () => {
-    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz', genreStrict: false }), SOFT_GENRE_LINE);
+  await test('filtersStrict=false leaves the soft path unchanged', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz', filtersStrict: false }), SOFT_GENRE_LINE);
   });
-  await test('strict genre is a hard rule, not a soft lean', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Hip-Hop', genreStrict: true });
-    assert.match(out, /Hip-Hop-only/);                              // the strict "{genre}-only" lock (#618)
-    assert.match(out, /keep your picks and your talk in Hip-Hop/);  // stay-in-genre instruction
-    assert.match(out, /only step outside if there is genuinely no Hip-Hop track/); // hard rule + escape hatch
+  await test('strict filters are a hard rule, not a soft lean', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Hip-Hop', filtersStrict: true });
+    assert.match(out, /music filters are STRICT/);                  // the unified strict lock (#766)
+    assert.match(out, /Hip-Hop tracks/);                            // genre carried into the lock
+    assert.match(out, /Keep your talk inside them too/);            // stay-in-filter instruction
+    assert.match(out, /only step outside if there is genuinely nothing left that fits/); // hard rule + escape hatch
     assert.doesNotMatch(out, /lean toward Hip-Hop/);
-    assert.doesNotMatch(out, /Music steer/);     // no soft line when only the genre is pinned
+    assert.doesNotMatch(out, /Music steer/);     // no soft line when strict is on
   });
   await test('strict carries the never-starve escape hatch', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Metal', genreStrict: true });
-    assert.match(out, /no Metal track/i);        // can stray only to avoid dead air
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Metal', filtersStrict: true });
+    assert.match(out, /never leave dead air/i);   // can stray only to avoid dead air
   });
-  await test('strict needs a genre — genreStrict alone is inert', () => {
-    assert.equal(showMusicLean({ name: 'x', topic: 'y', genreStrict: true }), '');
-    // energy still produces a soft line; no genre lock without a genre
-    const out = showMusicLean({ name: 'x', topic: 'y', energy: 'high', genreStrict: true });
-    assert.doesNotMatch(out, /-only —/);   // no genre lock without a genre
-    assert.match(out, /favour high-energy tracks/);
+  await test('strict needs a filter — filtersStrict alone is inert', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', filtersStrict: true }), '');
+    // energy alone still bites: the unified toggle locks any pinned filter, not just genre
+    const out = showMusicLean({ name: 'x', topic: 'y', energy: 'high', filtersStrict: true });
+    assert.match(out, /music filters are STRICT/);
+    assert.match(out, /high-energy tracks/);
+    assert.doesNotMatch(out, /Music steer/);   // strict, so no soft line
   });
-  await test('strict genre coexists with soft era/energy steers', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Soul', genreStrict: true, fromYear: 1970, toYear: 1979, energy: 'medium' });
-    assert.match(out, /Soul-only/);   // strict genre lock (#618)
-    assert.match(out, /Music steer for this show — prefer tracks from 1970–1979; favour medium-energy tracks/);
-    assert.doesNotMatch(out, /lean toward Soul/);  // genre is the hard rule, not a soft part
+  await test('strict locks genre, era and energy together (unified toggle)', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Soul', filtersStrict: true, fromYear: 1970, toYear: 1979, energy: 'medium' });
+    assert.match(out, /music filters are STRICT/);   // unified strict lock (#766)
+    assert.match(out, /Soul tracks/);
+    assert.match(out, /the 1970–1979 era/);
+    assert.match(out, /medium-energy tracks/);
+    assert.doesNotMatch(out, /Music steer/);       // era/energy are strict too — no soft line
+    assert.doesNotMatch(out, /lean toward Soul/);  // genre is part of the hard lock
   });
 
   // ---- clampMaxOutputTokens / resolveMaxOutputTokens (per-call cap, #712) ----
@@ -459,6 +464,35 @@ async function main() {
     // (maxOutputTokens: 0) → each strategy keeps its own built-in default.
     assert.equal(resolveMaxOutputTokens(4000), 4000);
     assert.equal(resolveMaxOutputTokens(8000), 8000);
+  });
+
+  // ---- nearestId: near-miss id repair for the picker agents ----
+  console.log('nearestId (unknown-id near-miss repair):');
+  await test('repairs the observed live case: final character dropped from a nanoid', () => {
+    // glm-5.1 returned "BFjCKvSeWFKFpKTRvroPC" for the real "BFjCKvSeWFKFpKTRvroPCp".
+    const seen = ['2igTN1Xw3uJBY9CjdKzZGl', 'H8G6Y1gPsSsMNJwflWbstW', 'BFjCKvSeWFKFpKTRvroPCp'];
+    assert.equal(nearestId('BFjCKvSeWFKFpKTRvroPC', seen), 'BFjCKvSeWFKFpKTRvroPCp');
+  });
+  await test('repairs a single substituted character (edit distance 1)', () => {
+    const seen = ['yu4ZsUclpGxnr8CU2YfNf7', 'qJcxd61T5W7YJ0bNryKakG'];
+    assert.equal(nearestId('yu4ZsUclpGxnr8CU2YfNf8', seen), 'yu4ZsUclpGxnr8CU2YfNf7');
+  });
+  await test('rejects a fabricated id (nothing near any candidate)', () => {
+    const seen = ['2igTN1Xw3uJBY9CjdKzZGl', 'H8G6Y1gPsSsMNJwflWbstW'];
+    assert.equal(nearestId('3bKpTnYlqR8vD4sXe2aJ0m', seen), null);
+  });
+  await test('rejects an ambiguous match (two candidates equally close)', () => {
+    // Both differ from the query by one trailing character — no safe winner.
+    const seen = ['AAAAAAAAAAAAAAAAAAAAAx', 'AAAAAAAAAAAAAAAAAAAAAy'];
+    assert.equal(nearestId('AAAAAAAAAAAAAAAAAAAAAz', seen), null);
+  });
+  await test('rejects short-prefix matches (below the 12-char floor)', () => {
+    assert.equal(nearestId('abc', ['abcdef123456789012345']), null);
+  });
+  await test('handles junk input without throwing', () => {
+    assert.equal(nearestId('', ['abcdef123456789012345']), null);
+    assert.equal(nearestId(undefined as any, ['abcdef123456789012345']), null);
+    assert.equal(nearestId('abcdef123456789012345', []), null);
   });
 
   console.log(failures === 0 ? '\nAll llm-pure tests passed.' : `\n${failures} test(s) FAILED.`);

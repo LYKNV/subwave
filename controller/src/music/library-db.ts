@@ -234,6 +234,10 @@ export function close(): void {
     db.close();
     db = null;
     currentEmbeddingDim = null;
+    // reload()/restoreFromFile() both drop the handle through here, so a
+    // reopened (possibly restored-from-backup) library never serves the
+    // previous handle's cached tallies.
+    invalidateStats();
   }
 }
 
@@ -256,6 +260,20 @@ export async function backup(destPath: string): Promise<void> {
 export async function restoreFromFile(srcPath: string): Promise<void> {
   close();
   await copyFile(srcPath, DB_PATH);
+  await rm(`${DB_PATH}-wal`, { force: true });
+  await rm(`${DB_PATH}-shm`, { force: true });
+}
+
+// Delete the entire on-disk DB — every track row, mood/energy tag, text +
+// audio embedding, acoustic-analysis column, and enrichment cache — plus the
+// WAL/SHM sidecars, so the next open() recreates an empty schema from scratch.
+// Mirrors restoreFromFile()'s close→swap-file→drop-sidecars shape, and like it
+// leaves the reopen to the caller (music/library.ts:reset()). This is the
+// "start fresh" wipe behind the admin library Reset action — irreversible short
+// of restoring a backup.
+export async function reset(): Promise<void> {
+  close();
+  await rm(DB_PATH, { force: true });
   await rm(`${DB_PATH}-wal`, { force: true });
   await rm(`${DB_PATH}-shm`, { force: true });
 }
@@ -394,6 +412,16 @@ async function migrate(embeddingDim: number, reseed = false, adoptStoredDim = fa
     // the scalar musical_key stays the back-compat dominant key.
     runDdl(d, `ALTER TABLE tracks ADD COLUMN key_ranges_json TEXT;`);
     d.pragma('user_version = 9');
+  }
+
+  if (userVersion < 10) {
+    // Task-prefix mode of the text-embedding index: 'plain' (texts embedded
+    // bare) or 'prefixed' (embedded with the model's document prefix, e.g.
+    // nomic's `search_document:`). NULL (legacy rows) = 'plain'. Lives with the
+    // index provenance because query embeds must match how the documents were
+    // embedded (music/embeddings.ts resolveIndexTextMode).
+    runDdl(d, `ALTER TABLE embedding_meta ADD COLUMN text_mode TEXT;`);
+    d.pragma('user_version = 10');
   }
 
   // Reconcile the requested embedding dim against what physically exists.
@@ -588,20 +616,39 @@ async function archiveMoodsJson(): Promise<void> {
 // Embedding meta
 // ---------------------------------------------------------------------------
 
-export function getEmbeddingMeta(): { model: string; dim: number } | null {
+// `textMode` records whether the vectors were embedded with the model's
+// document prefix ('prefixed') or bare ('plain'); null = legacy row from
+// before mode tracking (equivalent to 'plain' — see resolveIndexTextMode).
+export type EmbeddingTextMode = 'plain' | 'prefixed';
+
+export function getEmbeddingMeta(): {
+  model: string;
+  dim: number;
+  textMode: EmbeddingTextMode | null;
+} | null {
   const row = requireDb()
-    .prepare('SELECT model, dim FROM embedding_meta WHERE pk = 1')
-    .get() as { model: string; dim: number } | undefined;
-  return row || null;
+    .prepare('SELECT model, dim, text_mode FROM embedding_meta WHERE pk = 1')
+    .get() as { model: string; dim: number; text_mode: string | null } | undefined;
+  if (!row) return null;
+  return {
+    model: row.model,
+    dim: row.dim,
+    textMode: row.text_mode === 'prefixed' || row.text_mode === 'plain' ? row.text_mode : null,
+  };
 }
 
-export function setEmbeddingMeta(model: string, dim: number): void {
+export function setEmbeddingMeta(
+  model: string,
+  dim: number,
+  textMode: EmbeddingTextMode | null = null,
+): void {
   requireDb()
     .prepare(
-      `INSERT INTO embedding_meta (pk, model, dim, set_at) VALUES (1, ?, ?, ?)
-       ON CONFLICT(pk) DO UPDATE SET model = excluded.model, dim = excluded.dim, set_at = excluded.set_at`,
+      `INSERT INTO embedding_meta (pk, model, dim, set_at, text_mode) VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(pk) DO UPDATE SET model = excluded.model, dim = excluded.dim,
+         set_at = excluded.set_at, text_mode = excluded.text_mode`,
     )
-    .run(model, dim, new Date().toISOString());
+    .run(model, dim, new Date().toISOString(), textMode);
 }
 
 // Audio-embedding provenance — which CLAP model wrote the current audio
@@ -632,6 +679,50 @@ export function getTrack(id: string): TrackRecord | null {
     .prepare(`SELECT * FROM tracks WHERE id = ?`)
     .get(id) as any;
   return row ? rowToTrack(row) : null;
+}
+
+export interface TrackLite {
+  genre: string | null;
+  bpm: number | null;
+  musicalKey: string | null;
+  moods: string[];
+  energy: string | null;
+  year: number | null;
+}
+
+// Lean read for the /now-playing hot path (polled every ~5s by every listener).
+// Selects only the light scalar columns the player's metadata strip renders,
+// skipping the heavy acoustic *_json blobs (structure/pace/beats/bars/key/vocal
+// ranges) that a full getTrack() → rowToTrack() SELECTs and JSON.parses on every
+// call. After acoustic analysis those blobs are populated and fat, so parsing
+// them per poll — on better-sqlite3's single synchronous thread — stalled every
+// concurrent HTTP response, making the whole UI sluggish (#723).
+export function getTrackLite(id: string): TrackLite | null {
+  const row = requireDb()
+    .prepare(`SELECT genre, bpm, musical_key, moods, energy, year FROM tracks WHERE id = ?`)
+    .get(id) as any;
+  if (!row) return null;
+  return {
+    genre: row.genre ?? null,
+    bpm: row.bpm ?? null,
+    musicalKey: row.musical_key ?? null,
+    moods: row.moods ? safeParseArray(row.moods) : [],
+    energy: row.energy ?? null,
+    year: row.year ?? null,
+  };
+}
+
+// COUNT(*) of tagged tracks — the O(1)-ish query behind the coverage meter's
+// "tagged" tally. Replaces allTaggedIds().length, which materialised a ~30k-
+// element JS id array on every coverage poll only to read its .length (#723).
+// Predicate is `moods IS NOT NULL` to match allTaggedIds() exactly (NOT the
+// stricter SQL_HAS_MOODS) so the coverage percentage is unchanged.
+export function countTagged(): number {
+  return (
+    requireDb().prepare(`SELECT COUNT(*) AS n FROM tracks WHERE moods IS NOT NULL`).get() as {
+      n: number;
+    }
+  ).n;
 }
 
 export function hasTags(id: string): boolean {
@@ -1112,6 +1203,25 @@ export function allTaggedIds(): string[] {
   ).map(r => r.id);
 }
 
+// Directly-decided tags with a vector — the trusted sample for the propagation
+// self-check (music/propagation-eval.ts). Excludes 'propagated' rows (they ARE
+// the propagation output — scoring against them would be circular) and
+// vectorless rows (KNN can't run). Null source = legacy import, decided by an
+// LLM at the time, so it counts.
+export function trustedTaggedIds(): string[] {
+  return (
+    requireDb()
+      .prepare(
+        `SELECT id FROM tracks
+          WHERE ${SQL_HAS_MOODS}
+            AND (source IS NULL OR source != 'propagated')
+            AND id IN (SELECT id FROM track_vectors)
+          ORDER BY id`,
+      )
+      .all() as Array<{ id: string }>
+  ).map(r => r.id);
+}
+
 // Tagged rows whose LLM provenance has gone stale — their prompt_hash or model
 // differs from the current ones (or is NULL, e.g. a legacy-v1 import). Drives
 // the re-scan "Re-decide moods" pass: re-LLM-tag only what a prompt/model change
@@ -1344,7 +1454,32 @@ export function allTaggedSampled(max: number, totalTagged: number): TrackRecord[
 // Stats
 // ---------------------------------------------------------------------------
 
+// stats() runs ~7 full-table scans/GROUP BYs (byMood alone is a json_each walk
+// over every row). It's polled every 30s by the admin Library panel and hit by
+// several admin pages (/library, /debug, /observatory) + /settings. Post-
+// analysis the fattened rows make each scan slow, so uncached these stacked up
+// on the synchronous DB thread and blocked listener polls (#723). A short TTL
+// collapses page-load / multi-tab bursts into one computation; 5s is well within
+// the display's freshness needs, and analysis writes don't change these tallies
+// anyway (they touch bpm/*_json, not moods/genre/energy).
+let statsCache: { at: number; value: LibraryStats } | null = null;
+const STATS_TTL_MS = 5000;
+
+// Drop the memoised stats() result — call when the DB handle is swapped
+// (reset/reload) so a fresh library never briefly serves the old one's tallies.
+export function invalidateStats(): void {
+  statsCache = null;
+}
+
 export function stats(): LibraryStats {
+  const now = Date.now();
+  if (statsCache && now - statsCache.at < STATS_TTL_MS) return statsCache.value;
+  const value = computeStats();
+  statsCache = { at: now, value };
+  return value;
+}
+
+function computeStats(): LibraryStats {
   const d = requireDb();
   const total =
     (d.prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as {
