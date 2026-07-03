@@ -434,7 +434,9 @@ export const SEARCH_PROVIDERS = ['duckduckgo', 'tavily', 'searxng'] as const;
 
 // Canonical mood vocabulary. Shared by the library tagger (music/tag-library.js
 // imports this as MOOD_VOCAB) and the Shows scheduler — a show's `mood`
-// overrides the autonomous dominantMood, so it must come from this list.
+// overrides the autonomous dominantMood, so a non-empty value must come from
+// this list. Empty string means "Any": the show pins no mood and the
+// autonomous chain (festival > weather > time) applies while it's on air.
 export const SHOW_MOODS = [
   'energetic',
   'calm',
@@ -1199,7 +1201,9 @@ function normalizeShows(raw: any, personaIds: string[]) {
     const name = typeof item.name === 'string' ? item.name.trim().slice(0, 60) : '';
     if (!name) continue;
     if (!personaIds.includes(item.personaId)) continue; // drop dangling owner
-    if (!SHOW_MOODS.includes(item.mood)) continue;
+    // Empty mood = "Any" (the autonomous mood applies on air). An unknown mood
+    // string is coerced to Any rather than dropping the whole show on the floor.
+    const mood = SHOW_MOODS.includes(item.mood) ? item.mood : '';
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
@@ -1221,10 +1225,13 @@ function normalizeShows(raw: any, personaIds: string[]) {
     const fromYear = Number.isFinite(item.fromYear) ? Math.trunc(item.fromYear) : null;
     const toYear = Number.isFinite(item.toYear) ? Math.trunc(item.toYear) : null;
     const energy = SHOW_ENERGY.includes(item.energy) ? item.energy : '';
-    // Opt-in: hard-filter the pick pool to `genre` instead of the default soft
-    // lean. Only meaningful when a genre is set; defaults off so existing shows
-    // and soft shows are byte-for-byte unchanged.
-    const genreStrict = item.genreStrict === true;
+    // Opt-in: hard-filter the pick pool to EVERY set music filter (mood, genre,
+    // era, energy) instead of the default soft leans. Only meaningful when at
+    // least one filter is set; defaults OFF. The legacy genre-only `genreStrict`
+    // is deliberately NOT carried over: the toggle now spans every filter, so
+    // auto-migrating an old genre-strict show would silently harden mood/era/
+    // energy too. Old shows come back soft; the operator re-opts into strict.
+    const filtersStrict = item.filtersStrict === true;
     // Per-show track-length override (seconds). null = inherit the station-wide
     // maxTrackSeconds; 0 = unlimited (opt this show back out of the cap so a
     // long-form mix show can air hour-long sets); >0 = this show's own cap.
@@ -1240,13 +1247,13 @@ function normalizeShows(raw: any, personaIds: string[]) {
       name,
       topic: typeof item.topic === 'string' ? item.topic.trim().slice(0, 1000) : '',
       personaId: item.personaId,
-      mood: item.mood,
+      mood,
       themeId,
       genre,
       fromYear,
       toYear,
       energy,
-      genreStrict,
+      filtersStrict,
       maxTrackSeconds,
       playlistIds,
       playlistStrict,
@@ -1982,8 +1989,12 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     if (!personaIds.includes(item.personaId)) {
       throw new Error(`shows[${i}].personaId must reference an existing persona`);
     }
-    if (!SHOW_MOODS.includes(item.mood)) {
-      throw new Error(`shows[${i}].mood must be one of: ${SHOW_MOODS.join(', ')}`);
+    // Empty/missing mood means "Any": the show pins no mood and the autonomous
+    // dominantMood chain (festival > weather > time) applies while it's on air.
+    // A non-empty mood must come from the canonical vocabulary.
+    const mood = item.mood == null || item.mood === '' ? '' : String(item.mood);
+    if (mood && !SHOW_MOODS.includes(mood)) {
+      throw new Error(`shows[${i}].mood must be empty (any) or one of: ${SHOW_MOODS.join(', ')}`);
     }
     // Optional per-show theme override. Empty/missing means "fall back to the
     // station default while this show is on air". The allow-set is built once
@@ -2005,8 +2016,12 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     if (energy && !SHOW_ENERGY.includes(energy)) {
       throw new Error(`shows[${i}].energy must be one of: ${SHOW_ENERGY.join(', ')}`);
     }
-    // Opt-in hard genre filter (vs the default soft lean). Boolean, defaults off.
-    const genreStrict = item.genreStrict === true;
+    // Opt-in hard filter across every set music constraint — mood, genre, era,
+    // energy (vs the default soft leans). Boolean, defaults OFF. The legacy
+    // genre-only `genreStrict` is deliberately NOT carried over (see the load
+    // path): the toggle now spans every filter, so migrating it would silently
+    // harden mood/era/energy an old show never opted into.
+    const filtersStrict = item.filtersStrict === true;
     const parseYear = (v, field) => {
       if (v == null || v === '') return null;
       const n = Number(v);
@@ -2062,7 +2077,7 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
-    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy, genreStrict, maxTrackSeconds, playlistIds, playlistStrict };
+    return { id, name, topic, personaId: item.personaId, mood, themeId, genre, fromYear, toYear, energy, filtersStrict, maxTrackSeconds, playlistIds, playlistStrict };
   });
 }
 
@@ -2879,10 +2894,10 @@ export function resolveActiveShow(date = new Date(), s = get()) {
     fromYear: Number.isFinite(show.fromYear) ? show.fromYear : null,
     toYear: Number.isFinite(show.toYear) ? show.toYear : null,
     energy: typeof show.energy === 'string' ? show.energy : '',
-    // When true (and a genre is set) the pick pool is hard-filtered to the
-    // genre instead of softly leaned; off-genre tracks only survive as a
-    // never-starve fallback. Defaults off.
-    genreStrict: show.genreStrict === true,
+    // When true, every set music filter (mood, genre, era, energy) is a hard
+    // filter on the pick pool instead of a soft lean; off-filter tracks only
+    // survive as a never-starve fallback. Defaults off.
+    filtersStrict: show.filtersStrict === true,
     // Per-show track-length cap override (seconds). null = inherit the station
     // default; 0 = unlimited; >0 = own cap. See effectiveMaxTrackSec().
     maxTrackSeconds: show.maxTrackSeconds != null ? show.maxTrackSeconds : null,

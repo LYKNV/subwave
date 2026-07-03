@@ -3,7 +3,8 @@
 // Shows scheduler — /admin/shows. A show is a reusable definition (name,
 // topic, owner persona, music mood). The weekly grid assigns a show to any
 // 1-hour cell, Mon–Sun. When the current hour has a show, its persona goes on
-// air, its mood overrides the autonomous mood, and its topic feeds the DJ.
+// air, its mood (when set — empty means Any/auto) overrides the autonomous
+// mood, and its topic feeds the DJ.
 // An empty hour = the station runs autonomously, as it does today.
 // Everything POSTs to /settings and applies live.
 //
@@ -64,6 +65,8 @@ interface Show {
   name: string;
   topic: string;
   personaId: string;
+  /** '' = Any — the show pins no mood; the autonomous mood (festival >
+   *  weather > time of day) applies while it's on air. */
   mood: string;
   /** Optional theme override — empty string means "fall back to the station
    *  default while this show is on air". Validated against the live theme
@@ -77,10 +80,12 @@ interface Show {
   fromYear: number | null;
   toYear: number | null;
   energy: string;
-  /** When true (and a genre is set) the genre becomes a HARD filter on the pick
-   *  pool instead of a soft lean — off-genre tracks only play as a last resort
-   *  to avoid silence. Defaults off. */
-  genreStrict: boolean;
+  /** When true (and ≥1 music filter is set) EVERY set filter — mood, genre,
+   *  era, energy — becomes a HARD filter on the pick pool instead of a soft
+   *  lean; off-filter tracks only play as a last resort to avoid silence.
+   *  Defaults off. (Replaces the genre-only `genreStrict`; the controller does
+   *  NOT auto-migrate legacy strict shows — they load soft, opt back in here.) */
+  filtersStrict: boolean;
   /** Per-show track-length cap (seconds). null = inherit the station default;
    *  0 = unlimited (opt this show out of the cap so it can air long mixes);
    *  >0 = this show's own cap. */
@@ -195,7 +200,7 @@ function NowCard({ label, accent, slotHour, show, color, personaLabel }: NowCard
       </div>
       <div className="text-[11px] text-muted">
         {show
-          ? <>persona · {personaLabel} · mood · {show.mood}{showFilterSummary(show)}</>
+          ? <>persona · {personaLabel} · mood · {show.mood || 'any'}{showFilterSummary(show)}</>
           : 'station runs on its own picker'}
       </div>
     </div>
@@ -203,14 +208,17 @@ function NowCard({ label, accent, slotHour, show, color, personaLabel }: NowCard
 }
 
 // Compact " · genre · 80s · high" suffix for the show summary lines, omitting
-// whatever the show doesn't pin. A strict genre is flagged inline so the hard
+// whatever the show doesn't pin. Strict filters are flagged inline so the hard
 // lock is visible at a glance.
-function showFilterSummary(s: { genre: string; fromYear: number | null; toYear: number | null; energy: string; genreStrict?: boolean; maxTrackSeconds?: number | null; playlistIds?: string[]; playlistStrict?: boolean }): string {
-  const genre = s.genre ? (s.genreStrict ? `${s.genre} (strict)` : s.genre) : '';
+function showFilterSummary(s: { mood?: string; genre: string; fromYear: number | null; toYear: number | null; energy: string; filtersStrict?: boolean; maxTrackSeconds?: number | null; playlistIds?: string[]; playlistStrict?: boolean }): string {
   const len = s.maxTrackSeconds == null ? '' : s.maxTrackSeconds === 0 ? 'any length' : `≤${s.maxTrackSeconds}s`;
   const nPl = s.playlistIds?.length ?? 0;
   const playlist = nPl ? `${nPl} playlist${nPl > 1 ? 's' : ''}${s.playlistStrict ? ' (strict)' : ''}` : '';
-  const bits = [genre, decadeLabelOf(s), s.energy, len, playlist].filter(Boolean);
+  // The strict chip covers every music filter (mood included) — only shown when
+  // there's actually a filter for it to bite on.
+  const strict = s.filtersStrict && (s.mood || s.genre || s.energy || s.fromYear != null || s.toYear != null)
+    ? 'strict filters' : '';
+  const bits = [s.genre, decadeLabelOf(s), s.energy, strict, len, playlist].filter(Boolean);
   return bits.length ? ` · ${bits.join(' · ')}` : '';
 }
 
@@ -232,8 +240,15 @@ function abbrev(name: string): string {
 }
 
 function showValid(s: Show): boolean {
+  // mood is deliberately not required — '' means "Any" (autonomous mood).
   return s.name.trim().length >= 1 && s.name.trim().length <= NAME_MAX
-    && !!s.personaId && !!s.mood && s.topic.trim().length <= TOPIC_MAX;
+    && !!s.personaId && s.topic.trim().length <= TOPIC_MAX;
+}
+
+// At least one music filter set — the Strict filter toggle only means
+// something when there's a filter for it to harden.
+function hasAnyMusicFilter(s: Show): boolean {
+  return !!(s.mood || s.genre.trim() || s.energy || s.fromYear != null || s.toYear != null);
 }
 
 export default function ShowsPanel() {
@@ -365,7 +380,7 @@ export default function ShowsPanel() {
           fromYear: s.fromYear ?? null,
           toYear: s.toYear ?? null,
           energy: s.energy ?? '',
-          genreStrict: s.genreStrict ?? false,
+          filtersStrict: s.filtersStrict ?? false,
           maxTrackSeconds: s.maxTrackSeconds ?? null,
           playlistIds: Array.isArray(s.playlistIds) ? s.playlistIds : [],
           playlistStrict: s.playlistStrict ?? false,
@@ -460,9 +475,9 @@ export default function ShowsPanel() {
         ...f,
         shows: [...f.shows, {
           id, name: '', topic: '',
-          personaId: personas[0]?.id || '', mood: moods[0] || '',
+          personaId: personas[0]?.id || '', mood: '',
           themeId: '', genre: '', fromYear: null, toYear: null, energy: '',
-          genreStrict: false, maxTrackSeconds: null,
+          filtersStrict: false, maxTrackSeconds: null,
           playlistIds: [], playlistStrict: false,
         }],
       };
@@ -472,7 +487,7 @@ export default function ShowsPanel() {
     scrollToEditorRef.current = true;
     setCreatingId(id);
     setFocusIdx(newIdx);
-    notify.ok('New show added — give it a name, persona and mood, then Save schedule.');
+    notify.ok('New show added — give it a name and a persona, then Save schedule.');
   };
 
   const removeShow = (i: number) => {
@@ -653,7 +668,8 @@ export default function ShowsPanel() {
             personaId: s.personaId, mood: s.mood,
             themeId: s.themeId || '',
             genre: s.genre.trim(), fromYear: s.fromYear, toYear: s.toYear, energy: s.energy || '',
-            genreStrict: !!s.genre.trim() && s.genreStrict,
+            // Strict only means something with at least one music filter set.
+            filtersStrict: hasAnyMusicFilter(s) && s.filtersStrict,
             maxTrackSeconds: s.maxTrackSeconds,
             playlistIds: s.playlistIds || [],
             // Strict only means something with at least one playlist pinned.
@@ -1020,7 +1036,7 @@ function ShowEditor({
             />
             <span className="text-[11px] text-muted">
               {!valid
-                ? <span className="text-[var(--danger)]">this show needs a name, a persona, and a mood</span>
+                ? <span className="text-[var(--danger)]">this show needs a name and a persona</span>
                 : !allShowsOk
                   ? <span className="text-[var(--danger)]">another show in the list is incomplete</span>
                   : 'saves all shows + the weekly grid · applies live on the next pick'}
@@ -1091,14 +1107,15 @@ function ShowEditor({
             <Field>
               <Label>music mood</Label>
               <Select
-                value={show.mood || undefined}
-                onValueChange={val => update({ mood: val })}
+                value={show.mood || ANY_SENTINEL}
+                onValueChange={val => update({ mood: val === ANY_SENTINEL ? '' : val })}
               >
                 <SelectTrigger>
-                  <SelectValue placeholder="— pick mood —" />
+                  <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
+                    <SelectItem value={ANY_SENTINEL}>Any (auto)</SelectItem>
                     {moods.map(m => <SelectItem key={m} value={m}>{m}</SelectItem>)}
                   </SelectGroup>
                 </SelectContent>
@@ -1165,26 +1182,31 @@ function ShowEditor({
           <div className="flex items-start gap-3">
             <div className="pt-0.5">
               <Toggle
-                on={show.genreStrict}
-                disabled={!show.genre.trim()}
-                onClick={() => update({ genreStrict: !show.genreStrict })}
+                on={show.filtersStrict}
+                disabled={!hasAnyMusicFilter(show)}
+                onClick={() => update({ filtersStrict: !show.filtersStrict })}
               />
             </div>
             <div className="grid gap-0.5">
-              <Label className={!show.genre.trim() ? 'opacity-40' : undefined}>
-                Strict genre
+              <Label className={!hasAnyMusicFilter(show) ? 'opacity-40' : undefined}>
+                Strict filter
               </Label>
               <span className="field-hint">
-                Stay strictly within this genre (off-genre tracks only as a last
-                resort to avoid silence). Needs a genre lean set above.
+                Hard-enforce every filter set above — mood, era, energy and
+                genre. Off-filter tracks only play as a last resort to avoid
+                silence. When off, they&apos;re all soft leans the DJ can break
+                for flow. Needs at least one filter set.
               </span>
             </div>
           </div>
 
           <span className="field-hint -mt-1.5">
-            Optional soft music steer for this show: a genre, an era, an energy
-            band, or any mix. The DJ leans toward these but can break them for
-            flow; leave blank to let the topic and mood drive selection.
+            Optional music steer for this show: a mood, a genre, an era, an
+            energy band, or any mix. Soft by default — the DJ leans toward them
+            but can break them for flow; Strict filter above turns every set
+            one into a hard rule. Mood set to Any (auto) follows the
+            station&apos;s autonomous mood — time of day, weather, festivals —
+            instead of pinning one.
           </span>
 
           <Field>
@@ -1461,7 +1483,7 @@ function GridCell({
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
       title={
-        (show ? `${show.name} (${show.mood})` : `${label} ${String(hour).padStart(2, '0')}:00, empty`)
+        (show ? `${show.name}${show.mood ? ` (${show.mood})` : ''}` : `${label} ${String(hour).padStart(2, '0')}:00, empty`)
         + (isNow ? ' · on air now' : '')
       }
       className={cn(
@@ -1516,7 +1538,7 @@ function ShowDefRow({ show: s, index: i, ok, hrs, personaLabel, onEdit }: ShowDe
       <div className="grid grid-cols-[1fr_auto] items-center gap-4">
         <div className="min-w-0">
           <div className="text-[12px] leading-[1.6] text-muted">
-            persona · {personaLabel} · mood · {s.mood || '—'}{showFilterSummary(s)}
+            persona · {personaLabel} · mood · {s.mood || 'any'}{showFilterSummary(s)}
           </div>
           {s.topic.trim() && (
             <div className="mt-1 line-clamp-2 text-[12px] leading-[1.6] text-muted italic">

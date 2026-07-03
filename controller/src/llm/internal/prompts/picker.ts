@@ -24,40 +24,49 @@ export function effectsGuidance(): string {
   return `\n\nTRANSITION EFFECTS ("transition") — part of your craft, not a gimmick: a working DJ fires one every few songs when the moment earns it. Actively look for the moment on every pick; when you spot one, flag it — the station validates your choice against the audio analysis and skips ones that don't land. The PACING is entirely yours: there is no rate limit, so be the taste — an effect hits hardest coming out of a stretch of clean blends, so let a few ordinary transitions breathe between them. VARY THE TWO: they are equals in your kit, and if your recent picks leaned on one, reach for the other.\n- "washout": your pick dissolves into a pulsing, tempo-synced echo tail as it ENDS, ringing out into whatever follows. Fire it whenever your pick is the natural END of something: the last track of a run of similar songs, a song with a big or atmospheric ending, anything dreamy/hazy/anthemic, or when the NEXT stretch will change direction. In a normal set several tracks qualify — this is your workhorse exit move, not a rarity.\n- "sweep": the track playing before your pick sinks under a slowly closing filter across the blend while your pick rises clean underneath. Use it on a genuine gear-change — a clear jump in energy, tempo, or mood (it only fires when the tracks measurably clash).\n- "blend": spectral handover — across a long crossfade the outgoing track hands its bass, then its mids, to your pick, keeping only its highs to the end, while your pick arrives lows-first underneath. The two feel like ONE continuous piece of music. Use it for same-lane picks: similar tempo, energy, or mood (it only fires when the tracks measurably fit).\nUse "normal" or null only when nothing above applies.`;
 }
 
-export type ShowMusic = { name: string; topic: string; genre?: string; fromYear?: number | null; toYear?: number | null; energy?: string; genreStrict?: boolean };
+export type ShowMusic = { name: string; topic: string; mood?: string; genre?: string; fromYear?: number | null; toYear?: number | null; energy?: string; filtersStrict?: boolean };
 
-// A show can pin a genre, decade and/or energy band on track selection. Genre
-// is a SOFT lean by default, or a HARD constraint when `genreStrict` is on;
-// decade and energy are always soft. Render it as one prompt line shared by both
-// pick paths (the pool picker here and the conversational agent in
+// A show can pin a mood, genre, decade and/or energy band on track selection.
+// All are SOFT leans by default, or HARD constraints when `filtersStrict` is on
+// (one toggle governs every set filter). Render it as one prompt line shared by
+// both pick paths (the pool picker here and the conversational agent in
 // broadcast/dj-agent.ts). Returns '' when the show pins nothing, so callers can
 // append it unconditionally.
 export function showMusicLean(show?: ShowMusic | null): string {
   if (!show) return '';
-  // Strict only bites when there's actually a genre to lock to.
-  const strict = !!(show.genreStrict && show.genre);
-  // Soft preferences (the genre lean is dropped here when strict — it becomes a
-  // hard rule on its own line below).
-  const parts: string[] = [];
-  if (show.genre && !strict) parts.push(`lean toward ${show.genre}`);
-  if (show.fromYear != null || show.toYear != null) {
+  const eraText = (() => {
+    if (show.fromYear == null && show.toYear == null) return '';
     const from = show.fromYear != null ? String(show.fromYear) : '';
     const to = show.toYear != null ? String(show.toYear) : '';
-    parts.push(from && to ? `prefer tracks from ${from}–${to}` : `prefer tracks ${from ? `from ${from} onward` : `up to ${to}`}`);
-  }
-  if (show.energy) parts.push(`favour ${show.energy}-energy tracks`);
+    return from && to ? `${from}–${to}` : from ? `${from} onward` : `up to ${to}`;
+  })();
+  // Strict only bites when there's actually a filter to lock to.
+  const hasFilter = !!(show.genre || show.mood || show.energy || eraText);
+  const strict = !!(show.filtersStrict && hasFilter);
 
-  // The hard genre rule. Track selection is now code-enforced for strict shows
-  // (preferGenre in both pick paths), so this is lean: it governs the DJ's TALK
-  // and the never-starve fallback case (where off-genre tracks can still surface),
-  // not the candidate list.
-  const lock = strict
-    ? `\n\nThis show is ${show.genre}-only — keep your picks and your talk in ${show.genre}; only step outside if there is genuinely no ${show.genre} track left to play (never leave dead air).`
-    : '';
-  const soft = parts.length
+  if (strict) {
+    // The hard rule. Track selection is code-enforced for strict shows (the
+    // prefer* locks in both pick paths), so this is lean: it governs the DJ's
+    // TALK and the never-starve fallback case (where off-filter tracks can
+    // still surface), not the candidate list. Mood joins the lock here — soft
+    // shows carry mood through the room-context prompt instead.
+    const locks: string[] = [];
+    if (show.genre) locks.push(`${show.genre} tracks`);
+    if (eraText) locks.push(`the ${eraText} era`);
+    if (show.mood) locks.push(`the ${show.mood} mood`);
+    if (show.energy) locks.push(`${show.energy}-energy tracks`);
+    return `\n\nThis show's music filters are STRICT — every pick must fit: ${locks.join('; ')}. Keep your talk inside them too; only step outside if there is genuinely nothing left that fits (never leave dead air).`;
+  }
+
+  // Soft preferences. Mood is deliberately absent — it steers the room context
+  // (dominantMood) rather than reading as a per-track preference.
+  const parts: string[] = [];
+  if (show.genre) parts.push(`lean toward ${show.genre}`);
+  if (eraText) parts.push(`prefer tracks from ${eraText}`);
+  if (show.energy) parts.push(`favour ${show.energy}-energy tracks`);
+  return parts.length
     ? `\n\nMusic steer for this show — ${parts.join('; ')}. These are preferences, not hard filters: break them only when the flow genuinely demands it.`
     : '';
-  return `${lock}${soft}`;
 }
 
 function pickerSystem(show?: ShowMusic | null) {
