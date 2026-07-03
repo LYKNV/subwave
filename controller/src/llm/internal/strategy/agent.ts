@@ -33,7 +33,11 @@ import { stripThinking, extractJson, usageOf, flattenToolCalls, failureDiagnosti
 import { needsToolCallObject, providerOptions, samplingWithNumCtx, forcedToolChoice } from '../provider/capabilities.js';
 import { objectViaToolCall } from './object-via-tool.js';
 import { agentPlan } from './plan.js';
+import { resolveMaxOutputTokens } from '../../../settings.js';
 
+// Operator-overridable via settings.llm.maxOutputTokens (issue #712); 0 keeps
+// this default. Resolved here and threaded down to objectViaToolCall and the
+// ToolLoopAgent, so the cap is uniform across the agent's sub-paths.
 const MAX_TOKENS_AGENT = 8000;
 
 // prepareStep pins activeTools so EVERY step is a cornered single-purpose
@@ -94,9 +98,21 @@ export async function djAgent({
   schema,
   maxSteps = 8,
   temperature = 0.6,
-  maxOutputTokens = MAX_TOKENS_AGENT,
+  maxOutputTokens = resolveMaxOutputTokens(MAX_TOKENS_AGENT),
   kind = 'sdk.djAgent',
   timeoutMs,
+  // Optional caller-supplied acceptance check on the native path's object
+  // (e.g. "the picked id must be one a discovery tool actually surfaced").
+  // The native path is the only branch with no structural control over WHAT
+  // the model emits — Output.object + auto tool choice validates the schema
+  // shape, not the content — so a fabricated-but-well-formed answer sails
+  // through where the done-tool harness would have cornered the model.
+  // A validate miss falls through to the done-tool path instead of returning
+  // an object the caller can only throw away (observed: gpt-5-mini invented
+  // 7/32 pick ids after an empty tool result, each costing a pool fallback +
+  // a breaker increment). Not applied to the done-tool/recovery results: the
+  // caller repairs those itself with the full `seen` context.
+  validate,
 }: any): Promise<{ object: any; steps: number; toolCalls: any[] }> {
   return withFailover(
     kind,
@@ -157,7 +173,13 @@ export async function djAgent({
             // the caller resolves the id against `seen`, which only tool calls
             // populate, so an explored pick is also a resolvable one.
             const explored = (nr.steps || []).some((s: any) => (s.toolCalls || []).length > 0);
-            if (nObj && explored) {
+            // Caller acceptance check (see the validate param note). A throwing
+            // validator counts as a miss, never as an agent failure.
+            let accepted = true;
+            if (nObj && explored && typeof validate === 'function') {
+              try { accepted = !!validate(nObj); } catch { accepted = false; }
+            }
+            if (nObj && explored && accepted) {
               const toolCalls = flattenToolCalls(nr);
               return {
                 value: { object: nObj, steps: nSteps, toolCalls },
@@ -167,7 +189,7 @@ export async function djAgent({
                 extra: { system, messages, toolCalls, steps: nSteps, response: JSON.stringify(nObj, null, 2) },
               };
             }
-            console.log(`[${kind}] native output produced no usable pick (explored=${explored}) — falling back to done-tool`);
+            console.log(`[${kind}] native output produced no usable pick (explored=${explored}, accepted=${accepted}) — falling back to done-tool`);
           } catch (e: any) {
             console.log(`[${kind}] native output failed (${e?.message}) — falling back to done-tool`);
           }

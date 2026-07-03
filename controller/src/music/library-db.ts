@@ -234,6 +234,10 @@ export function close(): void {
     db.close();
     db = null;
     currentEmbeddingDim = null;
+    // reload()/restoreFromFile() both drop the handle through here, so a
+    // reopened (possibly restored-from-backup) library never serves the
+    // previous handle's cached tallies.
+    invalidateStats();
   }
 }
 
@@ -256,6 +260,20 @@ export async function backup(destPath: string): Promise<void> {
 export async function restoreFromFile(srcPath: string): Promise<void> {
   close();
   await copyFile(srcPath, DB_PATH);
+  await rm(`${DB_PATH}-wal`, { force: true });
+  await rm(`${DB_PATH}-shm`, { force: true });
+}
+
+// Delete the entire on-disk DB — every track row, mood/energy tag, text +
+// audio embedding, acoustic-analysis column, and enrichment cache — plus the
+// WAL/SHM sidecars, so the next open() recreates an empty schema from scratch.
+// Mirrors restoreFromFile()'s close→swap-file→drop-sidecars shape, and like it
+// leaves the reopen to the caller (music/library.ts:reset()). This is the
+// "start fresh" wipe behind the admin library Reset action — irreversible short
+// of restoring a backup.
+export async function reset(): Promise<void> {
+  close();
+  await rm(DB_PATH, { force: true });
   await rm(`${DB_PATH}-wal`, { force: true });
   await rm(`${DB_PATH}-shm`, { force: true });
 }
@@ -396,40 +414,74 @@ async function migrate(embeddingDim: number, reseed = false, adoptStoredDim = fa
     d.pragma('user_version = 9');
   }
 
-  // The vec0 virtual table carries the embedding dim in its schema. If the
-  // stored dim doesn't match the requested one, the caller asked for a model
-  // swap — that's a --reseed operation, not an auto-migration.
+  if (userVersion < 10) {
+    // Task-prefix mode of the text-embedding index: 'plain' (texts embedded
+    // bare) or 'prefixed' (embedded with the model's document prefix, e.g.
+    // nomic's `search_document:`). NULL (legacy rows) = 'plain'. Lives with the
+    // index provenance because query embeds must match how the documents were
+    // embedded (music/embeddings.ts resolveIndexTextMode).
+    runDdl(d, `ALTER TABLE embedding_meta ADD COLUMN text_mode TEXT;`);
+    d.pragma('user_version = 10');
+  }
+
+  // Reconcile the requested embedding dim against what physically exists.
+  //
+  // The vec0 table's `FLOAT[N]` schema is the authority for what inserts accept —
+  // NOT embedding_meta, which is written separately (by the tagger, post-probe)
+  // and can lag the table. Keying off the meta row alone misses the case that
+  // bit qwen3-embedding users: the live controller creates track_vectors at the
+  // name→dim GUESS (resolveEmbeddingDim → 768 for an unknown model) on a fresh
+  // DB and writes NO meta row; the tagger then probes the real dim (1024) but,
+  // because the meta was absent, the old check neither recreated the table nor
+  // errored — so every embed insert crashed with "Expected 768 dimensions but
+  // received 1024", and wiping the DB didn't help (the controller re-created the
+  // 768 table on the next boot). Read the real width from the table itself.
   const meta = d.prepare('SELECT model, dim FROM embedding_meta WHERE pk = 1').get() as
     | { model: string; dim: number }
     | undefined;
+  const tableDim = vecTableDim(d); // null when track_vectors doesn't exist yet
   // Effective dim for the vec0 table. Defaults to what the caller asked for; the
-  // branches below may adopt the stored dim or reseed at the new dim instead.
+  // branches below may adopt the on-disk dim or drop+recreate at the new dim.
   let effectiveDim = embeddingDim;
-  if (meta && meta.dim !== embeddingDim) {
+  if (tableDim !== null && tableDim !== embeddingDim) {
+    const modelHint = meta?.model ? ` (model: ${meta.model})` : '';
     if (adoptStoredDim) {
-      // Live controller: the stored vectors are authoritative. Honour their dim
-      // so the picker keeps working off a tagged index even when the model name
+      // Live controller: the physical index is authoritative. Honour its dim so
+      // the picker keeps working off a tagged index even when the model name
       // resolves to a different default. A real model swap is reconciled by the
       // tagger's --reseed path, not silently here (#319).
       console.warn(
-        `[library-db] adopting stored embedding dim ${meta.dim} (model: ${meta.model}); ` +
+        `[library-db] adopting on-disk embedding dim ${tableDim}${modelHint}; ` +
           `caller requested ${embeddingDim}. Re-tag with --reseed to switch models.`,
       );
-      effectiveDim = meta.dim;
+      effectiveDim = tableDim;
+    } else if (vecCount(d) === 0) {
+      // Empty index at the wrong width — nothing to protect, so recreate it at
+      // the requested dim without demanding --reseed. This self-heals the
+      // guessed-dim table the live controller created before the tagger probed
+      // the real one, so a plain tag run works for any embedding model / dim.
+      console.warn(
+        `[library-db] track_vectors is empty at ${tableDim}-d${modelHint}; ` +
+          `recreating at ${embeddingDim}-d for the current embedding model`,
+      );
+      runDdl(d, 'DROP TABLE IF EXISTS track_vectors');
+      d.prepare('DELETE FROM embedding_meta WHERE pk = 1').run();
     } else if (!reseed) {
       throw new Error(
-        `embedding dim mismatch: state/library.db has ${meta.dim}-d vectors (model: ${meta.model}), ` +
-          `but the current settings ask for ${embeddingDim}-d. ` +
-          `Run \`npm run tag -- --reseed\` to re-embed.`,
+        `embedding dim mismatch: state/library.db has ${tableDim}-d vectors${modelHint}, ` +
+          `but the current embedding model needs ${embeddingDim}-d. You changed the embedding ` +
+          `model, so the library must be re-embedded to switch. In the admin UI: Library → ` +
+          `Start tagging → Re-scan tab → “Re-embed all tracks” (your mood tags are kept). ` +
+          `Or from the CLI: \`npm run tag -- --reseed\`.`,
       );
     } else {
-      // Reseed across a model/dim change: the stored vectors are unusable at the
-      // new dim, so drop them (the table is recreated at `effectiveDim` just
-      // below) and clear the stale meta row so a later setEmbeddingMeta() seeds
-      // it fresh and the next open() sees a matching (or absent) dim.
+      // Reseed across a model/dim change on a POPULATED index: the stored vectors
+      // are unusable at the new dim, so drop them (the table is recreated at
+      // `effectiveDim` just below) and clear the stale meta row so a later
+      // setEmbeddingMeta() seeds it fresh and the next open() sees a matching dim.
       console.warn(
-        `[library-db] reseed: embedding dim ${meta.dim}→${embeddingDim} ` +
-          `(model: ${meta.model}); dropping vectors for re-embed`,
+        `[library-db] reseed: embedding dim ${tableDim}→${embeddingDim}${modelHint}; ` +
+          `dropping vectors for re-embed`,
       );
       runDdl(d, 'DROP TABLE IF EXISTS track_vectors');
       d.prepare('DELETE FROM embedding_meta WHERE pk = 1').run();
@@ -467,6 +519,25 @@ async function migrate(embeddingDim: number, reseed = false, adoptStoredDim = fa
 // identical to db.exec(sql).
 function runDdl(d: Database.Database, sql: string): void {
   (d as any).exec(sql);
+}
+
+// The embedding width baked into the track_vectors vec0 schema — the authority
+// for what inserts accept (embedding_meta is written separately and can lag).
+// Parsed from the stored CREATE statement; null when the table doesn't exist.
+function vecTableDim(d: Database.Database): number | null {
+  const row = d
+    .prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='track_vectors'`)
+    .get() as { sql: string | null } | undefined;
+  if (!row?.sql) return null;
+  const m = row.sql.match(/embedding\s+FLOAT\[(\d+)\]/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+// Row count of the text-vector index. Used to decide whether a dim mismatch can
+// self-heal (empty table → free to recreate) or must gate behind --reseed
+// (populated index → the operator's vectors are at stake).
+function vecCount(d: Database.Database): number {
+  return (d.prepare('SELECT COUNT(*) AS n FROM track_vectors').get() as { n: number }).n;
 }
 
 // ---------------------------------------------------------------------------
@@ -545,20 +616,39 @@ async function archiveMoodsJson(): Promise<void> {
 // Embedding meta
 // ---------------------------------------------------------------------------
 
-export function getEmbeddingMeta(): { model: string; dim: number } | null {
+// `textMode` records whether the vectors were embedded with the model's
+// document prefix ('prefixed') or bare ('plain'); null = legacy row from
+// before mode tracking (equivalent to 'plain' — see resolveIndexTextMode).
+export type EmbeddingTextMode = 'plain' | 'prefixed';
+
+export function getEmbeddingMeta(): {
+  model: string;
+  dim: number;
+  textMode: EmbeddingTextMode | null;
+} | null {
   const row = requireDb()
-    .prepare('SELECT model, dim FROM embedding_meta WHERE pk = 1')
-    .get() as { model: string; dim: number } | undefined;
-  return row || null;
+    .prepare('SELECT model, dim, text_mode FROM embedding_meta WHERE pk = 1')
+    .get() as { model: string; dim: number; text_mode: string | null } | undefined;
+  if (!row) return null;
+  return {
+    model: row.model,
+    dim: row.dim,
+    textMode: row.text_mode === 'prefixed' || row.text_mode === 'plain' ? row.text_mode : null,
+  };
 }
 
-export function setEmbeddingMeta(model: string, dim: number): void {
+export function setEmbeddingMeta(
+  model: string,
+  dim: number,
+  textMode: EmbeddingTextMode | null = null,
+): void {
   requireDb()
     .prepare(
-      `INSERT INTO embedding_meta (pk, model, dim, set_at) VALUES (1, ?, ?, ?)
-       ON CONFLICT(pk) DO UPDATE SET model = excluded.model, dim = excluded.dim, set_at = excluded.set_at`,
+      `INSERT INTO embedding_meta (pk, model, dim, set_at, text_mode) VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(pk) DO UPDATE SET model = excluded.model, dim = excluded.dim,
+         set_at = excluded.set_at, text_mode = excluded.text_mode`,
     )
-    .run(model, dim, new Date().toISOString());
+    .run(model, dim, new Date().toISOString(), textMode);
 }
 
 // Audio-embedding provenance — which CLAP model wrote the current audio
@@ -589,6 +679,50 @@ export function getTrack(id: string): TrackRecord | null {
     .prepare(`SELECT * FROM tracks WHERE id = ?`)
     .get(id) as any;
   return row ? rowToTrack(row) : null;
+}
+
+export interface TrackLite {
+  genre: string | null;
+  bpm: number | null;
+  musicalKey: string | null;
+  moods: string[];
+  energy: string | null;
+  year: number | null;
+}
+
+// Lean read for the /now-playing hot path (polled every ~5s by every listener).
+// Selects only the light scalar columns the player's metadata strip renders,
+// skipping the heavy acoustic *_json blobs (structure/pace/beats/bars/key/vocal
+// ranges) that a full getTrack() → rowToTrack() SELECTs and JSON.parses on every
+// call. After acoustic analysis those blobs are populated and fat, so parsing
+// them per poll — on better-sqlite3's single synchronous thread — stalled every
+// concurrent HTTP response, making the whole UI sluggish (#723).
+export function getTrackLite(id: string): TrackLite | null {
+  const row = requireDb()
+    .prepare(`SELECT genre, bpm, musical_key, moods, energy, year FROM tracks WHERE id = ?`)
+    .get(id) as any;
+  if (!row) return null;
+  return {
+    genre: row.genre ?? null,
+    bpm: row.bpm ?? null,
+    musicalKey: row.musical_key ?? null,
+    moods: row.moods ? safeParseArray(row.moods) : [],
+    energy: row.energy ?? null,
+    year: row.year ?? null,
+  };
+}
+
+// COUNT(*) of tagged tracks — the O(1)-ish query behind the coverage meter's
+// "tagged" tally. Replaces allTaggedIds().length, which materialised a ~30k-
+// element JS id array on every coverage poll only to read its .length (#723).
+// Predicate is `moods IS NOT NULL` to match allTaggedIds() exactly (NOT the
+// stricter SQL_HAS_MOODS) so the coverage percentage is unchanged.
+export function countTagged(): number {
+  return (
+    requireDb().prepare(`SELECT COUNT(*) AS n FROM tracks WHERE moods IS NOT NULL`).get() as {
+      n: number;
+    }
+  ).n;
 }
 
 export function hasTags(id: string): boolean {
@@ -761,13 +895,18 @@ export function needsAnalysisIds(limit?: number): string[] {
   return rows.map(r => r.id);
 }
 
-export function clearAnalysis(): void {
+// Drop the acoustic analysis so a --re-analyze can recompute it. `keepVocal`
+// preserves vocal_ranges_json — used when re-analysing bpm/key + sounds-like
+// WITHOUT redoing the (very slow) Demucs vocal pass, so existing vocal data
+// isn't wiped and left NULL (it wouldn't be rebuilt that run). #646-adjacent.
+export function clearAnalysis(opts: { keepVocal?: boolean } = {}): void {
   const d = requireDb();
+  const vocalCol = opts.keepVocal ? '' : ' vocal_ranges_json = NULL,';
   d.prepare(
     `UPDATE tracks SET bpm = NULL, musical_key = NULL, intro_ms = NULL,
       analysis_confidence = NULL, loudness_lufs = NULL, peak_db = NULL,
       structure_json = NULL, pace_json = NULL, beats_json = NULL, bars_json = NULL,
-      key_ranges_json = NULL, vocal_ranges_json = NULL, analysis_version = NULL`,
+      key_ranges_json = NULL,${vocalCol} analysis_version = NULL`,
   ).run();
   // The audio (CLAP) vectors are written in the same pass, so a --re-analyze
   // that redoes bpm/key drops them too — the next pass re-embeds from scratch.
@@ -942,6 +1081,15 @@ export function audioVectorCount(): number {
   }).n;
 }
 
+// Tracks with vocal-activity analysis done — vocal_ranges_json IS NOT NULL,
+// where a stored "[]" (analysed instrumental) counts as done. The inverse of
+// needsVocalIds, surfaced as a coverage meter (#646).
+export function vocalAnalyzedCount(): number {
+  return (requireDb().prepare(
+    'SELECT COUNT(*) AS n FROM tracks WHERE vocal_ranges_json IS NOT NULL',
+  ).get() as { n: number }).n;
+}
+
 // Ids that have no audio vector yet (never embedded). Resumable, ordered for
 // stable resumption, independent of the bpm/key analysis scope so the audio
 // backfill can run on its own cadence. LEFT JOIN where the vector row is absent.
@@ -1013,6 +1161,17 @@ export function analysedCount(): number {
   }).n;
 }
 
+// IDs of tracks that already carry acoustic analysis (bpm filled). The re-scan
+// "Re-analyse" scope — capture BEFORE clearAnalysis() so the redo targets only
+// the previously-analysed population, not the whole (mostly un-analysed) library.
+export function analysedIds(): string[] {
+  return (
+    requireDb()
+      .prepare('SELECT id FROM tracks WHERE bpm IS NOT NULL ORDER BY id')
+      .all() as Array<{ id: string }>
+  ).map(r => r.id);
+}
+
 // ---------------------------------------------------------------------------
 // Mood-keyed reads (drop-in replacements for the old library.ts in-memory loops)
 // ---------------------------------------------------------------------------
@@ -1044,6 +1203,54 @@ export function allTaggedIds(): string[] {
   ).map(r => r.id);
 }
 
+// Directly-decided tags with a vector — the trusted sample for the propagation
+// self-check (music/propagation-eval.ts). Excludes 'propagated' rows (they ARE
+// the propagation output — scoring against them would be circular) and
+// vectorless rows (KNN can't run). Null source = legacy import, decided by an
+// LLM at the time, so it counts.
+export function trustedTaggedIds(): string[] {
+  return (
+    requireDb()
+      .prepare(
+        `SELECT id FROM tracks
+          WHERE ${SQL_HAS_MOODS}
+            AND (source IS NULL OR source != 'propagated')
+            AND id IN (SELECT id FROM track_vectors)
+          ORDER BY id`,
+      )
+      .all() as Array<{ id: string }>
+  ).map(r => r.id);
+}
+
+// Tagged rows whose LLM provenance has gone stale — their prompt_hash or model
+// differs from the current ones (or is NULL, e.g. a legacy-v1 import). Drives
+// the re-scan "Re-decide moods" pass: re-LLM-tag only what a prompt/model change
+// invalidated. NEVER source='manual' — operator-set tags are ground truth and
+// don't go stale. With no prompt/model change this returns [], so re-decide is a
+// clean no-op. `IS NOT ?` is SQLite's null-safe inequality (NULL counts stale).
+export function staleTaggedIds(promptHash: string, model: string, limit?: number): string[] {
+  const sql =
+    `SELECT id FROM tracks
+       WHERE ${SQL_HAS_MOODS}
+         AND (source IS NULL OR source != 'manual')
+         AND (prompt_hash IS NOT ? OR model IS NOT ?)
+       ORDER BY id` + (limit && limit > 0 ? ` LIMIT ${Math.floor(limit)}` : '');
+  const rows = requireDb().prepare(sql).all(promptHash, model) as Array<{ id: string }>;
+  return rows.map(r => r.id);
+}
+
+// Tracks that already carry enrichment (Last.fm tags / lyrics fetched at least
+// once). The re-scan "Re-enrich" scope — redo metadata only for what was done,
+// never the untouched remainder. Distinct from the raw --re-enrich widening,
+// which spans the full live catalogue (issue #531).
+export function enrichedIds(): string[] {
+  return (
+    requireDb()
+      .prepare('SELECT id FROM tracks WHERE enriched_at IS NOT NULL')
+      .all() as Array<{ id: string }>
+  ).map(r => r.id);
+}
+
 export function untaggedIds(limit?: number): string[] {
   const q = limit
     ? `SELECT id FROM tracks WHERE ${SQL_NO_MOODS} LIMIT ?`
@@ -1060,6 +1267,17 @@ export function unembeddedIds(limit?: number): string[] {
   const stmt = requireDb().prepare(q);
   const rows = (limit ? stmt.all(limit) : stmt.all()) as Array<{ id: string }>;
   return rows.map(r => r.id);
+}
+
+// Tracks that currently have a vector. The re-scan "Re-embed" scope — capture
+// this BEFORE dropVectors() (after the drop every track looks unembedded), then
+// rebuild exactly these, never the untouched untagged remainder.
+export function embeddedIds(): string[] {
+  return (
+    requireDb()
+      .prepare('SELECT id FROM track_vectors')
+      .all() as Array<{ id: string }>
+  ).map(r => r.id);
 }
 
 // Bucket every untagged track by (genre, decade). Used by seed-selector to
@@ -1236,7 +1454,32 @@ export function allTaggedSampled(max: number, totalTagged: number): TrackRecord[
 // Stats
 // ---------------------------------------------------------------------------
 
+// stats() runs ~7 full-table scans/GROUP BYs (byMood alone is a json_each walk
+// over every row). It's polled every 30s by the admin Library panel and hit by
+// several admin pages (/library, /debug, /observatory) + /settings. Post-
+// analysis the fattened rows make each scan slow, so uncached these stacked up
+// on the synchronous DB thread and blocked listener polls (#723). A short TTL
+// collapses page-load / multi-tab bursts into one computation; 5s is well within
+// the display's freshness needs, and analysis writes don't change these tallies
+// anyway (they touch bpm/*_json, not moods/genre/energy).
+let statsCache: { at: number; value: LibraryStats } | null = null;
+const STATS_TTL_MS = 5000;
+
+// Drop the memoised stats() result — call when the DB handle is swapped
+// (reset/reload) so a fresh library never briefly serves the old one's tallies.
+export function invalidateStats(): void {
+  statsCache = null;
+}
+
 export function stats(): LibraryStats {
+  const now = Date.now();
+  if (statsCache && now - statsCache.at < STATS_TTL_MS) return statsCache.value;
+  const value = computeStats();
+  statsCache = { at: now, value };
+  return value;
+}
+
+function computeStats(): LibraryStats {
   const d = requireDb();
   const total =
     (d.prepare(`SELECT COUNT(*) AS n FROM tracks WHERE ${SQL_HAS_MOODS}`).get() as {

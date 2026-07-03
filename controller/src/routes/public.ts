@@ -47,7 +47,7 @@ function avatarUrlFor(personaId?: string | null): string {
 // back to how the listener actually reached us (X-Forwarded-Proto/Host from the
 // proxy, else the request's own protocol/host) so LAN, Tailscale, and ad-hoc
 // custom-domain deployments still emit a URL that resolves for the listener.
-function publicOrigin(req: express.Request): string {
+export function publicOrigin(req: express.Request): string {
   const fromEnv = (process.env.SITE_URL || '').trim().replace(/\/+$/, '');
   if (fromEnv) return fromEnv;
   const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
@@ -166,7 +166,9 @@ router.get('/now-playing', async (req, res) => {
     // reader of now-playing.json. A not-yet-tagged track (or unloaded DB)
     // yields null here and the fields are simply omitted.
     if (nowPlaying?.subsonic_id) {
-      const rec = library.get(nowPlaying.subsonic_id);
+      // Lean read: only the scalar fields the metadata strip renders, so this
+      // per-listener 5s poll never parses the heavy acoustic *_json blobs (#723).
+      const rec = library.getPlaybackMeta(nowPlaying.subsonic_id);
       if (rec) {
         nowPlaying.genre = rec.genre ?? null;
         nowPlaying.bpm = rec.bpm ?? null;
@@ -214,7 +216,9 @@ router.get('/now-playing', async (req, res) => {
       // tune-in helpers (the /listen.pls + /listen.m3u routes mirror this). The
       // flat streamOnline/streamBitrate above stay for the existing web player;
       // this `stream` object is additive. mount/format describe the always-
-      // served MP3 floor; opusEnabled tells clients the Opus mount is also live.
+      // served MP3 floor; the *Enabled flags tell clients which optional mounts
+      // (/stream.opus, /stream.flac, /stream.aac) are also live so they can
+      // discover them without scraping the tune-in files.
       stream: {
         mount: '/stream.mp3',
         format: 'mp3',
@@ -222,6 +226,8 @@ router.get('/now-playing', async (req, res) => {
         sampleRate: stream.sampleRate,
         channels: stream.channels,
         opusEnabled: stationSettings.stream?.opusEnabled === true,
+        flacEnabled: stationSettings.stream?.flacEnabled === true,
+        aacEnabled: stationSettings.stream?.aacEnabled === true,
       },
       // Cumulative since-boot LLM token total — drives the listener-facing
       // token ticker next to the now-playing time. Aggregate integer only; no
@@ -244,8 +250,9 @@ router.get('/now-playing', async (req, res) => {
 // and software players (Sonos, VLC, moOde, car receivers). A listener adds the
 // station by pasting one URL instead of hunting for the raw /stream.mp3 mount.
 //
-// Both wrap the always-served MP3 floor; the Opus mount is appended only when
-// the operator has enabled it. Origin comes from publicOrigin() (SITE_URL when
+// All wrap the always-served MP3 floor first (the universal entry every player
+// can decode); the optional Opus / FLAC / AAC mounts are appended only when the
+// operator has enabled each. Origin comes from publicOrigin() (SITE_URL when
 // set, else the request host) so the link works from however the listener
 // reached the site. Unauthenticated by design — these expose nothing beyond the
 // already-public stream URL and station name.
@@ -257,6 +264,12 @@ function listenMounts(req: express.Request) {
   const entries = [{ url: `${origin}/stream.mp3`, title: station }];
   if (s.stream?.opusEnabled === true) {
     entries.push({ url: `${origin}/stream.opus`, title: `${station} (Opus)` });
+  }
+  if (s.stream?.flacEnabled === true) {
+    entries.push({ url: `${origin}/stream.flac`, title: `${station} (FLAC)` });
+  }
+  if (s.stream?.aacEnabled === true) {
+    entries.push({ url: `${origin}/stream.aac`, title: `${station} (AAC)` });
   }
   return { station, entries };
 }

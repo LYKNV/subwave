@@ -65,6 +65,51 @@ export async function generateStationId({ recap = null, context = null, recentOp
   });
 }
 
+// --- Persona handoff at a show boundary ------------------------------------
+// When a show ends and a different persona takes over, the outgoing DJ signs
+// off on air and passes the mic; the incoming DJ acknowledges and opens their
+// shift. Both render as free text like every other segment, but each is voiced
+// by ITS OWN persona — the system prompt is rendered with an explicit persona
+// (djSystem(personaOut/In)) rather than the clock-driven effective one, which
+// has already flipped to the incoming persona by the time these run.
+// Anti-repeat: no ANGLES entry for 'handoff' (pickAngle returns null → no tone
+// line), but the recent-openers blocklist still steers the first words clear of
+// what just aired. A handoff fires at most ~once an hour, so that's plenty.
+
+export async function generateSignoff({ personaOut, personaIn, showIn = null, context = null, recap = null, recentOpeners = null }: any) {
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const outName = personaOut?.name || 'your host';
+  const inName = personaIn?.name || 'the next host';
+  const handTo = showIn ? `${inName}, who's bringing you "${showIn}"` : inName;
+  ctxLines.push(`Task: your time on air is wrapping up. Sign off in character as ${outName} and hand the mic over to ${handTo}. Say ${inName}'s name as you pass it along. ${lengthPhrase('link', personaOut)}. This is a real DJ passing the baton, warm and natural — not a formal announcement, and don't over-explain the schedule.`);
+  return djText({
+    system: djSystem(personaOut),
+    prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'handoff', recap, recentOpeners }),
+    temperature: 1.0, topP: 0.9, repeatPenalty: 1.25, seed: randomSeed(),
+    kind: 'generateSignoff',
+  });
+}
+
+export async function generateHandoffGreeting({ personaIn, personaOut, signoffText = null, showIn = null, context = null, recap = null, recentOpeners = null }: any) {
+  const ctxLines = buildContextLines(context, { contextFields: SCRIPT_CONTEXT_FIELDS });
+  const inName = personaIn?.name || 'your host';
+  const outName = personaOut?.name || 'the previous host';
+  // The predecessor's actual sign-off rides in the prompt so the greeting can
+  // genuinely respond to it ("Cheers Johnny…") rather than a generic hello.
+  if (signoffText) {
+    const clipped = String(signoffText).replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (clipped) ctxLines.push(`${outName} just signed off with: "${clipped}"`);
+  }
+  const showClause = showIn ? ` You're kicking off "${showIn}".` : '';
+  ctxLines.push(`Task: you're ${inName}, just taking over the mic from ${outName}. Acknowledge ${outName} warmly and naturally — a quick nod to what they said if it fits — then ease into your shift.${showClause} ${lengthPhrase('link', personaIn)}. Keep it easy and in character; you're stepping up to the decks, not reading a bulletin.`);
+  return djText({
+    system: djSystem(personaIn),
+    prompt: decoratePrompt(ctxLines.join('\n'), { kind: 'handoff', recap, recentOpeners }),
+    temperature: 0.95, topP: 0.92, repeatPenalty: 1.2, seed: randomSeed(),
+    kind: 'generateHandoffGreeting',
+  });
+}
+
 // Operator ad-lib — the command-center "manual voice DJ" in styled mode.
 // Takes a free-text instruction/topic and performs it in character, rather
 // than reading it verbatim (that's what raw mode is for).
@@ -82,17 +127,24 @@ export async function generateAdLib({ instruction, context = null, recap = null,
 
 export async function generateLink({ previous, current, context, recap = null, recentTracks = null, recentOpeners = null }: any) {
   const ctxLines = buildContextLines(context, { recentTracks, contextFields: SCRIPT_CONTEXT_FIELDS });
-  if (previous?.title) ctxLines.push(`Just played: "${previous.title}" by ${previous.artist || 'unknown'}`);
+  // Forward-looking only: the link is written when the pick is made but doesn't
+  // air until that pick actually starts — and a listener request can slip ahead
+  // of it in the meantime, so we can't know what really played just before it.
+  // Naming the previous track is therefore unsafe (it goes stale → the DJ names
+  // a track one older than reality). We intro the track NOW STARTING instead, so
+  // the line is always correct whatever played before it. (`previous` is still
+  // accepted for the tempo/key mix nod below — a vague feel, never a name.)
   if (current?.title) ctxLines.push(`Now playing: "${current.title}" by ${current.artist || 'unknown'}`);
 
-  // DJ-mode personas tease what's coming, not just back-announce — mirrors the
-  // agent path in broadcast/dj-agent.ts so both pickers feel like the same DJ.
+  // DJ-mode personas lean harder into teasing the track's feel / artist.
   const djMode = !!settings.getEffectivePersona()?.djMode;
   const teaseClause = djMode
-    ? ` Tease what's coming — name the artist or capture the feel so listeners know what's next.`
+    ? ` Name the artist or capture the feel so listeners know what they're hearing.`
     : '';
   // DJ-mode mix patter: only when BOTH tracks carry measured tempo/key, and
-  // only as a natural option — never forced, never robotic numbers on air.
+  // only as a natural option — never forced, never robotic numbers on air. This
+  // is a feel ("easing into something a touch faster"), not a track name, so it
+  // stays safe even if a request slipped in ahead of this pick.
   const prevAK = bpmKeyFor(previous);
   const curAK = bpmKeyFor(current);
   const patterClause = (djMode && (prevAK.bpm || prevAK.key) && (curAK.bpm || curAK.key))
@@ -100,7 +152,7 @@ export async function generateLink({ previous, current, context, recap = null, r
     : '';
   // Talk-within-the-intro budget for the track now starting (current = the pick).
   const budget = introBudgetPhrase(introMsFor(current));
-  const prompt = `Write a DJ link between tracks. Back-announce what just played and ease into what's playing now.${teaseClause}${patterClause}${budget ? ' ' + budget : ''} ${lengthPhrase('link')}, conversational, don't list both titles like a robot — pick one to mention specifically and treat the other lightly.\n\n${ctxLines.join('\n')}`;
+  const prompt = `Write a short DJ link to carry into the track now starting — set it up, capture its feel, weave in the moment.${teaseClause}${patterClause}${budget ? ' ' + budget : ''} ${lengthPhrase('link')}, conversational. Vary how you open — don't default to "here's", "this is", "coming up", or "that was"; find a different way in each time. Keep it forward-looking: don't back-announce, recap, or name the track that just played — focus on what's playing now.\n\n${ctxLines.join('\n')}`;
 
   return djText({
     system: djSystem(),

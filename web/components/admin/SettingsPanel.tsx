@@ -126,11 +126,12 @@ interface TtsForm {
   chatterbox: { referenceVoice: string };
   pocketTts: { voice: string };
   cloud: CloudTtsCfg;
+  remote: { url: string };
   // Per-engine voice-level trim in dB, keyed by engine id (note the hyphen in
-  // `pocket-tts`). Always carries all 5 known engines, 0 = unity = no change.
+  // `pocket-tts`). Always carries all 6 known engines, 0 = unity = no change.
   gainDb: Record<string, number>;
-  // Per-engine speech-rate multiplier, keyed by engine id. Always carries all 5
-  // known engines, 1.0 = unity = no change. Inert for chatterbox/pocket-tts.
+  // Per-engine speech-rate multiplier, keyed by engine id. Always carries all 6
+  // known engines, 1.0 = unity = no change. Inert for chatterbox/pocket-tts/remote.
   speed: Record<string, number>;
 }
 
@@ -160,6 +161,7 @@ interface LlmForm {
   dailyTokenCap: number;
   budgetSoftPct: number;
   exemptRequests: boolean;
+  maxOutputTokens: number;
   fallback: LlmFallbackForm;
 }
 
@@ -185,6 +187,7 @@ interface EmbeddingForm {
   moodVoteThreshold: string;
   confidenceThreshold: string;
   maxActiveLearningRounds: string;
+  audioFusionWeight: string; // '0' = text-only vote (fusion off)
   enrichment: EmbeddingEnrichmentForm;
 }
 
@@ -214,11 +217,24 @@ interface ArchiveForm {
 
 interface StreamForm {
   opusEnabled: boolean;
+  opusBitrate: string;
+  flacEnabled: boolean;
+  aacEnabled: boolean;
+  aacBitrate: string;
+  bitrate: string;
 }
 
-// Keep in sync with ARCHIVE_BITRATES in controller/src/settings.ts — radio.liq
+interface LoudnessForm {
+  targetLufs: string;
+  maxBoostDb: string;
+}
+
+// Keep in sync with MP3_BITRATES in controller/src/settings.ts — radio.liq
 // has a literal `%mp3(bitrate=…)` branch per value, so this set is fixed.
-const ARCHIVE_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+const MP3_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+// Keep in sync with OPUS_BITRATES / AAC_BITRATES in controller/src/settings.ts.
+const OPUS_BITRATES = [96, 128, 192, 256, 320] as const;
+const AAC_BITRATES = [128, 192, 256] as const;
 
 interface FormState {
   jingleRatio: string;
@@ -226,6 +242,7 @@ interface FormState {
   maxTrackSeconds: string;
   archive: ArchiveForm;
   stream: StreamForm;
+  loudness: LoudnessForm;
   station: string;
   timezone: string;
   locale: StationLocale;
@@ -267,7 +284,15 @@ interface SettingsData {
     maxTrackSeconds?: number;
     minTrackSeconds?: number;
     archive?: { enabled?: boolean; bitrate?: number };
-    stream?: { opusEnabled?: boolean };
+    stream?: {
+      opusEnabled?: boolean;
+      opusBitrate?: number;
+      flacEnabled?: boolean;
+      aacEnabled?: boolean;
+      aacBitrate?: number;
+      bitrate?: number;
+    };
+    loudness?: { targetLufs?: number; maxBoostDb?: number };
     station?: string;
     timezone?: string;
     locale?: StationLocale;
@@ -279,6 +304,7 @@ interface SettingsData {
       chatterbox?: { referenceVoice?: string };
       pocketTts?: { voice?: string };
       cloud?: Partial<CloudTtsCfg>;
+      remote?: { url?: string };
       gainDb?: Record<string, number>;
       speed?: Record<string, number>;
     };
@@ -295,6 +321,7 @@ interface SettingsData {
       moodVoteThreshold?: number;
       confidenceThreshold?: number;
       maxActiveLearningRounds?: number;
+      audioFusionWeight?: number;
       enrichment?: Partial<EmbeddingEnrichmentForm>;
     };
     sfx?: { enabled?: boolean };
@@ -411,6 +438,15 @@ export default function SettingsPanel() {
       },
       stream: {
         opusEnabled: v.stream?.opusEnabled ?? true,
+        opusBitrate: String(v.stream?.opusBitrate ?? 96),
+        flacEnabled: v.stream?.flacEnabled ?? false,
+        aacEnabled: v.stream?.aacEnabled ?? false,
+        aacBitrate: String(v.stream?.aacBitrate ?? 192),
+        bitrate: String(v.stream?.bitrate ?? 192),
+      },
+      loudness: {
+        targetLufs: String(v.loudness?.targetLufs ?? -14),
+        maxBoostDb: String(v.loudness?.maxBoostDb ?? 6),
       },
       station: v.station ?? '',
       timezone: v.timezone ?? '',
@@ -433,7 +469,8 @@ export default function SettingsPanel() {
           voice: v.tts?.cloud?.voice ?? '',
           baseUrl: v.tts?.cloud?.baseUrl ?? '',
         },
-        // Per-engine voice level (dB). Zero default for all 5 engine ids, then
+        remote: { url: v.tts?.remote?.url ?? '' },
+        // Per-engine voice level (dB). Zero default for all 6 engine ids, then
         // overlay any saved values. Keyed by engine id — `pocket-tts` (hyphen).
         gainDb: {
           piper: 0,
@@ -441,9 +478,10 @@ export default function SettingsPanel() {
           chatterbox: 0,
           'pocket-tts': 0,
           cloud: 0,
+          remote: 0,
           ...(v.tts?.gainDb || {}),
         },
-        // Per-engine speech speed (×). Unity default for all 5, then overlay
+        // Per-engine speech speed (×). Unity default for all 6, then overlay
         // any saved values. Keyed by engine id — `pocket-tts` (hyphen).
         speed: {
           piper: 1,
@@ -451,6 +489,7 @@ export default function SettingsPanel() {
           chatterbox: 1,
           'pocket-tts': 1,
           cloud: 1,
+          remote: 1,
           ...(v.tts?.speed || {}),
         },
       },
@@ -470,6 +509,7 @@ export default function SettingsPanel() {
         dailyTokenCap: typeof v.llm?.dailyTokenCap === 'number' ? v.llm.dailyTokenCap : 0,
         budgetSoftPct: typeof v.llm?.budgetSoftPct === 'number' ? v.llm.budgetSoftPct : 80,
         exemptRequests: v.llm?.exemptRequests !== false,
+        maxOutputTokens: typeof v.llm?.maxOutputTokens === 'number' ? v.llm.maxOutputTokens : 0,
         fallback: {
           enabled: !!v.llm?.fallback?.enabled,
           provider: v.llm?.fallback?.provider ?? 'ollama',
@@ -494,10 +534,11 @@ export default function SettingsPanel() {
         baseUrl: v.embedding?.baseUrl ?? '',
         ollamaUrl: v.embedding?.ollamaUrl ?? '',
         seedCount: String(v.embedding?.seedCount ?? 0),
-        knnNeighbours: String(v.embedding?.knnNeighbours ?? 5),
-        moodVoteThreshold: String(v.embedding?.moodVoteThreshold ?? 0.6),
-        confidenceThreshold: String(v.embedding?.confidenceThreshold ?? 0.6),
+        knnNeighbours: String(v.embedding?.knnNeighbours ?? 10),
+        moodVoteThreshold: String(v.embedding?.moodVoteThreshold ?? 0.4),
+        confidenceThreshold: String(v.embedding?.confidenceThreshold ?? 0.35),
         maxActiveLearningRounds: String(v.embedding?.maxActiveLearningRounds ?? 3),
+        audioFusionWeight: String(v.embedding?.audioFusionWeight ?? 0.5),
         enrichment: {
           lastfmTags: v.embedding?.enrichment?.lastfmTags ?? false,
           lyrics: v.embedding?.enrichment?.lyrics ?? true,
@@ -789,7 +830,7 @@ export default function SettingsPanel() {
             {activeSection === 'scrobble' && (
               <ScrobbleSection
                 data={data} form={form} setForm={updateForm} busy={busy}
-                saveSettings={saveSettings} adminFetch={adminFetch}
+                saveSettings={saveSettings} adminFetch={adminFetch} refresh={refresh}
               />
             )}
           </>
@@ -862,7 +903,7 @@ export default function SettingsPanel() {
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {ARCHIVE_BITRATES.map(br => (
+                          {MP3_BITRATES.map(br => (
                             <SelectItem key={br} value={String(br)}>
                               {br} kbps
                             </SelectItem>
@@ -1004,10 +1045,169 @@ export default function SettingsPanel() {
             )}
 
             {form && (
-              <Card title="Opus stream" sub="/stream.opus (Ogg-Opus 96 kbps)">
+              <Card title="Loudness levelling" sub="per-track volume normalisation">
+                <div className="grid gap-3">
+                  <div className="field">
+                    <Label>Target loudness</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="mono-num w-28"
+                        type="number"
+                        step={1}
+                        min={-23}
+                        max={-9}
+                        value={form.loudness.targetLufs}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          setForm(f =>
+                            f ? { ...f, loudness: { ...f.loudness, targetLufs: e.target.value } } : f,
+                          )
+                        }
+                      />
+                      <span className="text-[12px] text-muted">LUFS · −23 to −9</span>
+                    </div>
+                    <div className="field-hint">
+                      Every analysed track is pulled toward this level. −14 is the streaming
+                      standard (Spotify, YouTube). A quieter target like −16 narrows the gap in
+                      mixed libraries: loud modern masters come down more, and quiet dynamic ones
+                      (classical, jazz) need less lift to catch up.
+                    </div>
+                  </div>
+                  <div className="field">
+                    <Label>Max boost</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        className="mono-num w-28"
+                        type="number"
+                        step={1}
+                        min={0}
+                        max={12}
+                        value={form.loudness.maxBoostDb}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          setForm(f =>
+                            f ? { ...f, loudness: { ...f.loudness, maxBoostDb: e.target.value } } : f,
+                          )
+                        }
+                      />
+                      <span className="text-[12px] text-muted">dB · 0 to 12</span>
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({
+                            loudness: {
+                              targetLufs: parseFloat(form.loudness.targetLufs),
+                              maxBoostDb: parseFloat(form.loudness.maxBoostDb),
+                            },
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        Save loudness
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      Cap on how far a quiet track is turned up (0 = level down only). Boost is
+                      also limited by each track&rsquo;s own measured peak headroom, so raising
+                      this won&rsquo;t distort dynamic material — very quiet, dynamic masters
+                      simply can&rsquo;t reach the target cleanly. Loud tracks are turned down as
+                      far as needed. Applies from the next queued track; no restart, tracks need
+                      acoustic analysis (Library → Analyze).
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="Opus stream" sub="/stream.opus (Ogg-Opus)">
+                <div className="grid gap-3">
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Serve the secondary Opus mount</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Seg
+                        options={[
+                          { id: 'on', label: 'On' },
+                          { id: 'off', label: 'Off' },
+                        ]}
+                        value={form.stream.opusEnabled ? 'on' : 'off'}
+                        onChange={id =>
+                          setForm(f =>
+                            f ? { ...f, stream: { ...f.stream, opusEnabled: id === 'on' } } : f,
+                          )
+                        }
+                      />
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({ stream: { opusEnabled: form.stream.opusEnabled } })
+                        }
+                        disabled={busy}
+                      >
+                        Save
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      Off by default. Only Chrome/Edge listeners ever pick Opus (Safari, iOS and
+                      Firefox stay on the universal MP3 mount); for them it&apos;s equal-or-better
+                      quality at ~half the bandwidth, but it adds a continuous second encoder + a
+                      44.1→48 kHz resample. Turn it on if you have Chrome/Edge listeners and want
+                      the bandwidth saving. The mandatory <code>/stream.mp3</code> mount serves
+                      everyone either way.
+                    </div>
+                  </div>
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Bitrate</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={form.stream.opusBitrate}
+                        onValueChange={v =>
+                          setForm(f => (f ? { ...f, stream: { ...f.stream, opusBitrate: v } } : f))
+                        }
+                      >
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {OPUS_BITRATES.map(br => (
+                            <SelectItem key={br} value={String(br)}>
+                              {br} kbps
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({
+                            stream: { opusBitrate: parseInt(form.stream.opusBitrate, 10) },
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        Save bitrate
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      96 kbps is transparent for most music; 256/320 suits hifi listeners
+                      (current: {data?.values?.stream?.opusBitrate ?? '—'} kbps). Raising it
+                      increases bandwidth for <em>every</em> Chrome/Edge listener, since the web
+                      player auto-selects this mount.
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="FLAC stream" sub="/stream.flac (Ogg FLAC, lossless)">
                 <div className="field">
                   <div className="flex items-center gap-2">
-                    <Label>Serve the secondary Opus mount</Label>
+                    <Label>Serve the lossless FLAC mount</Label>
                     <Pill tone="ink">restart required</Pill>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1016,30 +1216,179 @@ export default function SettingsPanel() {
                         { id: 'on', label: 'On' },
                         { id: 'off', label: 'Off' },
                       ]}
-                      value={form.stream.opusEnabled ? 'on' : 'off'}
+                      value={form.stream.flacEnabled ? 'on' : 'off'}
                       onChange={id =>
                         setForm(f =>
-                          f ? { ...f, stream: { ...f.stream, opusEnabled: id === 'on' } } : f,
+                          f ? { ...f, stream: { ...f.stream, flacEnabled: id === 'on' } } : f,
                         )
                       }
                     />
                     <Btn
                       sm
                       onClick={() =>
-                        saveSettings({ stream: { opusEnabled: form.stream.opusEnabled } })
+                        saveSettings({ stream: { flacEnabled: form.stream.flacEnabled } })
                       }
                       disabled={busy}
                     >
                       Save
                     </Btn>
                   </div>
+                  {form.stream.flacEnabled && (
+                    <div className="field-hint">
+                      Point a player at{' '}
+                      <code>
+                        {typeof window !== 'undefined' ? window.location.origin : ''}
+                        /stream.flac
+                      </code>
+                    </div>
+                  )}
                   <div className="field-hint">
-                    Off by default. Only Chrome/Edge listeners ever pick Opus (Safari, iOS and
-                    Firefox stay on the universal MP3 mount); for them it&apos;s equal-or-better
-                    quality at ~half the bandwidth, but it adds a continuous second encoder + a
-                    44.1→48 kHz resample. Turn it on if you have Chrome/Edge listeners and want
-                    the bandwidth saving. The mandatory <code>/stream.mp3</code> mount serves
-                    everyone either way.
+                    Off by default. A continuous third encoder that losslessly captures the
+                    broadcast bus at ~800–900 kbps (≈4× the MP3 mount). It&apos;s a true lossless
+                    tier <strong>only when your source files are themselves lossless</strong>{' '}
+                    (FLAC/ALAC/WAV); for a lossy-source library (e.g. AAC/MP3) it faithfully
+                    carries lossy audio and adds no fidelity over MP3/Opus. Meant for external
+                    players (VLC, foobar2000, a network streamer) — the web and mobile players
+                    stay on MP3/Opus and won&apos;t auto-select it. The mandatory{' '}
+                    <code>/stream.mp3</code> mount always serves everyone.
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="AAC stream" sub="/stream.aac (AAC-LC, ADTS)">
+                <div className="grid gap-3">
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Serve the AAC mount</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Seg
+                        options={[
+                          { id: 'on', label: 'On' },
+                          { id: 'off', label: 'Off' },
+                        ]}
+                        value={form.stream.aacEnabled ? 'on' : 'off'}
+                        onChange={id =>
+                          setForm(f =>
+                            f ? { ...f, stream: { ...f.stream, aacEnabled: id === 'on' } } : f,
+                          )
+                        }
+                      />
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({ stream: { aacEnabled: form.stream.aacEnabled } })
+                        }
+                        disabled={busy}
+                      >
+                        Save
+                      </Btn>
+                    </div>
+                    {form.stream.aacEnabled && (
+                      <div className="field-hint">
+                        Point a player at{' '}
+                        <code>
+                          {typeof window !== 'undefined' ? window.location.origin : ''}
+                          /stream.aac
+                        </code>
+                      </div>
+                    )}
+                    <div className="field-hint">
+                      Off by default. A continuous AAC-LC encoder whose purpose is reach —
+                      players and hardware that decode AAC but not Opus. Aimed at external
+                      players; the web and mobile players stay on MP3/Opus and won&apos;t
+                      auto-select it. The mandatory <code>/stream.mp3</code> mount serves
+                      everyone either way.
+                    </div>
+                  </div>
+                  <div className="field">
+                    <div className="flex items-center gap-2">
+                      <Label>Bitrate</Label>
+                      <Pill tone="ink">restart required</Pill>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Select
+                        value={form.stream.aacBitrate}
+                        onValueChange={v =>
+                          setForm(f => (f ? { ...f, stream: { ...f.stream, aacBitrate: v } } : f))
+                        }
+                      >
+                        <SelectTrigger className="w-32">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {AAC_BITRATES.map(br => (
+                            <SelectItem key={br} value={String(br)}>
+                              {br} kbps
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <Btn
+                        sm
+                        onClick={() =>
+                          saveSettings({
+                            stream: { aacBitrate: parseInt(form.stream.aacBitrate, 10) },
+                          })
+                        }
+                        disabled={busy}
+                      >
+                        Save bitrate
+                      </Btn>
+                    </div>
+                    <div className="field-hint">
+                      AAC-LC is transparent around 256 kbps (current:{' '}
+                      {data?.values?.stream?.aacBitrate ?? '—'} kbps).
+                    </div>
+                  </div>
+                </div>
+              </Card>
+            )}
+
+            {form && (
+              <Card title="Stream MP3 bitrate" sub="/stream.mp3">
+                <div className="field">
+                  <div className="flex items-center gap-2">
+                    <Label>Bitrate</Label>
+                    <Pill tone="ink">restart required</Pill>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Select
+                      value={form.stream.bitrate}
+                      onValueChange={v =>
+                        setForm(f => (f ? { ...f, stream: { ...f.stream, bitrate: v } } : f))
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {MP3_BITRATES.map(br => (
+                          <SelectItem key={br} value={String(br)}>
+                            {br} kbps
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Btn
+                      sm
+                      onClick={() =>
+                        saveSettings({
+                          stream: { bitrate: parseInt(form.stream.bitrate, 10) },
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      Save bitrate
+                    </Btn>
+                  </div>
+                  <div className="field-hint">
+                    Higher bitrate = better quality, more listener bandwidth
+                    (current: {data?.values?.stream?.bitrate ?? '—'} kbps). 192 kbps is the
+                    original default.
                   </div>
                 </div>
               </Card>
@@ -1260,7 +1609,7 @@ const CB_DEFAULT_VOICE = '__cb_default__';
 
 // Voice-level (dB) trim. Engine ids match the server contract exactly — note the
 // hyphen in `pocket-tts`. Range mirrors the server clamp (TTS_GAIN_CLAMP_DB=12).
-const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'] as const;
+const TTS_GAIN_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud', 'remote'] as const;
 const TTS_GAIN_MIN = -12;
 const TTS_GAIN_MAX = 12;
 const TTS_GAIN_STEP = 0.5;
@@ -1316,11 +1665,11 @@ function TtsGainField({
 }
 
 // Speech-rate trim. Range mirrors the server clamp (clampTtsSpeed: 0.5–2.0×).
-// Only Piper/Kokoro/cloud honour speed — chatterbox/pocket-tts ignore it.
+// Only Piper/Kokoro/cloud honour speed — chatterbox/pocket-tts/remote ignore it.
 const TTS_SPEED_MIN = 0.5;
 const TTS_SPEED_MAX = 2;
 const TTS_SPEED_STEP = 0.05;
-const TTS_SPEED_UNSUPPORTED = new Set(['chatterbox', 'pocket-tts']);
+const TTS_SPEED_UNSUPPORTED = new Set(['chatterbox', 'pocket-tts', 'remote']);
 
 function formatSpeed(v: number): string {
   return `${v.toFixed(2)}×`;
@@ -1505,7 +1854,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
   };
   const engines = data.tts?.engines || ['piper'];
   const available = data.tts?.available || {};
-  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', chatterbox: 'Chatterbox', 'pocket-tts': 'PocketTTS', cloud: 'Cloud' };
+  const ENGINE_LABELS: Record<string, string> = { piper: 'Piper', kokoro: 'Kokoro', chatterbox: 'Chatterbox', 'pocket-tts': 'PocketTTS', cloud: 'Cloud', remote: 'Remote' };
 
   const save = async () => {
     await saveSettings({
@@ -1521,6 +1870,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
           voice: form.tts.cloud.voice,
           baseUrl: form.tts.cloud.baseUrl,
         },
+        remote: { url: form.tts.remote.url },
         // Per-engine voice-level trim. Always sent (server clamps + drops unknown
         // keys); keyed by engine id, `pocket-tts` with the hyphen.
         gainDb: form.tts.gainDb,
@@ -1564,6 +1914,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     chatterbox?: { referenceVoice?: string };
     pocketTts?: { voice?: string };
     cloud?: SavedCloud;
+    remote?: { url?: string };
     gainDb?: Record<string, number>;
     speed?: Record<string, number>;
   } = data.values?.tts || {};
@@ -1572,6 +1923,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
   const savedChatterboxVoice: string = savedTts.chatterbox?.referenceVoice || '';
   const savedPocketTtsVoice: string = savedTts.pocketTts?.voice || '';
   const savedCloud: SavedCloud = savedTts.cloud || {};
+  const savedRemoteUrl: string = savedTts.remote?.url || '';
   const savedEngineLabel = ENGINE_LABELS[savedEngine] || savedEngine;
   const formEngineLabel = ENGINE_LABELS[form.tts.defaultEngine] || form.tts.defaultEngine;
 
@@ -1596,6 +1948,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     || (form.tts.cloud.model || '').trim() !== (savedCloud.model || '').trim()
     || (form.tts.cloud.voice || '').trim() !== (savedCloud.voice || '').trim()
     || (form.tts.cloud.baseUrl || '').trim() !== (savedCloud.baseUrl || '').trim()
+    || (form.tts.remote.url || '').trim() !== savedRemoteUrl
     || gainDirty
     || speedDirty;
 
@@ -1616,6 +1969,10 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
     activeDetail = <>
       {savedCloud.provider || '—'} · model <code>{savedCloud.model || '—'}</code>
       {savedCloud.voice ? <> · voice <code>{savedCloud.voice}</code></> : null}.
+    </>;
+  } else if (savedEngine === 'remote') {
+    activeDetail = <>
+      Endpoint <code>{savedRemoteUrl || 'not configured'}</code>. Falls back to Piper if the URL isn’t set or the sidecar is down.
     </>;
   }
   const savedEngineMissing = available[savedEngine] === false;
@@ -2015,6 +2372,43 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
           );
         })()}
 
+        {form.tts.defaultEngine === 'remote' && (() => {
+          const remoteAvail = available.remote;
+          return (
+          <div className="mt-4">
+            {remoteAvail === false && (
+              <div className="mb-3.5 border border-[var(--danger)] px-3 py-2.5 text-[11px] leading-[1.6] text-[var(--danger)]">
+                The remote endpoint isn&apos;t currently reachable. Check the URL
+                below and make sure the sidecar is running. The engine falls
+                back to <strong>Piper</strong> until it&apos;s up.
+              </div>
+            )}
+            <div className="field">
+              <Label>Server URL</Label>
+              <Input
+                value={form.tts.remote.url}
+                onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                  setForm(f => ({ ...f, tts: { ...f.tts, remote: { ...f.tts.remote, url: e.target.value } } }))
+                }
+                placeholder="http://192.168.1.101:5001"
+                className="max-w-[360px]"
+              />
+              <div className="field-hint">
+                Any self-hosted TTS server that renders audio over HTTP — POST{' '}
+                <code>/speak</code> returns the audio in the response body, gated
+                on a <code>/health</code> probe (Qwen3-TTS clone, F5-TTS,
+                CosyVoice, your own server…). The audio comes back over the wire,
+                so no shared volume is needed. Must be reachable from the
+                controller container — use the host&apos;s LAN or Tailscale IP,
+                not <code>127.0.0.1</code>.
+              </div>
+            </div>
+            <TtsGainField engineId="remote" form={form} setForm={setForm} />
+            <TtsSpeedField engineId="remote" form={form} setForm={setForm} />
+          </div>
+          );
+        })()}
+
           {/* Audition the selected engine + its configured voice + speed. */}
           {(() => {
             const e = form.tts.defaultEngine;
@@ -2023,6 +2417,7 @@ function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
               : e === 'chatterbox' ? (form.tts.chatterbox?.referenceVoice || '')
               : e === 'pocket-tts' ? (form.tts.pocketTts?.voice || '')
               : e === 'cloud' ? (form.tts.cloud.voice || '')
+              : e === 'remote' ? ''
               : '';
             return (
               <div className="field">
@@ -2247,6 +2642,7 @@ function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
         dailyTokenCap: form.llm.dailyTokenCap,
         budgetSoftPct: form.llm.budgetSoftPct,
         exemptRequests: form.llm.exemptRequests,
+        maxOutputTokens: form.llm.maxOutputTokens,
         ...(form.llm.provider === 'openai-compatible' && compatKeyInput.trim()
           ? { apiKey: compatKeyInput.trim() }
           : {}),
@@ -2872,6 +3268,31 @@ function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch, refre
             onChange={v => setForm(f => ({ ...f, llm: { ...f.llm, reasoning: v === 'on' } }))}
           />
         </div>
+
+        <div className="field mt-4">
+          <Label>Max response size (tokens)</Label>
+          <Input
+            type="number"
+            min={0}
+            max={8000}
+            step={500}
+            value={form.llm.maxOutputTokens}
+            onChange={(e: ChangeEvent<HTMLInputElement>) =>
+              setForm(f => ({ ...f, llm: { ...f.llm, maxOutputTokens: Math.min(8000, Math.max(0, Number(e.target.value))) } }))
+            }
+            placeholder="0"
+            className="max-w-[200px]"
+          />
+          <div className="field-hint">
+            Caps the tokens the model may generate per response &mdash; the size
+            of each reply, not a daily total. <strong>0 = use the built-in
+            defaults</strong> (the default). Set a value (500&ndash;8000) to
+            shrink it: useful on a local model with a small context window, where
+            an oversized response allowance crowds out the system prompt and tool
+            list and risks truncation &mdash; especially with reasoning off, where
+            replies are short anyway. Values between 1 and 499 round up to 500.
+          </div>
+        </div>
       </Card>
 
       <Card title="Next-track picker" sub="how the DJ chooses">
@@ -3354,20 +3775,24 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
         baseUrl: e.baseUrl,
         ollamaUrl: e.ollamaUrl,
         seedCount: parseInt(e.seedCount, 10) || 0,
-        knnNeighbours: parseInt(e.knnNeighbours, 10) || 5,
-        moodVoteThreshold: parseFloat(e.moodVoteThreshold) || 0.6,
-        confidenceThreshold: parseFloat(e.confidenceThreshold) || 0.6,
+        knnNeighbours: parseInt(e.knnNeighbours, 10) || 10,
+        moodVoteThreshold: parseFloat(e.moodVoteThreshold) || 0.4,
+        confidenceThreshold: parseFloat(e.confidenceThreshold) || 0.35,
         maxActiveLearningRounds: parseInt(e.maxActiveLearningRounds, 10) || 0,
+        // NaN-safe rather than `|| 0.5` — 0 is a deliberate value (fusion off)
+        // and must not be coerced back to the default.
+        audioFusionWeight: Number.isFinite(parseFloat(e.audioFusionWeight))
+          ? parseFloat(e.audioFusionWeight)
+          : 0.5,
         enrichment: {
           lastfmTags: e.enrichment.lastfmTags,
           lyrics: e.enrichment.lyrics,
         },
       },
     });
-    // Save embedding API key if typed
-    const embeddingNeedsKey = e.provider &&
-      !['', 'ollama', 'openai-compatible', 'locca'].includes(e.provider);
-    if (embeddingNeedsKey && embeddingKeyInput.trim()) {
+    // Save embedding API key override if typed (cloud embedding providers only —
+    // embedKeyVar is set only for providers that use a conventional key).
+    if (embedKeyVar && embeddingKeyInput.trim()) {
       const ok = await saveKey('EMBEDDING_API_KEY', embeddingKeyInput);
       if (ok) { notify.ok('API key saved'); setEmbeddingKeyInput(''); refresh(); }
     }
@@ -3381,10 +3806,10 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
   // Provider list is the embedding-capable subset (/settings.embedding.providers),
   // NOT the full LLM list — chat-only providers (deepseek, gateway) have no
   // embeddings endpoint and can't be picked here (#493). OpenRouter shipped an
-  // embeddings endpoint so it's back in (#522); anthropic stays in too, routing
-  // to OpenAI as flagged in the hint.
+  // embeddings endpoint so it's back in (#522). Anthropic was dropped — it has no
+  // embedding API and only worked by routing to OpenAI, which was confusing.
   const embedProviders = data.embedding?.providers ||
-    ['ollama', 'openai-compatible', 'locca', 'anthropic', 'openai', 'google', 'openrouter', 'requesty'];
+    ['ollama', 'openai-compatible', 'locca', 'openrouter', 'openai', 'google', 'requesty'];
   // Keep a stale explicit choice (a chat-only provider saved before this list
   // shrank) visible so the Select isn't blank and the warning below makes sense.
   const providers = e.provider && !embedProviders.includes(e.provider)
@@ -3402,14 +3827,17 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
   const [probing, setProbing] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
-  const [tagBusy, setTagBusy] = useState(false);
-  const taggerRunning = !!data.tagger?.running;
   // Local servers (llama.cpp/locca) need a dedicated embedding endpoint; cloud
   // and Ollama providers serve embeddings on the same endpoint as chat.
   const needsServerUrl = effectiveProvider === 'locca' || effectiveProvider === 'openai-compatible';
 
   const embedKeyVar = LLM_ENV_VARS[effectiveProvider];
   const embedKeySet = !!(embedKeyVar && data.env?.[embedKeyVar]);
+  // Embeddings reuse the DJ provider's own key automatically, so the key is
+  // "present" if that provider's env var is set OR the optional EMBEDDING_API_KEY
+  // override is. The warning must key off this — not EMBEDDING_API_KEY alone, or
+  // it cries "missing" for a provider whose key is already set for the DJ.
+  const embedKeyPresent = embedKeySet || !!data.env?.['EMBEDDING_API_KEY'];
 
   const embedDiscoveryEnabled =
     effectiveProvider === 'ollama'
@@ -3478,19 +3906,31 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
     }
   };
 
-  const startTagging = async () => {
-    setTagBusy(true);
-    try {
-      const r = await adminFetch('/tag-library', { method: 'POST' });
-      const j = await r.json().catch(() => ({}));
-      if (r.ok) notify.ok('tagging started, watch progress on the Library tab');
-      else notify.err(j.error || 'could not start the tagger');
-    } catch (err) {
-      notify.err(errorMessage(err));
-    } finally {
-      setTagBusy(false);
-    }
+  // What the tagger will actually embed with right now — resolved from the LIVE
+  // form (not saved state). "Follow LLM" resolves the provider; a blank Model
+  // field resolves to that provider's default. This is the line that stops
+  // operators reverse-engineering "what am I actually using?" — e.g. a DeepSeek
+  // DJ routed through OpenRouter embeds via openai/text-embedding-3-small, which
+  // isn't obvious from any field (Discord report).
+  const embeddedMeta = data.libraryStats?.embeddingMeta || null;
+  const suggestedDefault = EMBED_MODEL_SUGGESTIONS[effectiveProvider]?.[0];
+  // Defaults for the providers not carried in EMBED_MODEL_SUGGESTIONS (they have
+  // no combobox suggestions but still resolve to a sensible model server-side).
+  const OTHER_EMBED_DEFAULTS: Record<string, string> = {
+    'openai-compatible': 'text-embedding-3-small',
+    locca: 'nomic-embed-text',
+    anthropic: 'text-embedding-3-small',
   };
+  const effectiveModel =
+    e.model?.trim() || suggestedDefault?.id || OTHER_EMBED_DEFAULTS[effectiveProvider] || '';
+  // Prefer a real measurement (a green probe, or the dim the library was actually
+  // embedded at) over the name→dim guess.
+  const effectiveDim =
+    probe?.dim ??
+    embeddedMeta?.dim ??
+    EMBED_MODEL_SUGGESTIONS[effectiveProvider]?.find(m => m.id === effectiveModel)?.dim ??
+    suggestedDefault?.dim ??
+    null;
 
   return (
     <>
@@ -3512,25 +3952,6 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
         manualHref="/manual/llm"
         manualLabel="How embeddings work"
       />
-
-      {/* Plain-language intro + at-a-glance readiness. */}
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <p className="max-w-[560px] text-[12px] leading-[1.6] text-muted">
-          Auto-tagging reads each track once and labels its mood + energy so the DJ
-          picks tracks that fit the room. It needs a small <strong>embedding</strong>{' '}
-          model, separate from your chat LLM. Set it up below, hit{' '}
-          <strong>Test</strong>, then run the tagger.
-        </p>
-        {probing || detecting ? (
-          <Pill tone="default" dot>checking…</Pill>
-        ) : probe?.ok ? (
-          <Pill tone="accent" dot>ready{probe.dim ? ` · ${probe.dim}-dim` : ''}</Pill>
-        ) : probe ? (
-          <Pill tone="ink" dot className="!border-red-400 !text-red-400">needs attention</Pill>
-        ) : (
-          <Pill tone="default">not tested</Pill>
-        )}
-      </div>
 
       <Card title="Tagger" sub="enabled?">
         <div className="grid grid-cols-[1fr_auto] items-center gap-4">
@@ -3558,12 +3979,30 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
 
       <Card title="Embedding server" sub="where embeddings come from">
         <div className="grid gap-[18px]">
+          {/* Affirmative "you're set up" line for new users — the effective
+              provider/model/dim resolve to a working default even when both
+              fields are blank, so surface that instead of leaving the tab
+              looking unconfigured. Hidden when the effective provider can't
+              embed (the warning below the Provider field covers that case). */}
+          {canEmbed && effectiveModel && (
+            <div className="flex items-start gap-x-2 border border-[color-mix(in_oklab,var(--accent)_30%,transparent)] bg-[var(--accent-soft)] p-3 text-[11px] leading-[1.5] text-ink">
+              <span className="flex-none text-[12px] leading-[1.5] text-[var(--accent)]">✓</span>
+              <span className="min-w-0">
+                Ready to tag with defaults — <code>{llmProviderLabel(effectiveProvider)}</code>
+                {!e.provider && <span className="text-muted"> (your DJ&rsquo;s provider)</span>}
+                {' · '}<code>{effectiveModel}</code>
+                {effectiveDim != null && <span className="text-muted"> · {effectiveDim}-d</span>}.
+                <span className="text-muted"> Change the provider or model below to override.</span>
+              </span>
+            </div>
+          )}
           <div className="field">
             <Label>Provider</Label>
             <EmbeddingProviderSelector
-              value={e.provider || ''}
+              // A blank stored provider resolves to the DJ's provider, so the
+              // grid always shows an explicit selection (no "Follow LLM" card).
+              value={effectiveProvider}
               providerIds={providers}
-              llmProvider={llmProvider}
               env={data.env}
               onChange={v =>
                 setForm(f => ({ ...f, embedding: { ...f.embedding, provider: v } }))
@@ -3571,12 +4010,22 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
               className="max-w-[560px]"
             />
             <div className="field-hint">
-              Where the text embeddings come from. Default follows your LLM
+              Where the text embeddings come from. Defaults to your DJ&rsquo;s
               provider, so Ollama-local users get <code>nomic-embed-text</code> free.
               Anthropic has no first-party embedding API; if your LLM is Anthropic,
               pick OpenAI here (needs <code>OPENAI_API_KEY</code>).
-              {' '}Effective: <code>{llmProviderLabel(effectiveProvider)}</code>.
             </div>
+            {/* The resolved provider/model/dim is stated in the "Ready to tag
+                with defaults" banner above, so no "Embedding now:" line here —
+                only the specific warning that the library is already embedded
+                with a different model (a full re-embed on change). */}
+            {embeddedMeta && embeddedMeta.model !== effectiveModel && (
+              <div className="field-hint">
+                Your library is currently embedded with{' '}
+                <code>{embeddedMeta.model}</code> ({embeddedMeta.dim}-d) — changing
+                the model means a full re-embed.
+              </div>
+            )}
 
             {!canEmbed && (
               <div
@@ -3593,7 +4042,7 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
                   {e.provider ? (
                     <><code>{llmProviderLabel(effectiveProvider)}</code> is a chat-only provider, with no embeddings endpoint, so the tagger can’t use it.</>
                   ) : (
-                    <>"Follow LLM provider" resolves to <code>{llmProviderLabel(llmProvider)}</code>, which is chat-only and has no embeddings endpoint.</>
+                    <>Your DJ provider <code>{llmProviderLabel(llmProvider)}</code> is chat-only and has no embeddings endpoint.</>
                   )}{' '}
                   Pick a real embedding provider above. <strong>Ollama</strong> is local
                   and free (<code>nomic-embed-text</code>, auto-pulled on first run), or
@@ -3612,7 +4061,10 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
                   models={embedDiscovery.models}
                   value={e.model}
                   onChange={v => setForm(f => ({ ...f, embedding: { ...f.embedding, model: v } }))}
-                  placeholder="Select a model"
+                  // Blank field still means "follow the provider default"; show
+                  // that default (e.g. nomic-embed-text) rather than an empty
+                  // "Select a model" that reads as unconfigured.
+                  placeholder={effectiveModel ? `${effectiveModel} · default` : 'Select a model'}
                 />
               ) : (
                 <Input
@@ -3620,15 +4072,7 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
                   onChange={(ev: ChangeEvent<HTMLInputElement>) =>
                     setForm(f => ({ ...f, embedding: { ...f.embedding, model: ev.target.value } }))
                   }
-                  placeholder={
-                    effectiveProvider === 'ollama' || effectiveProvider === 'locca'
-                      ? 'nomic-embed-text'
-                      : effectiveProvider === 'openai' || effectiveProvider === 'openai-compatible'
-                        ? 'text-embedding-3-small'
-                        : effectiveProvider === 'google'
-                          ? 'text-embedding-004'
-                          : 'model id'
-                  }
+                  placeholder={effectiveModel ? `${effectiveModel} · default` : 'model id'}
                   className="max-w-[360px]"
                 />
               )}
@@ -3641,7 +4085,7 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
             </div>
             <div className="field-hint">
               {embedDiscovery.models.length > 0
-                ? `${embedDiscovery.models.length} model${embedDiscovery.models.length !== 1 ? 's' : ''} discovered. Pick one from the list.`
+                ? `${embedDiscovery.models.length} model${embedDiscovery.models.length !== 1 ? 's' : ''} discovered. Keep the default${effectiveModel ? ` (${effectiveModel})` : ''} or pick another.`
                 : !embedDiscoveryEnabled
                   ? (effectiveProvider === 'openai-compatible'
                       ? 'Set a base URL above to discover available models.'
@@ -3734,24 +4178,30 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
             </div>
           )}
 
-          {/* Embedding API key override -- only for cloud providers that need one */}
-          {e.provider && !['', 'ollama', 'openai-compatible', 'locca'].includes(e.provider) && (
+          {/* Embedding key — cloud embedding providers only (embedKeyVar is
+              undefined for ollama / openai-compatible / locca, which need no
+              conventional key). Embeddings reuse the DJ provider's own key, so
+              the status keys off that (embedKeyPresent), not EMBEDDING_API_KEY
+              alone; the override is only for running embeddings on a different
+              provider than the DJ. */}
+          {embedKeyVar && (
             <>
               <div className="field">
                 <Label>Embedding API key override</Label>
                 <Input
                   type="password"
                   value={embeddingKeyInput}
-                  placeholder={data.env?.['EMBEDDING_API_KEY'] ? '•••••• (on file)' : 'optional -- defaults to chat key'}
+                  placeholder={embedKeyPresent ? '•••••• (reusing your DJ key)' : `${embedKeyVar} — or set it in .env`}
                   onChange={(ev: ChangeEvent<HTMLInputElement>) => setEmbeddingKeyInput(ev.target.value)}
                   className="max-w-[360px]"
                 />
                 <div className="field-hint">
-                  Only needed when the embedding provider uses a different API key than the chat provider.
+                  Optional. Embeddings reuse your DJ&rsquo;s <code>{embedKeyVar}</code> automatically —
+                  only set this to run embeddings on a different provider than your DJ.
                   Stored in <code>state/secrets.env</code>.
                 </div>
               </div>
-              <KeyStatus envVar="EMBEDDING_API_KEY" present={!!data.env?.['EMBEDDING_API_KEY']} />
+              <KeyStatus envVar={embedKeyVar} present={embedKeyPresent} />
             </>
           )}
 
@@ -3760,7 +4210,11 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
             <div className="flex flex-wrap items-center gap-2">
               {needsServerUrl && (
                 <Btn sm onClick={detect} disabled={detecting || probing}>
-                  {detecting ? 'Detecting…' : 'Detect locca server'}
+                  {detecting
+                    ? 'Detecting…'
+                    : effectiveProvider === 'locca'
+                      ? 'Detect locca server'
+                      : 'Detect server'}
                 </Btn>
               )}
               <Btn sm tone="accent" onClick={runProbe} disabled={probing || detecting}>
@@ -3785,25 +4239,9 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
         </div>
       </Card>
 
-      {/* Run the tagger — gated on a green probe so it can't fail mid-job. */}
-      <Card title="Tag the library" sub="run the bulk tagger">
-        <div className="grid grid-cols-[1fr_auto] items-center gap-4">
-          <div className="max-w-[480px] text-[11px] leading-[1.5] text-muted">
-            {taggerRunning
-              ? 'A tagging run is in progress, watch live progress on the Library tab.'
-              : probe?.ok
-                ? 'Embeddings look good. Start the bulk tagger; it runs in the background, and you can watch progress on the Library tab.'
-                : 'Test the embedding endpoint above first. The tagger needs a working embedding server.'}
-          </div>
-          <Btn
-            tone="accent"
-            onClick={startTagging}
-            disabled={tagBusy || taggerRunning || !probe?.ok}
-          >
-            {taggerRunning ? 'Tagging…' : tagBusy ? 'Starting…' : 'Start tagging'}
-          </Btn>
-        </div>
-      </Card>
+      {/* The bulk tagger is launched from the Library page's "Start tagging"
+          flow (with its per-run step + batch controls), so there's no run
+          button here — this tab is just the embedding config + advanced knobs. */}
 
       {/* Advanced knobs — collapsed by default so newcomers see only the basics. */}
       <button
@@ -3834,8 +4272,10 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
             />
             <div className="field-hint">
               How many tracks the LLM tags by hand before propagation kicks in.
-              <code> 0</code> = auto: <code>max(200, ceil(sqrt(library)))</code>.
-              For a 5k library that&apos;s ~70; for 50k, ~220. CLI{' '}
+              <code> 0</code> = auto: <code>~4% of the library</code> (floored at
+              200, capped at 2500). For a 5k library that&apos;s 200; for 50k,
+              2000. A denser seed set is often net-cheaper — more anchors means a
+              smaller (expensive) active-learning residual. CLI{' '}
               <code>--seeds N</code> overrides this.
             </div>
           </div>
@@ -3861,8 +4301,9 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
             />
             <div className="field-hint">
               How many nearest tagged neighbours vote on an untagged track&apos;s
-              moods + energy. 5 is the well-tuned default; higher values smooth
-              over noise but blur edge cases.
+              moods + energy. Default <code>10</code> — a broader, steadier vote
+              than the old 5. Very high values dilute the vote on a sparsely-tagged
+              library (coverage below counts against confidence).
             </div>
           </div>
 
@@ -3883,10 +4324,10 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
               className="max-w-[180px]"
             />
             <div className="field-hint">
-              Fraction of voting neighbours that must carry a mood for it to
-              propagate. <code>0.6</code> ≈ 3-out-of-5 with the default
-              neighbour count. Higher = stricter, fewer propagated tags;
-              lower = looser, more drift.
+              Fraction of the total voting <em>weight</em> a mood must carry to
+              propagate (neighbours vote weighted by similarity, so close matches
+              count for more). Default <code>0.4</code>. Higher = stricter, fewer
+              propagated tags; lower = looser, more drift.
             </div>
           </div>
 
@@ -3907,9 +4348,39 @@ function LibrarySection({ data, form, setForm, busy, saveSettings, adminFetch, r
               className="max-w-[180px]"
             />
             <div className="field-hint">
-              Minimum aggregate confidence (similarity × agreement) for a
-              propagated tag to be accepted. Below this, the track is queued
-              for LLM tagging instead.
+              Minimum confidence for a propagated tag to be accepted; below it the
+              track is queued for (pricier) LLM tagging. Confidence is{' '}
+              <code>topSim × coverage</code> — the nearest tagged neighbour&apos;s
+              similarity times the fraction of neighbours that were tagged. Being a
+              product of two sub-1 numbers it compounds fast, so the default is{' '}
+              <code>0.35</code>, not 0.6 (0.6 rejected even strong matches and sent
+              most tracks to the LLM).
+            </div>
+          </div>
+
+          <div className="field">
+            <Label>Audio fusion weight</Label>
+            <Input
+              type="number"
+              min={0}
+              max={1}
+              step={0.05}
+              value={e.audioFusionWeight}
+              onChange={(ev: ChangeEvent<HTMLInputElement>) =>
+                setForm(f => ({
+                  ...f,
+                  embedding: { ...f.embedding, audioFusionWeight: ev.target.value },
+                }))
+              }
+              className="max-w-[180px]"
+            />
+            <div className="field-hint">
+              Lets tracks with a &ldquo;sounds-like&rdquo; (CLAP) vector pull
+              audio-similar neighbours into the mood vote, scaled by this weight —
+              sound is the stronger mood signal for instrumentals and tracks with
+              thin metadata. <code>0</code> = text-only vote; <code>1</code> =
+              trust audio similarity as much as text. Default <code>0.5</code>.
+              Only applies where the acoustic analysis has produced audio vectors.
             </div>
           </div>
 
@@ -5175,9 +5646,10 @@ function SfxSection({ sfxData, sfxForm, setSfxForm, busy, createSfx, uploadSfx, 
 
 interface ScrobbleSectionProps extends SectionProps {
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
+  refresh: () => void;
 }
 
-function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }: ScrobbleSectionProps) {
+function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch, refresh }: ScrobbleSectionProps) {
   const lf = form.scrobble.lastfm;
   const lb = form.scrobble.listenbrainz;
   const savedLf = data.values?.scrobble?.lastfm || {};
@@ -5196,6 +5668,12 @@ function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }
   const lbTokenSet = lb.userToken === 'set' || !!env.LISTENBRAINZ_USER_TOKEN;
   const lfReady = lf.enabled && lfApiKeySet && lfApiSecretSet && lfSessionSet;
   const lbReady = lb.enabled && lbTokenSet;
+
+  // "Connect to Last.fm" flow — replaces the CLI session-key dance. Needs the
+  // API key + secret saved first (the backend reads them from settings/env).
+  const canConnect = lfApiKeySet && lfApiSecretSet;
+  const [authToken, setAuthToken] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
 
   const saveLastfm = () => {
     const patch: Partial<ScrobbleLastfmForm> = {
@@ -5234,6 +5712,56 @@ function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }
     }
   };
 
+  // Step 1: ask the controller for an auth token + URL, open it for the user.
+  const connectLastfm = async () => {
+    setConnecting(true);
+    try {
+      const r = await adminFetch('/scrobble/lastfm/connect', { method: 'POST' });
+      const j = (await r.json().catch(() => ({}))) as {
+        ok?: boolean; token?: string; authUrl?: string; message?: string;
+      };
+      if (!r.ok || !j.ok || !j.authUrl || !j.token) {
+        notify.err(j.message || `couldn't start (${r.status})`);
+        return;
+      }
+      window.open(j.authUrl, '_blank', 'noopener,noreferrer');
+      setAuthToken(j.token);
+      notify.ok('Authorize in the Last.fm tab, then click “I authorized — finish”.');
+    } catch (e) {
+      notify.err(errorMessage(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  // Step 2: trade the authorized token for a session key; the controller saves
+  // it and switches scrobbling on, so a refresh reflects "connected".
+  const finishLastfm = async () => {
+    if (!authToken) return;
+    setConnecting(true);
+    try {
+      const r = await adminFetch('/scrobble/lastfm/complete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: authToken }),
+      });
+      const j = (await r.json().catch(() => ({}))) as {
+        ok?: boolean; username?: string; message?: string;
+      };
+      if (!r.ok || !j.ok) {
+        notify.err(j.message || `couldn't finish (${r.status})`);
+        return;
+      }
+      setAuthToken(null);
+      notify.ok(`Connected to Last.fm${j.username ? ` as ${j.username}` : ''}.`);
+      refresh();
+    } catch (e) {
+      notify.err(errorMessage(e));
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   return (
     <>
       <SectionHeader
@@ -5241,9 +5769,9 @@ function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }
         title="Station-wide scrobbling to Last.fm and ListenBrainz."
         sub={<>
           Each backend is independent, pick one or both. Tracks scrobble only when at
-          least one listener is tuned in to the stream. Paste credentials below; nothing
-          here leaves the controller. See the <code>npm run lastfm-session</code> helper
-          if you don&apos;t already have a Last.fm session key.
+          least one listener is tuned in to the stream. For Last.fm, enter your API key
+          and secret, then hit <strong>Connect to Last.fm</strong> to authorize, no
+          session-key wrangling. Nothing here leaves the controller.
         </>}
         metrics={[
           { n: lfReady ? 'on' : 'off', l: 'last.fm', accent: lfReady },
@@ -5317,6 +5845,36 @@ function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }
           </div>
 
           <div className="field">
+            <Label>Authorize</Label>
+            {!authToken ? (
+              <Btn
+                sm
+                tone="accent"
+                onClick={connectLastfm}
+                disabled={busy || connecting || !canConnect}
+              >
+                {connecting ? 'Opening Last.fm…' : 'Connect to Last.fm'}
+              </Btn>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Btn sm tone="accent" onClick={finishLastfm} disabled={busy || connecting}>
+                  {connecting ? 'Finishing…' : 'I authorized — finish'}
+                </Btn>
+                <Btn sm onClick={() => setAuthToken(null)} disabled={connecting}>
+                  Cancel
+                </Btn>
+              </div>
+            )}
+            <div className="field-hint">
+              {!canConnect
+                ? 'Enter your API key + secret above and Save first, then connect.'
+                : !authToken
+                  ? 'Opens Last.fm to grant access, then fills in your session key and switches scrobbling on — no terminal needed.'
+                  : 'A Last.fm tab opened. Click “Yes, allow access” there, then finish here.'}
+            </div>
+          </div>
+
+          <div className="field">
             <Label>Session key</Label>
             <Input
               type="password"
@@ -5331,10 +5889,10 @@ function ScrobbleSection({ data, form, setForm, busy, saveSettings, adminFetch }
               className="max-w-[360px]"
             />
             <div className="field-hint">
-              Generated by authorizing your account. Run
-              <code> cd controller &amp;&amp; npm run lastfm-session</code> for a guided
-              flow, or fetch one yourself via <code>auth.getSession</code>. Doesn&apos;t
-              expire. Falls back to <code>LASTFM_SESSION_KEY</code>.
+              Easiest: hit <strong>Connect to Last.fm</strong> above and it fills this
+              in for you. Advanced: paste one from
+              <code> npm run lastfm-session</code>. Doesn&apos;t expire. Falls back to
+              <code> LASTFM_SESSION_KEY</code>.
             </div>
           </div>
 

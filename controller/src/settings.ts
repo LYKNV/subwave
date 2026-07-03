@@ -26,14 +26,14 @@ const SCHEDULE_PATH = `${STATE_DIR}/schedule.json`;
 // Default DJ system-prompt template. Placeholders are substituted at LLM
 // call time via renderDjPrompt(). Keep {name} mandatory — update() refuses
 // any custom template that drops it, so dialogue can never become anonymous.
-export const DEFAULT_DJ_PROMPT_TEMPLATE = `You are {name}, the on-air DJ for {station}, a personal radio station broadcasting from a homelab in {location}. {soul}.
+export const DEFAULT_DJ_PROMPT_TEMPLATE = `You are {name}, the on-air DJ for {station}, a personal radio station broadcasting from {location}. {soul}.
 
 Hard rules:
 - Output ONLY the words to be spoken aloud. No stage directions, no asterisks, no quotes around your dialogue.
-- Keep it to 2-4 sentences unless asked for longer.
+- Keep it brief by default — each task says how long.
 - Never use radio-cliché tells: "and now", "next up", "coming up next", "and that was", or back-announcing with "that was [song] by [artist]". Be more natural.
 - Don't repeat the artist and title robotically. Reference them in passing if at all.
-- Reference the actual context (time, weather, what's coming) naturally.
+- Reference the context you're given naturally; never invent facts that aren't in it (the weather, news, events, what's happening outside).
 - Vary your opener and shape every time — never start the same way twice in a row, never use the same metaphor or framing as your last few lines.`;
 
 // Seed souls — the SEED_PERSONAS roster picks from these. renderDjPrompt()
@@ -117,19 +117,32 @@ export function effectiveFrequency(persona: any = getEffectivePersona()) {
   return FREQUENCIES[Math.min(i + 1, FREQUENCIES.length - 1)];
 }
 
+// Single gate for the transition effects (filter sweep + echo washout): they're
+// on whenever the on-air persona is in DJ mode — no separate toggle. The picker
+// schema/prompt builders use this to decide whether to offer the DJ the
+// `transition` choice; when off, the guidance is never shown and nothing is
+// applied.
+export function effectsActive(persona: any = getEffectivePersona()): boolean {
+  return !!persona?.djMode;
+}
+
 // TTS engines. Every spoken segment is voiced by the on-air persona's own
 // `tts` config (see audio/tts.js); only jingle rendering falls back to the
 // global defaultEngine.
 //
 // `cloud` routes through the AI SDK (OpenAI / ElevenLabs speech models) —
 // see llm/speech.js. `piper`, `kokoro`, `chatterbox`, and `pocket-tts` are
-// local engines. Chatterbox and PocketTTS are opt-in — the default controller
-// image doesn't bundle either; build the image with `--build-arg WITH_CHATTERBOX=1`
-// or `--build-arg WITH_POCKETTTS=1` (see docker/Dockerfile.controller) to
-// include the runtime. The dispatcher gates each engine on isAvailable() so
-// settings can reference it safely even when the runtime is absent (the
-// engine just falls back to Piper).
-export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud'];
+// local engines. `remote` is a first-class self-hosted HTTP engine: it POSTs
+// to a configurable /speak endpoint and gets the rendered audio back in the
+// response body (no shared volume, so the endpoint can live on any host),
+// gated on a /health probe. Configure the URL in settings.tts.remote.url.
+// Chatterbox and PocketTTS are opt-in — the
+// default controller image doesn't bundle either; build the image with
+// `--build-arg WITH_CHATTERBOX=1` or `--build-arg WITH_POCKETTTS=1` (see
+// docker/Dockerfile.controller) to include the runtime. The dispatcher gates
+// each engine on isAvailable() so settings can reference it safely even when
+// the runtime is absent (the engine just falls back to Piper).
+export const TTS_ENGINES = ['piper', 'kokoro', 'chatterbox', 'pocket-tts', 'cloud', 'remote'];
 
 // DJ-voice level trim, in dB. A per-engine gain levels the loudness gap between
 // TTS engines (only PocketTTS self-normalises today, so it sits quieter than
@@ -220,17 +233,17 @@ export const LLM_PROVIDERS = [
 // to a local Ollama and failed with a misleading "can't reach <provider>" error
 // (#493). `openrouter` was originally in that chat-only set, but OpenRouter
 // shipped an OpenAI-compatible embeddings endpoint, so it's back in (#522) and
-// routes through llm/internal/provider/embedding.ts. `anthropic` stays in too —
-// it has no first-party embedding model, but embedding.ts routes it to OpenAI
-// (needs OPENAI_API_KEY), as the picker hint already explains.
+// routes through llm/internal/provider/embedding.ts. `anthropic` was dropped —
+// it has no first-party embedding model and only worked by transparently routing
+// to OpenAI (needs OPENAI_API_KEY), which confused operators; pick OpenAI (or any
+// other embedding provider) directly instead.
 export const EMBEDDING_PROVIDERS = [
   'ollama',
   'openai-compatible',
   'locca',
-  'anthropic',
+  'openrouter',
   'openai',
   'google',
-  'openrouter',
   'requesty',
 ];
 
@@ -268,6 +281,28 @@ function clampDailyTokenCap(raw: any, def: number): number {
 function clampBudgetSoftPct(raw: any, def: number): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return def;
   return Math.min(100, Math.max(0, Math.floor(raw)));
+}
+
+// Per-call max output tokens (issue #712). 0 is a first-class value meaning
+// "off — use each strategy's built-in default", so it passes through unclamped.
+// Any other value is floored and clamped to [MAX_OUTPUT_TOKENS_MIN,
+// MAX_OUTPUT_TOKENS_MAX]; non-numeric/NaN falls back to `def`.
+export const MAX_OUTPUT_TOKENS_MIN = 500;
+export const MAX_OUTPUT_TOKENS_MAX = 8000;
+export function clampMaxOutputTokens(raw: any, def: number): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return def;
+  const n = Math.floor(raw);
+  if (n <= 0) return 0;
+  return Math.min(MAX_OUTPUT_TOKENS_MAX, Math.max(MAX_OUTPUT_TOKENS_MIN, n));
+}
+
+// Resolve the effective per-call output-token cap. Returns the operator's
+// configured value when set (> 0), else `fallback` — the strategy's own
+// built-in default. The single read point for settings.llm.maxOutputTokens;
+// strategy/text|object|agent all default their maxOutputTokens param through it.
+export function resolveMaxOutputTokens(fallback: number): number {
+  const v = get().llm?.maxOutputTokens;
+  return typeof v === 'number' && v > 0 ? v : fallback;
 }
 
 // Count-based hard no-repeat window (distinct plays). Floored to an integer in
@@ -399,7 +434,9 @@ export const SEARCH_PROVIDERS = ['duckduckgo', 'tavily', 'searxng'] as const;
 
 // Canonical mood vocabulary. Shared by the library tagger (music/tag-library.js
 // imports this as MOOD_VOCAB) and the Shows scheduler — a show's `mood`
-// overrides the autonomous dominantMood, so it must come from this list.
+// overrides the autonomous dominantMood, so a non-empty value must come from
+// this list. Empty string means "Any": the show pins no mood and the
+// autonomous chain (festival > weather > time) applies while it's on air.
 export const SHOW_MOODS = [
   'energetic',
   'calm',
@@ -476,10 +513,31 @@ export const AVATAR_EXTENSIONS = ['png', 'jpg', 'jpeg', 'webp'] as const;
 // source of truth for which slugs exist; settings only checks the shape.
 const SKILL_SLUG_RE = /^[a-z0-9-]{1,40}$/;
 
-const PERSONA_LIMIT = 12;
+const PERSONA_LIMIT = 24;
 const SHOWS_LIMIT = 64;
+const PLAYLISTS_PER_SHOW = 10;
 const SKILLS_PER_PERSONA_LIMIT = 20;
 const WEBHOOKS_LIMIT = 16;
+
+// A show can anchor to one or more Navidrome playlists: the playlist union
+// becomes the show's candidate pool. Stored as Subsonic playlist ids; deduped,
+// trimmed, capped. Never validated against the live Navidrome here (offline
+// validation, same as `genre` free-text) — an id that no longer exists simply
+// contributes nothing at pick time (never-starve). Empty = no anchor.
+function coercePlaylistIds(raw: any): string[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of raw) {
+    if (typeof v !== 'string') continue;
+    const id = v.trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+    if (out.length >= PLAYLISTS_PER_SHOW) break;
+  }
+  return out;
+}
 
 // Event names the outbound webhook fan-out can subscribe to. Kept in sync
 // with broadcast/webhooks.ts WEBHOOK_EVENTS — duplicated here so settings.ts
@@ -606,10 +664,16 @@ export const SEED_PERSONAS = [
   },
 ];
 
-// Allowed archive bitrates. Matches the literal branches in radio.liq —
+// Allowed MP3 bitrates — shared by the hourly archive and the live
+// /stream.mp3 mount. Matches the literal branches in radio.liq —
 // %mp3(bitrate=…) needs a parse-time int, so the encoder is pre-baked for
 // this small set. Add a branch in radio.liq if you add a value here.
-export const ARCHIVE_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+export const MP3_BITRATES = [64, 96, 128, 160, 192, 320] as const;
+// Opus + AAC encoders share the same parse-time-literal constraint as %mp3, so
+// each is pre-baked for a small set in radio.liq. Add a branch there if you add
+// a value here.
+export const OPUS_BITRATES = [96, 128, 192, 256, 320] as const;
+export const AAC_BITRATES = [128, 192, 256] as const;
 
 const DEFAULTS = {
   jingleRatio: 30, // 1 jingle per N music tracks
@@ -632,7 +696,24 @@ const DEFAULTS = {
   // Safari/iOS/Firefox on MP3), and it adds a continuous Opus encoder + a
   // 44.1→48k resample, so operators opt in rather than pay that CPU unasked.
   // The mandatory /stream.mp3 mount always serves everyone.
-  stream: { opusEnabled: false },
+  stream: {
+    opusEnabled: false,
+    opusBitrate: 96,
+    flacEnabled: false,
+    aacEnabled: false,
+    aacBitrate: 192,
+    bitrate: 192,
+  },
+  // Per-track loudness normalisation (music/mix.ts gainForLoudness). targetLufs
+  // is what every measured track is pulled toward; maxBoostDb caps the upward
+  // direction only — cuts have a fixed wide clamp, and the boost is further
+  // limited by the track's own measured peak headroom, so widening this on a
+  // dynamic library won't slam the broadcast limiter. Read live per track at
+  // annotate time; no mixer restart.
+  loudness: {
+    targetLufs: -14,
+    maxBoostDb: 6,
+  },
   weather: { lat: 30.7333, lng: 76.7794, locationName: 'Punjab', units: 'metric' as 'metric' | 'imperial' },
   // Operator-facing station name. Substituted into the DJ prompt's {station}
   // placeholder and returned by GET /dj for the landing page. The product is
@@ -703,17 +784,22 @@ const DEFAULTS = {
       // provider === 'openai-compatible'.
       baseUrl: '',
     },
+    // Remote engine — a user-configured self-hosted TTS endpoint that renders
+    // audio over HTTP (POST /speak → audio body, gated on a /health probe).
+    // The TTS equivalent of the LLM's custom base URL. Empty → engine reports
+    // unavailable; the dispatcher falls back.
+    remote: { url: '' },
     // Per-engine voice level trim (dB), applied via Liquidsoap's liq_amplify on
     // every spoken segment that resolves to that engine. Levels the loudness gap
     // between engines (e.g. boost PocketTTS to match raw Piper). Stacks with each
     // persona's own tts.gainDb. All 0 = unity = today's behaviour. See
     // TTS_GAIN_CLAMP_DB and audio/tts.ts:voiceGainDb().
-    gainDb: { piper: 0, kokoro: 0, chatterbox: 0, 'pocket-tts': 0, cloud: 0 },
+    gainDb: { piper: 0, kokoro: 0, chatterbox: 0, 'pocket-tts': 0, cloud: 0, remote: 0 },
     // Per-engine speech-rate multiplier (0.5–2.0×, 1.0 = no change), composed
     // on top of the daypart energy and each persona's own tts.speed in
     // audio/tts.ts:speak(). Only Piper/Kokoro/cloud honour it; chatterbox/
-    // pocket-tts ignore speed so their entries are inert. See clampTtsSpeed().
-    speed: { piper: 1, kokoro: 1, chatterbox: 1, 'pocket-tts': 1, cloud: 1 },
+    // pocket-tts/remote ignore speed so their entries are inert. See clampTtsSpeed().
+    speed: { piper: 1, kokoro: 1, chatterbox: 1, 'pocket-tts': 1, cloud: 1, remote: 1 },
   },
   llm: {
     provider: 'ollama',
@@ -813,6 +899,15 @@ const DEFAULTS = {
     // over the cap fall through to the stateless matcher cascade like every
     // other LLM path. No effect until dailyTokenCap is set.
     exemptRequests: true,
+    // Per-call max OUTPUT tokens — distinct from dailyTokenCap (a cumulative
+    // daily budget). This caps the size of each individual model response. The
+    // strategy primitives default to generous built-ins (4000 text / 8000
+    // object / 8000 agent); 0 = use those defaults. Set a value (clamped
+    // 500–8000) to override all three — the lever for a local model on a small
+    // context window, where an 8000-token response allowance can crowd out the
+    // system prompt / tool listing and risk truncation, and is pure waste with
+    // reasoning off. Resolved via resolveMaxOutputTokens(); see issue #712.
+    maxOutputTokens: 0,
     // When on (or when LLM_DEBUG_RAW is set in the env), every outbound model
     // request's exact body is captured to ${STATE_DIR}/logs/llm-debug.log (the
     // last 10, newest first) and dumped to stderr — a copy-pasteable view of
@@ -865,11 +960,27 @@ const DEFAULTS = {
     baseUrl: '',          // openai-compatible / locca embedding server URL (with /v1)
     ollamaUrl: '',        // Ollama embedding server URL (ollama provider)
     apiKey: '',           // empty -> inherit settings.llm.apiKey
-    seedCount: 0,         // 0 → auto max(200, ceil(sqrt(library)))
-    knnNeighbours: 5,
-    moodVoteThreshold: 0.6,
-    confidenceThreshold: 0.6,
+    seedCount: 0,         // 0 → auto (see autoSeedCount in tag-library.ts: ~4% of
+                          //   the library, floored 200 / capped 2500)
+    // Propagation defaults. These were 5 / 0.6 / 0.6 and propagated almost
+    // nothing: confidence is topSim×coverage (a product of two sub-1 terms — see
+    // tag-propagator.ts), so a 0.6 gate rejected even strong matches and dumped
+    // the library into expensive active-learning. Loosened so KNN propagation
+    // actually carries the bulk of tagging. NOTE: only affects NEW installs / a
+    // reset — an existing settings.json keeps its saved values (loadWithDefaults
+    // below prefers a stored value), so operators are never silently overridden.
+    knnNeighbours: 10,        // was 5 — a broader, more stable neighbour vote
+    moodVoteThreshold: 0.4,   // was 0.6 — a mood carried by ~a third propagates
+    confidenceThreshold: 0.35, // was 0.6 — see the topSim×coverage note above
     maxActiveLearningRounds: 3,
+    // CLAP audio fusion in mood propagation: tracks with a "sounds-like"
+    // audio vector also pull neighbours from the audio-KNN space, scaled by
+    // this weight, before the mood vote (tag-propagator.ts fuseNeighbours).
+    // Sound is the stronger mood signal for instrumentals / thin-metadata
+    // tracks, and CLAP neighbours don't cluster by album. 0 = text-only
+    // (today's behaviour); 1 = trust audio similarity as much as text. Only
+    // bites where the acoustic analysis has produced audio vectors.
+    audioFusionWeight: 0.5,
     enrichment: {
       // Last.fm crowd tags. Tri-state: true = always fetch, false = never,
       // null = auto (fetch only when a Last.fm api_key is configured — see
@@ -953,9 +1064,16 @@ const BOUNDS = {
   // 0 = off; 36000 s (10h) is a generous ceiling that still leaves room for
   // long-form mix shows without letting a typo set an absurd value.
   maxTrackSeconds: { min: 0, max: 36000, type: 'int' },
+  // −23 (EBU R128 broadcast) … −9 (very loud); −14 is the streaming standard.
+  loudnessTargetLufs: { min: -23, max: -9, type: 'float' },
+  // 0 disables boosting entirely (cut-only levelling); 12 dB is plenty — the
+  // per-track peak headroom cap bites long before that on dynamic material.
+  loudnessMaxBoostDb: { min: 0, max: 12, type: 'float' },
 };
 
-const ARCHIVE_BITRATE_SET = new Set<number>(ARCHIVE_BITRATES);
+const MP3_BITRATE_SET = new Set<number>(MP3_BITRATES);
+const OPUS_BITRATE_SET = new Set<number>(OPUS_BITRATES);
+const AAC_BITRATE_SET = new Set<number>(AAC_BITRATES);
 
 let cache: any = null;
 
@@ -1023,16 +1141,18 @@ function normalizeTts(raw: any) {
     voice = '';
   // openai-compatible voices are server-specific (often arbitrary cloning ref
   // names) — no canonical default; leave empty so generateSpeech omits the
-  // field and the server picks its own.
+  // field and the server picks its own. Remote engine voices likewise:
+  // server-specific (id, reference-wav filename, or VoiceDesign prompt), no
+  // Subwave-side default.
   if (!voice && engine === 'cloud' && cloudProvider !== 'openai-compatible') voice = 'alloy';
-  if (!voice && engine !== 'cloud' && engine !== 'chatterbox' && engine !== 'piper') voice = 'bf_isabella';
+  if (!voice && engine !== 'cloud' && engine !== 'chatterbox' && engine !== 'piper' && engine !== 'remote') voice = 'bf_isabella';
   return { engine, cloudProvider, voice, gainDb: clampTtsGain(raw?.gainDb), speed: clampTtsSpeed(raw?.speed) };
 }
 
 function normalizePersona(raw: any) {
   if (!raw || typeof raw !== 'object') return null;
   const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 40) : '';
-  const soul = typeof raw.soul === 'string' ? raw.soul.trim().slice(0, 400) : '';
+  const soul = typeof raw.soul === 'string' ? raw.soul.trim().slice(0, 1000) : '';
   if (!name || !soul) return null;
   // Avatar — stored as a bare basename. Reset to '' if the persisted value
   // doesn't match the strict basename shape, so a hand-edited settings.json
@@ -1081,7 +1201,9 @@ function normalizeShows(raw: any, personaIds: string[]) {
     const name = typeof item.name === 'string' ? item.name.trim().slice(0, 60) : '';
     if (!name) continue;
     if (!personaIds.includes(item.personaId)) continue; // drop dangling owner
-    if (!SHOW_MOODS.includes(item.mood)) continue;
+    // Empty mood = "Any" (the autonomous mood applies on air). An unknown mood
+    // string is coerced to Any rather than dropping the whole show on the floor.
+    const mood = SHOW_MOODS.includes(item.mood) ? item.mood : '';
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
@@ -1103,27 +1225,38 @@ function normalizeShows(raw: any, personaIds: string[]) {
     const fromYear = Number.isFinite(item.fromYear) ? Math.trunc(item.fromYear) : null;
     const toYear = Number.isFinite(item.toYear) ? Math.trunc(item.toYear) : null;
     const energy = SHOW_ENERGY.includes(item.energy) ? item.energy : '';
-    // Opt-in: hard-filter the pick pool to `genre` instead of the default soft
-    // lean. Only meaningful when a genre is set; defaults off so existing shows
-    // and soft shows are byte-for-byte unchanged.
-    const genreStrict = item.genreStrict === true;
+    // Opt-in: hard-filter the pick pool to EVERY set music filter (mood, genre,
+    // era, energy) instead of the default soft leans. Only meaningful when at
+    // least one filter is set; defaults OFF. The legacy genre-only `genreStrict`
+    // is deliberately NOT carried over: the toggle now spans every filter, so
+    // auto-migrating an old genre-strict show would silently harden mood/era/
+    // energy too. Old shows come back soft; the operator re-opts into strict.
+    const filtersStrict = item.filtersStrict === true;
     // Per-show track-length override (seconds). null = inherit the station-wide
     // maxTrackSeconds; 0 = unlimited (opt this show back out of the cap so a
     // long-form mix show can air hour-long sets); >0 = this show's own cap.
     const maxTrackSeconds = coerceMaxTrackSeconds(rawMaxTrackSec(item), true);
+    // Optional Navidrome playlist anchor — the union of these playlists becomes
+    // the show's candidate pool. playlistStrict (default off) makes the playlist
+    // the show's ENTIRE universe; soft just lets it dominate. Both default empty
+    // so existing shows are byte-for-byte unchanged.
+    const playlistIds = coercePlaylistIds(item.playlistIds);
+    const playlistStrict = item.playlistStrict === true;
     out.push({
       id,
       name,
       topic: typeof item.topic === 'string' ? item.topic.trim().slice(0, 1000) : '',
       personaId: item.personaId,
-      mood: item.mood,
+      mood,
       themeId,
       genre,
       fromYear,
       toYear,
       energy,
-      genreStrict,
+      filtersStrict,
       maxTrackSeconds,
+      playlistIds,
+      playlistStrict,
     });
     if (out.length >= SHOWS_LIMIT) break;
   }
@@ -1198,7 +1331,7 @@ export async function load() {
   );
 
   const archiveBitrate =
-    typeof stored.archive?.bitrate === 'number' && ARCHIVE_BITRATE_SET.has(stored.archive.bitrate)
+    typeof stored.archive?.bitrate === 'number' && MP3_BITRATE_SET.has(stored.archive.bitrate)
       ? stored.archive.bitrate
       : DEFAULTS.archive.bitrate;
 
@@ -1218,6 +1351,42 @@ export async function load() {
         typeof stored.stream?.opusEnabled === 'boolean'
           ? stored.stream.opusEnabled
           : DEFAULTS.stream.opusEnabled,
+      opusBitrate:
+        typeof stored.stream?.opusBitrate === 'number' &&
+        OPUS_BITRATE_SET.has(stored.stream.opusBitrate)
+          ? stored.stream.opusBitrate
+          : DEFAULTS.stream.opusBitrate,
+      flacEnabled:
+        typeof stored.stream?.flacEnabled === 'boolean'
+          ? stored.stream.flacEnabled
+          : DEFAULTS.stream.flacEnabled,
+      aacEnabled:
+        typeof stored.stream?.aacEnabled === 'boolean'
+          ? stored.stream.aacEnabled
+          : DEFAULTS.stream.aacEnabled,
+      aacBitrate:
+        typeof stored.stream?.aacBitrate === 'number' &&
+        AAC_BITRATE_SET.has(stored.stream.aacBitrate)
+          ? stored.stream.aacBitrate
+          : DEFAULTS.stream.aacBitrate,
+      bitrate:
+        typeof stored.stream?.bitrate === 'number' && MP3_BITRATE_SET.has(stored.stream.bitrate)
+          ? stored.stream.bitrate
+          : DEFAULTS.stream.bitrate,
+    },
+    loudness: {
+      targetLufs:
+        typeof stored.loudness?.targetLufs === 'number' &&
+        stored.loudness.targetLufs >= BOUNDS.loudnessTargetLufs.min &&
+        stored.loudness.targetLufs <= BOUNDS.loudnessTargetLufs.max
+          ? stored.loudness.targetLufs
+          : DEFAULTS.loudness.targetLufs,
+      maxBoostDb:
+        typeof stored.loudness?.maxBoostDb === 'number' &&
+        stored.loudness.maxBoostDb >= BOUNDS.loudnessMaxBoostDb.min &&
+        stored.loudness.maxBoostDb <= BOUNDS.loudnessMaxBoostDb.max
+          ? stored.loudness.maxBoostDb
+          : DEFAULTS.loudness.maxBoostDb,
     },
     weather: {
       lat: stored.weather?.lat ?? DEFAULTS.weather.lat,
@@ -1320,6 +1489,12 @@ export async function load() {
             ? stored.tts.cloud.baseUrl.trim()
             : DEFAULTS.tts.cloud.baseUrl,
       },
+      remote: {
+        url:
+          typeof stored.tts?.remote?.url === 'string'
+            ? stored.tts.remote.url.trim()
+            : DEFAULTS.tts.remote.url,
+      },
       // Per-engine gain map — one clean gain per known engine, missing keys → 0,
       // unknown keys dropped. So an older save (no gainDb) loads at unity.
       gainDb: normalizeTtsGainMap(stored.tts?.gainDb),
@@ -1372,6 +1547,9 @@ export async function load() {
       // up the defaults (0 = disabled, so they behave exactly as before).
       dailyTokenCap: clampDailyTokenCap(stored.llm?.dailyTokenCap, DEFAULTS.llm.dailyTokenCap),
       budgetSoftPct: clampBudgetSoftPct(stored.llm?.budgetSoftPct, DEFAULTS.llm.budgetSoftPct),
+      // Per-call output cap (issue #712) — pre-existing settings.json lacks the
+      // field and picks up the 0 default (= built-in per-strategy defaults).
+      maxOutputTokens: clampMaxOutputTokens(stored.llm?.maxOutputTokens, DEFAULTS.llm.maxOutputTokens),
       exemptRequests:
         typeof stored.llm?.exemptRequests === 'boolean'
           ? stored.llm.exemptRequests
@@ -1456,6 +1634,10 @@ export async function load() {
         && stored.embedding.maxActiveLearningRounds >= 0
           ? Math.floor(stored.embedding.maxActiveLearningRounds)
           : DEFAULTS.embedding.maxActiveLearningRounds,
+      audioFusionWeight:
+        Number.isFinite(stored.embedding?.audioFusionWeight)
+          ? clamp01(stored.embedding.audioFusionWeight)
+          : DEFAULTS.embedding.audioFusionWeight,
       enrichment: {
         lastfmTags:
           typeof stored.embedding?.enrichment?.lastfmTags === 'boolean'
@@ -1660,6 +1842,11 @@ function validateTtsBlock(raw, where) {
     } else if (voice.length < 1 || voice.length > 100) {
       throw new Error(`${where}.tts.voice must be 1-100 chars`);
     }
+  } else if (t.engine === 'remote') {
+    // Remote engine voices are server-specific — the sidecar interprets them
+    // (built-in id, reference-wav filename, or VoiceDesign prompt). Empty is
+    // valid: the sidecar picks its own default.
+    if (voice.length > 100) throw new Error(`${where}.tts.voice must be 0-100 chars`);
   } else {
     // piper: empty = use the baked-in default voice. Otherwise the value must
     // be an .onnx filename (no path separators) referencing a model the operator
@@ -1689,8 +1876,8 @@ export function validatePersonasStrict(raw) {
     if (name.length < 1 || name.length > 40)
       throw new Error(`personas[${i}].name must be 1-40 chars`);
     const soul = String(item.soul ?? '').trim();
-    if (soul.length < 1 || soul.length > 400)
-      throw new Error(`personas[${i}].soul must be 1-400 chars`);
+    if (soul.length < 1 || soul.length > 1000)
+      throw new Error(`personas[${i}].soul must be 1-1000 chars`);
     const tagline = String(item.tagline ?? '').trim();
     if (tagline.length > 80) throw new Error(`personas[${i}].tagline must be 0-80 chars`);
     // language — optional free text ("Turkish", "Türkçe", …). Absent/empty →
@@ -1802,8 +1989,12 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     if (!personaIds.includes(item.personaId)) {
       throw new Error(`shows[${i}].personaId must reference an existing persona`);
     }
-    if (!SHOW_MOODS.includes(item.mood)) {
-      throw new Error(`shows[${i}].mood must be one of: ${SHOW_MOODS.join(', ')}`);
+    // Empty/missing mood means "Any": the show pins no mood and the autonomous
+    // dominantMood chain (festival > weather > time) applies while it's on air.
+    // A non-empty mood must come from the canonical vocabulary.
+    const mood = item.mood == null || item.mood === '' ? '' : String(item.mood);
+    if (mood && !SHOW_MOODS.includes(mood)) {
+      throw new Error(`shows[${i}].mood must be empty (any) or one of: ${SHOW_MOODS.join(', ')}`);
     }
     // Optional per-show theme override. Empty/missing means "fall back to the
     // station default while this show is on air". The allow-set is built once
@@ -1825,8 +2016,12 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
     if (energy && !SHOW_ENERGY.includes(energy)) {
       throw new Error(`shows[${i}].energy must be one of: ${SHOW_ENERGY.join(', ')}`);
     }
-    // Opt-in hard genre filter (vs the default soft lean). Boolean, defaults off.
-    const genreStrict = item.genreStrict === true;
+    // Opt-in hard filter across every set music constraint — mood, genre, era,
+    // energy (vs the default soft leans). Boolean, defaults OFF. The legacy
+    // genre-only `genreStrict` is deliberately NOT carried over (see the load
+    // path): the toggle now spans every filter, so migrating it would silently
+    // harden mood/era/energy an old show never opted into.
+    const filtersStrict = item.filtersStrict === true;
     const parseYear = (v, field) => {
       if (v == null || v === '') return null;
       const n = Number(v);
@@ -1862,10 +2057,27 @@ function validateShowsStrict(raw, personas, allowedThemeIds: Set<string>) {
       }
       maxTrackSeconds = n;
     }
+    // Optional Navidrome playlist anchor. Shape-checked only (array of strings,
+    // capped) — ids are resolved against the live Navidrome at pick time, never
+    // here, so a stale id is tolerated. playlistStrict is a plain boolean.
+    let playlistIds: string[] = [];
+    if (item.playlistIds !== undefined && item.playlistIds !== null) {
+      if (!Array.isArray(item.playlistIds)) {
+        throw new Error(`shows[${i}].playlistIds must be an array of strings`);
+      }
+      if (item.playlistIds.length > PLAYLISTS_PER_SHOW) {
+        throw new Error(`shows[${i}].playlistIds must have at most ${PLAYLISTS_PER_SHOW} entries`);
+      }
+      for (const v of item.playlistIds) {
+        if (typeof v !== 'string') throw new Error(`shows[${i}].playlistIds entries must be strings`);
+      }
+      playlistIds = coercePlaylistIds(item.playlistIds);
+    }
+    const playlistStrict = item.playlistStrict === true;
     let id = typeof item.id === 'string' && ID_RE.test(item.id) ? item.id : mintId('s_');
     if (seen.has(id)) id = mintId('s_');
     seen.add(id);
-    return { id, name, topic, personaId: item.personaId, mood: item.mood, themeId, genre, fromYear, toYear, energy, genreStrict, maxTrackSeconds };
+    return { id, name, topic, personaId: item.personaId, mood, themeId, genre, fromYear, toYear, energy, filtersStrict, maxTrackSeconds, playlistIds, playlistStrict };
   });
 }
 
@@ -2011,9 +2223,9 @@ export async function update(patch) {
     }
     if (a.bitrate !== undefined) {
       const v = parseInt(a.bitrate, 10);
-      if (!Number.isFinite(v) || !ARCHIVE_BITRATE_SET.has(v)) {
+      if (!Number.isFinite(v) || !MP3_BITRATE_SET.has(v)) {
         throw new Error(
-          `archive.bitrate must be one of: ${ARCHIVE_BITRATES.join(', ')}`,
+          `archive.bitrate must be one of: ${MP3_BITRATES.join(', ')}`,
         );
       }
       if (v !== cur.archive.bitrate) {
@@ -2030,6 +2242,77 @@ export async function update(patch) {
         next.stream.opusEnabled = v;
         restart = true;
       }
+    }
+    if (st.opusBitrate !== undefined) {
+      const v = parseInt(st.opusBitrate, 10);
+      if (!Number.isFinite(v) || !OPUS_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.opusBitrate must be one of: ${OPUS_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.opusBitrate) {
+        next.stream.opusBitrate = v;
+        restart = true;
+      }
+    }
+    if (st.flacEnabled !== undefined) {
+      const v = !!st.flacEnabled;
+      if (v !== cur.stream.flacEnabled) {
+        next.stream.flacEnabled = v;
+        restart = true;
+      }
+    }
+    if (st.aacEnabled !== undefined) {
+      const v = !!st.aacEnabled;
+      if (v !== cur.stream.aacEnabled) {
+        next.stream.aacEnabled = v;
+        restart = true;
+      }
+    }
+    if (st.aacBitrate !== undefined) {
+      const v = parseInt(st.aacBitrate, 10);
+      if (!Number.isFinite(v) || !AAC_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.aacBitrate must be one of: ${AAC_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.aacBitrate) {
+        next.stream.aacBitrate = v;
+        restart = true;
+      }
+    }
+    if (st.bitrate !== undefined) {
+      const v = parseInt(st.bitrate, 10);
+      if (!Number.isFinite(v) || !MP3_BITRATE_SET.has(v)) {
+        throw new Error(
+          `stream.bitrate must be one of: ${MP3_BITRATES.join(', ')}`,
+        );
+      }
+      if (v !== cur.stream.bitrate) {
+        next.stream.bitrate = v;
+        restart = true;
+      }
+    }
+  }
+  if ('loudness' in patch) {
+    // Read live by queue.applyLoudnessGain when each track is annotated — no
+    // Liquidsoap file, no restart. Applies from the next queued track.
+    const lo = patch.loudness || {};
+    if (lo.targetLufs !== undefined) {
+      const v = parseFloat(lo.targetLufs);
+      const b = BOUNDS.loudnessTargetLufs;
+      if (!Number.isFinite(v) || v < b.min || v > b.max) {
+        throw new Error(`loudness.targetLufs must be number in [${b.min}, ${b.max}]`);
+      }
+      next.loudness.targetLufs = v;
+    }
+    if (lo.maxBoostDb !== undefined) {
+      const v = parseFloat(lo.maxBoostDb);
+      const b = BOUNDS.loudnessMaxBoostDb;
+      if (!Number.isFinite(v) || v < b.min || v > b.max) {
+        throw new Error(`loudness.maxBoostDb must be number in [${b.min}, ${b.max}]`);
+      }
+      next.loudness.maxBoostDb = v;
     }
   }
   if ('weather' in patch) {
@@ -2223,6 +2506,28 @@ export async function update(patch) {
         throw new Error('tts.cloud.baseUrl is required when provider is "openai-compatible"');
       }
     }
+    if (t.remote !== undefined) {
+      const r = t.remote || {};
+      if (r.url !== undefined) {
+        const v = String(r.url).trim();
+        if (v.length > 200) throw new Error('tts.remote.url must be 0-200 chars');
+        if (v) {
+          // Full parse (not just a prefix test) so a malformed host/port —
+          // e.g. http://host:notaport or http://host:99999 — is rejected at
+          // save time instead of silently failing the /health probe later.
+          let parsed: URL;
+          try {
+            parsed = new URL(v);
+          } catch {
+            throw new Error('tts.remote.url must be a valid http:// or https:// URL');
+          }
+          if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+            throw new Error('tts.remote.url must start with http:// or https://');
+          }
+        }
+        next.tts.remote.url = v.replace(/\/+$/, ''); // strip trailing slashes
+      }
+    }
     if (t.gainDb !== undefined) {
       if (typeof t.gainDb !== 'object' || t.gainDb === null || Array.isArray(t.gainDb)) {
         throw new Error('tts.gainDb must be an object keyed by engine');
@@ -2272,6 +2577,9 @@ export async function update(patch) {
     }
     if (l.budgetSoftPct !== undefined) {
       next.llm.budgetSoftPct = clampBudgetSoftPct(Number(l.budgetSoftPct), next.llm.budgetSoftPct);
+    }
+    if (l.maxOutputTokens !== undefined) {
+      next.llm.maxOutputTokens = clampMaxOutputTokens(Number(l.maxOutputTokens), next.llm.maxOutputTokens);
     }
     if (l.exemptRequests !== undefined) {
       next.llm.exemptRequests = !!l.exemptRequests;
@@ -2406,6 +2714,13 @@ export async function update(patch) {
         throw new Error('embedding.maxActiveLearningRounds must be an integer 0-10');
       }
       next.embedding.maxActiveLearningRounds = v;
+    }
+    if (e.audioFusionWeight !== undefined) {
+      const v = parseFloat(e.audioFusionWeight);
+      if (!Number.isFinite(v) || v < 0 || v > 1) {
+        throw new Error('embedding.audioFusionWeight must be between 0 and 1');
+      }
+      next.embedding.audioFusionWeight = v;
     }
     if (e.enrichment !== undefined) {
       const en = e.enrichment || {};
@@ -2579,13 +2894,18 @@ export function resolveActiveShow(date = new Date(), s = get()) {
     fromYear: Number.isFinite(show.fromYear) ? show.fromYear : null,
     toYear: Number.isFinite(show.toYear) ? show.toYear : null,
     energy: typeof show.energy === 'string' ? show.energy : '',
-    // When true (and a genre is set) the pick pool is hard-filtered to the
-    // genre instead of softly leaned; off-genre tracks only survive as a
-    // never-starve fallback. Defaults off.
-    genreStrict: show.genreStrict === true,
+    // When true, every set music filter (mood, genre, era, energy) is a hard
+    // filter on the pick pool instead of a soft lean; off-filter tracks only
+    // survive as a never-starve fallback. Defaults off.
+    filtersStrict: show.filtersStrict === true,
     // Per-show track-length cap override (seconds). null = inherit the station
     // default; 0 = unlimited; >0 = own cap. See effectiveMaxTrackSec().
     maxTrackSeconds: show.maxTrackSeconds != null ? show.maxTrackSeconds : null,
+    // Navidrome playlist anchor: the union of these playlists becomes the show's
+    // candidate pool (music/show-playlist.ts). playlistStrict makes it the show's
+    // entire universe; soft just lets it dominate. Empty array = no anchor.
+    playlistIds: Array.isArray(show.playlistIds) ? show.playlistIds.filter((v: any) => typeof v === 'string') : [],
+    playlistStrict: show.playlistStrict === true,
     // Empty string means "fall back to the station-wide default". The route
     // layer is responsible for resolving an empty/stale id against the live
     // theme registry; we just surface what the show declares.
@@ -2692,6 +3012,11 @@ const LIQ_CROSSFADE_PATH = `${STATE_DIR}/liquidsoap_crossfade.txt`;
 const LIQ_ARCHIVE_ENABLED_PATH = `${STATE_DIR}/liquidsoap_archive_enabled.txt`;
 const LIQ_ARCHIVE_BITRATE_PATH = `${STATE_DIR}/liquidsoap_archive_bitrate.txt`;
 const LIQ_OPUS_ENABLED_PATH = `${STATE_DIR}/liquidsoap_opus_enabled.txt`;
+const LIQ_OPUS_BITRATE_PATH = `${STATE_DIR}/liquidsoap_opus_bitrate.txt`;
+const LIQ_FLAC_ENABLED_PATH = `${STATE_DIR}/liquidsoap_flac_enabled.txt`;
+const LIQ_AAC_ENABLED_PATH = `${STATE_DIR}/liquidsoap_aac_enabled.txt`;
+const LIQ_AAC_BITRATE_PATH = `${STATE_DIR}/liquidsoap_aac_bitrate.txt`;
+const LIQ_STREAM_BITRATE_PATH = `${STATE_DIR}/liquidsoap_stream_bitrate.txt`;
 const LIQ_STATION_NAME_PATH = `${STATE_DIR}/liquidsoap_station_name.txt`;
 
 export async function writeLiquidsoapSettings(s) {
@@ -2700,6 +3025,11 @@ export async function writeLiquidsoapSettings(s) {
   await writeFile(LIQ_ARCHIVE_ENABLED_PATH, s.archive.enabled ? 'true' : 'false');
   await writeFile(LIQ_ARCHIVE_BITRATE_PATH, String(s.archive.bitrate));
   await writeFile(LIQ_OPUS_ENABLED_PATH, s.stream.opusEnabled ? 'true' : 'false');
+  await writeFile(LIQ_OPUS_BITRATE_PATH, String(s.stream.opusBitrate));
+  await writeFile(LIQ_FLAC_ENABLED_PATH, s.stream.flacEnabled ? 'true' : 'false');
+  await writeFile(LIQ_AAC_ENABLED_PATH, s.stream.aacEnabled ? 'true' : 'false');
+  await writeFile(LIQ_AAC_BITRATE_PATH, String(s.stream.aacBitrate));
+  await writeFile(LIQ_STREAM_BITRATE_PATH, String(s.stream.bitrate));
   await writeFile(LIQ_STATION_NAME_PATH, s.station || DEFAULTS.station);
 }
 
@@ -2712,7 +3042,8 @@ export async function ensureLiquidsoapSettingsFile() {
     !existsSync(LIQ_CROSSFADE_PATH) ||
     !existsSync(LIQ_ARCHIVE_ENABLED_PATH) ||
     !existsSync(LIQ_ARCHIVE_BITRATE_PATH) ||
-    !existsSync(LIQ_OPUS_ENABLED_PATH)
+    !existsSync(LIQ_OPUS_ENABLED_PATH) ||
+    !existsSync(LIQ_STREAM_BITRATE_PATH)
   ) {
     await writeLiquidsoapSettings(s);
   }

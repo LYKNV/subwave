@@ -16,7 +16,7 @@ import { tagBatch, TAGGER_BATCH_SYSTEM } from '../music/tagger-core.js';
 import { promptVocabHash } from '../music/embeddings.js';
 import { activeModelLabel } from '../llm/provider.js';
 import { queue } from '../broadcast/queue.js';
-import { tagger, startAnalyzer, startReconcile } from '../broadcast/tagger.js';
+import { tagger, taggerView, startAnalyzer, startReconcile } from '../broadcast/tagger.js';
 
 export const router = express.Router();
 
@@ -348,6 +348,17 @@ router.get('/library/coverage', requireAdmin, async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /library/tagger — the tagger snapshot ALONE (same slicing as the /settings
+// payload's `tagger` slice, via the shared taggerView helper). The admin library
+// panel polls THIS on its fast loop (3s running / 10s idle) so live run progress
+// doesn't drag the whole heavy /settings payload down with it; /settings is left
+// to the slower loop that only needs libraryStats + audio + budget.
+// ---------------------------------------------------------------------------
+router.get('/library/tagger', requireAdmin, (_req, res) => {
+  res.json({ tagger: taggerView() });
+});
+
+// ---------------------------------------------------------------------------
 // POST /library/analyze — kick off the standalone analysis pass as a
 // background child (the admin "Analyze audio" button). Runs bpm/key/intro for
 // un-analysed tracks and — when audio embeddings are enabled via the settings
@@ -358,7 +369,12 @@ router.get('/library/coverage', requireAdmin, async (req, res) => {
 router.post('/library/analyze', requireAdmin, (req, res) => {
   if (tagger.running) return res.status(409).json({ error: 'a tagger/analyzer run is already active', tagger });
   const limit = parseIntSafe(req.body?.limit, null);
-  startAnalyzer({ limit: limit ?? undefined, audio: true });
+  // `vocal:true` (the "Backfill vocal analysis" button, #646) forces the Demucs
+  // vocal pass on tracks missing ranges; the default path backfills CLAP audio
+  // vectors. During a vocal run audio is left to its env default so the two
+  // backfills stay independently triggerable.
+  const vocal = req.body?.vocal === true;
+  startAnalyzer({ limit: limit ?? undefined, audio: vocal ? undefined : true, vocal: vocal || undefined });
   res.json({ ok: true, tagger });
 });
 
@@ -374,6 +390,31 @@ router.post('/library/reconcile', requireAdmin, (req, res) => {
   if (tagger.running) return res.status(409).json({ error: 'a tagger/analyzer run is already active', tagger });
   startReconcile();
   res.json({ ok: true, tagger });
+});
+
+// ---------------------------------------------------------------------------
+// POST /library/reset — nuke ALL tagging data and start fresh. Deletes the
+// entire library.db (mood/energy tags, text + CLAP embeddings, acoustic
+// analysis, Last.fm/lyric enrichment) and reopens an empty DB. Coverage's
+// `total` (the Navidrome library size) is untouched — only the tagged/analysed
+// figures drop to 0. Refused while a tagger/analyzer run holds the single-flight
+// slot (deleting the file out from under the child would corrupt it). This is
+// irreversible short of a backup restore; the admin UI gates it behind an
+// explicit typed confirmation.
+// ---------------------------------------------------------------------------
+router.post('/library/reset', requireAdmin, async (_req, res) => {
+  if (tagger.running) return res.status(409).json({ error: 'a tagger/analyzer run is already active', tagger });
+  try {
+    await library.reset();
+    // The tagged/analysed counts are read live from the DB, so they're already 0
+    // now; kick a coverage refresh so the panel's snapshot reflects it promptly.
+    coverage.refresh();
+    queue.log('warn', 'library reset: wiped all tagging data (tags, embeddings, acoustics, enrichment)');
+    res.json({ ok: true });
+  } catch (err: any) {
+    queue.log('error', `/library/reset failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -467,7 +508,13 @@ router.post('/library/retag', requireAdmin, async (req, res) => {
           },
           { lastfmTags, lyricExcerpt },
         );
-        const [vec] = await embeddings.embedTexts([text]);
+        // Document embed — must match the task-prefix mode the rest of the
+        // index was built in, or this one track drifts in the KNN space.
+        const textMode = embeddings.resolveIndexTextMode(
+          db.getEmbeddingMeta()?.textMode,
+          db.vectorCount(),
+        );
+        const [vec] = await embeddings.embedDocTexts([text], textMode);
         if (vec) db.upsertTrackVector(id, vec);
       } catch (err: any) {
         queue.log('warn', `/library/retag embed ${id}: ${err.message}`);

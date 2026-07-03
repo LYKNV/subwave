@@ -17,21 +17,28 @@ export const ANGLES = {
     'Lean into contrast: how this track sits against the time of day or the mood of the moment.',
     'Just say one true sentence and let the music start.',
   ],
+  // Links are FORWARD-LOOKING — they introduce the track now starting and never
+  // back-announce the previous one (it may not be what actually aired just
+  // before this; see generateLink + dj-agent linkClause). So every angle here is
+  // about the track coming on or the moment, never "that was…". Keep them varied
+  // so the opener doesn't settle into one shape ("here's…", "coming up…").
   link: [
-    'Comment on a contrast or similarity between the two tracks (era, mood, instrumentation, tempo).',
-    'Tie the next track to the time of day or the season — specifically, not generically.',
-    'Mention something small and tactile about right now (the dark, the smell of coffee, the day of the week).',
-    'Reference the previous artist or song obliquely — one detail, no full back-announce.',
-    'Skip the back-announce entirely and just open a small thought about what is next.',
-    'Acknowledge a listener-shaped moment (commute, late shift, weekend, midweek lull) without naming any listener.',
-    'Make one quiet observation that has nothing to do with either track and let the next song answer it.',
+    'Open mid-thought, as if you never stopped talking — skip "here\'s" / "this is" / "coming up" entirely.',
+    'Lead with one specific image from right now — the hour, the light, the day, the weather — and let the track answer it.',
+    'Drop one detail about the track now starting (its era, its scene, how its first seconds feel), woven into a sentence, not announced like a title card.',
+    'Make one small, true observation that has nothing to do with music, then let the song pick it up.',
+    'Name the artist only in passing, folded into a thought — never "this is X by Y".',
+    'Pose a tiny question or thought and let the track be the answer.',
+    'Acknowledge a listener-shaped moment (commute, late shift, weekend, midweek lull) without naming anyone, then ease in.',
+    'Say one honest sentence about how this track lands right now, and get out of the way.',
+    'React to the shift in the room as it comes on — how it lifts, settles, darkens, or opens things up.',
   ],
   station_id: [
     'Plain ident — say the station name and the DJ name, nothing else.',
     'Anchor the ident to the current moment (a Tuesday afternoon, a quiet evening, the slow part of Sunday).',
     'Make it a near-aside: like someone reminding themselves where they are.',
     'Open with the time of day, then drop the station name in the middle of the sentence.',
-    'A single observation about broadcasting from a homelab, with the station name woven in.',
+    'One small observation about the station itself — its scale, its late hours, its one-room intimacy — with the name woven in.',
   ],
   hourly: [
     'State the time as a small fact, then anchor it with one observation about the day.',
@@ -90,9 +97,13 @@ export function buildContextLines(
   }
   if (on('clock') && context?.clock) {
     const tags: string[] = [];
+    if (context.clock.isDark) tags.push('after dark');
     if (context.clock.isWeekend) tags.push('weekend');
     if (context.clock.isLateNight) tags.push('late night');
-    if (context.clock.isCommute) tags.push('commute hour');
+    // No 'commute hour' tag: stapling it to every spoken segment (alongside the
+    // drive-time period label) made the DJ read as a traffic-report station for
+    // two hours a day. isCommute still gates commute-window skills and the
+    // energy pacing in code (context.ts) — it just isn't prompt fodder anymore.
     lines.push(`Local time: ${context.clock.hhmm}${tags.length ? ' · ' + tags.join(' · ') : ''}`);
   }
   if (on('time') && context?.time) lines.push(`Period: ${context.time.period} (${context.time.vibe})`);
