@@ -981,6 +981,7 @@ const DEFAULTS = {
     // (today's behaviour); 1 = trust audio similarity as much as text. Only
     // bites where the acoustic analysis has produced audio vectors.
     audioFusionWeight: 0.5,
+    batchSize: 25,
     enrichment: {
       // Last.fm crowd tags. Tri-state: true = always fetch, false = never,
       // null = auto (fetch only when a Last.fm api_key is configured — see
@@ -1638,6 +1639,10 @@ export async function load() {
         Number.isFinite(stored.embedding?.audioFusionWeight)
           ? clamp01(stored.embedding.audioFusionWeight)
           : DEFAULTS.embedding.audioFusionWeight,
+      batchSize:
+        Number.isFinite(stored.embedding?.batchSize) && stored.embedding.batchSize >= 1
+          ? Math.max(1, Math.min(50, Math.floor(stored.embedding.batchSize)))
+          : DEFAULTS.embedding.batchSize,
       enrichment: {
         lastfmTags:
           typeof stored.embedding?.enrichment?.lastfmTags === 'boolean'
