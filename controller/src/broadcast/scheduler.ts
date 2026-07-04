@@ -13,7 +13,7 @@ import * as library from '../music/library.js';
 import * as settings from '../settings.js';
 import { artistKey } from '../music/recency.js';
 import { normGenre, genreMatches, inYearRange, preferEnergy, preferEnergyStrict, preferMood } from '../music/show-filter.js';
-import { resolveShowPlaylistPool } from '../music/show-playlist.js';
+import { resolveShowPlaylistPool, resolveExcludedPlaylistIds } from '../music/show-playlist.js';
 import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
 import * as session from './session.js';
@@ -98,6 +98,7 @@ async function refreshAutoPlaylistInner() {
   const playlistPool = show ? await resolveShowPlaylistPool(show) : null;
   const hasPlaylist = !!playlistPool?.tracks?.length;
   const strictPlaylist = hasPlaylist && !!show?.playlistStrict;
+  const excludedIds = show ? await resolveExcludedPlaylistIds(show) : null;
 
   // Resolve the show's free-text genre to the library's exact tag once, up front.
   // A resolution failure / absent genre leaves genreName null, which disables the
@@ -276,6 +277,17 @@ async function refreshAutoPlaylistInner() {
   if (strictPlaylist) {
     const inPl = pool.filter((t: any) => t?.id && playlistPool!.ids.has(t.id));
     if (inPl.length) { pool.length = 0; pool.push(...inPl); }
+  }
+
+  // Excluded playlists (blocklist): drop every track from a blocklisted
+  // playlist. The pick paths (picker.ts / picker-tools.ts) apply this as a HARD
+  // filter — an empty pool there just skips the LLM pick and coasts on this
+  // auto.m3u. This IS that coast, the last dead-air guard, so it mirrors the
+  // strict-playlist block above: never-starve if the blocklist would empty the
+  // pool (a mis-set "exclude everything" plays an excluded track over silence).
+  if (excludedIds) {
+    const allowed = pool.filter((t: any) => t?.id && !excludedIds.has(t.id));
+    if (allowed.length) { pool.length = 0; pool.push(...allowed); }
   }
 
   // Stamp the station cap on every fallback entry (#447). max-track-length is a
