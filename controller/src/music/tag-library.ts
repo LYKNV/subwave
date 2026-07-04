@@ -112,11 +112,11 @@ interface CliFlags {
 
 function parseFlags(): CliFlags {
   const args = process.argv.slice(2);
+  // null = no --batch flag → fall back to settings.embedding.batchSize in main().
+  const rawBatch = parseIntFlag(args, '--batch');
   return {
     limit: parseIntFlag(args, '--limit') ?? Infinity,
-    batchSize: parseIntFlag(args, '--batch') !== null
-      ? Math.max(1, Math.min(50, parseIntFlag(args, '--batch')!))
-      : null,
+    batchSize: rawBatch !== null ? Math.max(1, Math.min(50, rawBatch)) : null,
     seedCount: parseIntFlag(args, '--seeds'),
     // null = fall back to settings.embedding.maxActiveLearningRounds
     maxRounds: parseIntFlag(args, '--max-rounds'),

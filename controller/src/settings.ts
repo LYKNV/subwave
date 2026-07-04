@@ -2727,6 +2727,16 @@ export async function update(patch) {
       }
       next.embedding.audioFusionWeight = v;
     }
+    // LLM tag batch size — how many tracks per tagging call. Weaker models
+    // truncate/error on large batches, so operators can drop this. Clamp kept in
+    // sync with the CLI --batch flag + load() normalisation (music/tag-library.ts).
+    if (e.batchSize !== undefined) {
+      const v = parseInt(e.batchSize, 10);
+      if (!Number.isFinite(v) || v < 1 || v > 50) {
+        throw new Error('embedding.batchSize must be an integer 1-50');
+      }
+      next.embedding.batchSize = v;
+    }
     if (e.enrichment !== undefined) {
       const en = e.enrichment || {};
       if (en.lastfmTags !== undefined) {
