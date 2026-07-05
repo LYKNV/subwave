@@ -338,12 +338,18 @@ async function refreshAutoPlaylistInner() {
 export async function runHourlyCheck() {
   return withTrace({ kind: 'hourly' }, async () => {
     const ctx = await getFullContext();
+    // Guest rotation: on a show with co-hosts the time check may come from a
+    // guest. Solo shows get the effective persona — behaviour-identical.
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateHourlyTime({
       recap: queue.getDjRecap(),
       context: ctx,
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    await queue.announce(script, 'hourly-check');
+    await queue.announce(script, 'hourly-check', {
+      persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name },
+    });
     return script;
   });
 }
@@ -391,17 +397,78 @@ export async function runLink() {
     if (!current) throw new Error('nothing is playing — no track to link from');
     const previous = queue.history[0]?.track || null;
     const ctx = await getFullContext();
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateLink({
       previous,
       current,
       context: ctx,
+      // Unlike a pick-attached link, this one airs right now (announce below),
+      // so the live clock in ctx is the air time — the model may speak it.
+      clockIsAirTime: true,
       recap: queue.getDjRecap(),
       recentTracks: queue.getRecentTracks(),
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    await queue.announce(script, 'link');
+    await queue.announce(script, 'link', {
+      persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name },
+    });
     return script;
   });
+}
+
+// ---------------------------------------------------------------------------
+// BANTER
+// A short scripted exchange between the show's host and its guest co-hosts —
+// the multi-voice payoff of guest shows. One structured LLM call writes the
+// whole exchange; queue.announceExchange renders each line in its speaker's
+// own voice and airs them back-to-back through the serialized voice chain.
+// ---------------------------------------------------------------------------
+
+// Gate-free runner — also called directly by the /dj/segment command route as
+// an operator override (which is why it ignores the show's banter toggle: an
+// explicit button press always fires; only the ROSTER is non-negotiable, since
+// a one-person exchange can't exist). The cron wrapper below adds the gates.
+export async function runBanter() {
+  return withTrace({ kind: 'banter' }, async () => {
+    const { host, guests, show } = settings.getOnAirRoster();
+    if (!host || !guests.length) {
+      throw new Error('banter needs a show with guest co-hosts on air');
+    }
+    const ctx = await getFullContext();
+    const lines = await dj.generateBanter({
+      host, guests, show,
+      current: queue.current?.track || null,
+      context: ctx,
+      recap: queue.getDjRecap(),
+      recentOpeners: queue.getRecentOpeners(),
+    });
+    if (!lines) throw new Error('banter generation returned no usable exchange');
+    const ok = await queue.announceExchange(lines, 'banter');
+    if (!ok) throw new Error('banter exchange failed to render');
+    return lines.map(l => `${l.persona.name}: ${l.text}`).join('\n');
+  });
+}
+
+// Minimum quiet gap before an exchange: banter is the longest spoken break we
+// air, so it shouldn't pile onto a talk break the listener just heard.
+const BANTER_MIN_GAP_MS = 5 * 60_000;
+
+async function banterTick() {
+  const { show, guests } = settings.getOnAirRoster();
+  if (!show?.banter || !guests.length) return;  // solo show, or banter not opted in
+  if (!shouldFire('banter')) return;
+  if (!djCallsAllowed()) return;  // nobody listening — save the tokens and the breath
+  if (!optionalSegmentsAllowed()) return;  // over the daily token budget — mute optional segments
+  // Every standalone talk break counts — idents, hourly, handoff, banter AND
+  // the segment-director spots (weather/news/…). Track-tied links don't, or a
+  // chatty DJ-mode station would never banter.
+  if (Date.now() - queue.getLastTalkBreakAt() < BANTER_MIN_GAP_MS) return;
+  try {
+    await runBanter();
+  } catch (err) {
+    queue.log('error', `Banter failed: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,13 +506,16 @@ async function skillsTick() {
 export async function runStationId({ atNextTrack = false } = {}) {
   return withTrace({ kind: 'station-id' }, async () => {
     const ctx = await getFullContext();
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateStationId({
       recap: queue.getDjRecap(),
       context: ctx,
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    if (atNextTrack) await queue.announceAtNextTrack(script, 'station-id');
-    else await queue.announce(script, 'station-id');
+    const opts = { persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name } };
+    if (atNextTrack) await queue.announceAtNextTrack(script, 'station-id', opts);
+    else await queue.announce(script, 'station-id', opts);
     return script;
   });
 }
@@ -541,6 +611,11 @@ export function startScheduler() {
   // Deliberately NOT :00: the hourly check owns the top of the hour, and firing
   // both there stacked two voice segments on each other (issue #310).
   cron.schedule('15,30,45 * * * *', stationId);
+
+  // Guest-show banter at :20/:50 — minutes no other wall-clock talker owns
+  // (same issue-#310 reasoning as the ident slots). The handler gates on the
+  // show's banter toggle, the live roster, frequency, listeners and budget.
+  cron.schedule('20,50 * * * *', banterTick);
 
   // Cleanup every hour
   cron.schedule('0 * * * *', cleanup);
