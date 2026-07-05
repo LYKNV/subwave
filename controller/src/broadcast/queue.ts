@@ -17,7 +17,7 @@ import * as session from './session.js';
 import { getFullContext, energyForDaypart } from '../context.js';
 import * as settings from '../settings.js';
 import { logEvent } from '../observability/events.js';
-import { djCallsAllowed } from './listeners.js';
+import { djCallsAllowed, presentListeners } from './listeners.js';
 import * as webhooks from './webhooks.js';
 import * as scrobble from './scrobble.js';
 import * as liquidsoapControl from './liquidsoap-control.js';
@@ -1039,14 +1039,26 @@ class Queue {
       requestedBy: this.current.requestedBy || null,
     });
 
-    // Outbound fan-out — fire-and-forget; never blocks the picker path.
-    webhooks.notify('track.play', {
+    const trackPayload = {
       title: this.current.track.title,
       artist: this.current.track.artist || null,
       album: this.current.track.album || null,
       source: this.current.source,
       requestedBy: this.current.requestedBy || null,
-    });
+    };
+
+    // Outbound fan-out — fire-and-forget; never blocks the picker path.
+    // Optional listener gate (webhooksPolicy.trackPlayListenerGated): fail-closed
+    // like scrobble — see scrobble.ts. Silent skip when gated and count unknown.
+    const gated = !!settings.get()?.webhooksPolicy?.trackPlayListenerGated;
+    if (gated) {
+      const listeners = presentListeners();
+      if (listeners !== null) {
+        webhooks.notify('track.play', { ...trackPayload, listeners });
+      }
+    } else {
+      webhooks.notify('track.play', trackPayload);
+    }
 
     // Last.fm / ListenBrainz — also fire-and-forget. Internally gated on
     // listener count > 0 (fail-closed) and per-backend enable flags.
