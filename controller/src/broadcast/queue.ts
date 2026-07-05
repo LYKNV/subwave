@@ -2,10 +2,11 @@
 // to the file Liquidsoap watches. A now-playing watcher rotates items
 // between upcoming → current → history based on what Liquidsoap reports.
 
-import { writeFile, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { existsSync, readFileSync, openSync, readSync, closeSync, statSync } from 'node:fs';
-import { stat, rename } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { config } from '../config.js';
+import { writeFileAtomic } from '../util/atomic-file.js';
 import * as subsonic from '../music/subsonic.js';
 import * as mix from '../music/mix.js';
 import * as library from '../music/library.js';
@@ -56,6 +57,15 @@ const EMPTY_DJ_QUEUE_CLEAR_THRESHOLD = 3;
 // length apart — keeps its own entry rather than being merged away.
 export const BACKFILL_DEDUP_MAX_GAP_MS = 15 * 60_000;
 
+// How far PAST the next pick's expected start the show-boundary look-ahead
+// probes (see onTrackStarted). The pick's start time alone under-corrects: a
+// track starting 30s before a boundary plays almost entirely inside the new
+// show but would still resolve the old one. Two minutes ≈ the midpoint of a
+// typical track, so whichever show owns most of the pick's airtime wins. The
+// symmetric cost — an on-format-for-the-NEXT-show track starting a minute or
+// two early — is how real radio tees up a changeover anyway.
+const PICK_SHOW_LOOKAHEAD_SEC = 120;
+
 // Has this events-log play already been recorded by recordPlay? The old dedup
 // keyed on `${endedAt}|${title}` — an EXACT timestamp match — but recordPlay's
 // end-stamp never equals the event's start `t`, so it never fired and every
@@ -88,6 +98,8 @@ class Queue {
   history: any[] = [];         // finished tracks, newest first
   djLog: any[] = [];           // controller-level events for the web UI
   lastSeenKey: string | null = null;   // for change detection in the watcher
+  _nowPlaying: any = null;             // last parse of now-playing.json, refreshed by the watcher
+  _nowPlayingFresh = false;            // true once the watcher's first tick has landed
   senderBusy = false;          // drain-to-Liquidsoap mutex
   pickerBusy = false;          // prevent concurrent LLM picks
   autoPick = true;             // toggle: should we ask Ollama for next track when idle
@@ -99,6 +111,7 @@ class Queue {
   _recentPlaysTimer: NodeJS.Timeout | null = null; // debounce for the recent-plays.json sidecar
   _recentPlays: { id: string | null; title: string | null; artist: string | null; endedAt: string }[] = [];
   _emptyDjQueueStreak = 0;      // consecutive reconcile checks seeing an empty dj_queue while sent items remain — see reconcileWithDjQueue
+  _pendingVoice: { text: string; kind: string; wavPath: string; persona: any; meta: any; t: number } | null = null; // one boundary-deferred segment awaiting the next track start — see announceAtNextTrack
 
   // Snapshot upcoming/current/history to disk. The queue is otherwise purely
   // in-memory, so a controller restart (every `--build controller` rebuild)
@@ -110,7 +123,7 @@ class Queue {
     this._persistTimer = setTimeout(async () => {
       this._persistTimer = null;
       try {
-        await writeFile(config.queue.file, JSON.stringify({
+        await writeFileAtomic(config.queue.file, JSON.stringify({
           upcoming: this.upcoming,
           current: this.current,
           history: this.history,
@@ -130,7 +143,7 @@ class Queue {
     this._recentPlaysTimer = setTimeout(async () => {
       this._recentPlaysTimer = null;
       try {
-        await writeFile(config.queue.recentPlaysFile,
+        await writeFileAtomic(config.queue.recentPlaysFile,
           JSON.stringify(this._recentPlays, null, 2));
       } catch (err: any) {
         console.error('[queue] recent-plays persist failed:', err.message);
@@ -330,6 +343,20 @@ class Queue {
     return out;
   }
 
+  // Timestamp (ms) of the most recent on-air spoken segment, or 0. Defaults to
+  // every voice kind; pass `kinds` to narrow it (the segment director's
+  // frequency floor asks only about the scheduler's wall-clock talkers —
+  // idents/hourly/handoff — since track-tied links would mute it entirely on a
+  // chatty station). Its private lastAnySegment counter only ever saw its own
+  // segments, so this is how a just-aired ident suppresses a back-to-back one.
+  getLastVoiceAt(kinds?: readonly string[]) {
+    const match = kinds ? new Set(kinds) : VOICE_KINDS;
+    for (const entry of this.djLog) {
+      if (match.has(entry.kind)) return new Date(entry.t).getTime();
+    }
+    return 0;
+  }
+
   // Push a listener request. Adds to upcoming and kicks off the Liquidsoap sender.
   // `introScript` is the spoken intro/link tied to THIS track — it is NOT aired
   // at queue time. drainToLiquidsoap renders it to a WAV ahead of time and
@@ -450,10 +477,11 @@ class Queue {
   // Drop any transition-effect flags from a track (with a logged reason) so
   // getAnnotatedUri never stamps an effect the gate rejected.
   stripEffect(track: any, reason: string) {
-    const kind = track.sweep ? 'sweep' : track.blend ? 'blend' : 'washout';
+    const kind = track.sweep ? 'sweep' : track.blend ? 'blend' : track.dissolve ? 'dissolve' : 'washout';
     delete track.sweep;
     delete track.washout;
     delete track.blend;
+    delete track.dissolve;
     this.log('mix', `${kind} dropped (${reason})`);
   }
 
@@ -468,7 +496,7 @@ class Queue {
     // Persona flipped out of DJ mode between the pick and the drain: the
     // effects gate below never runs, so make sure no flag survives to annotate.
     if (!persona?.djMode) {
-      if (item.track.sweep || item.track.washout || item.track.blend) this.stripEffect(item.track, 'dj mode off');
+      if (item.track.sweep || item.track.washout || item.track.blend || item.track.dissolve) this.stripEffect(item.track, 'dj mode off');
       return;
     }
 
@@ -477,7 +505,7 @@ class Queue {
     if (!prevTrack) {
       // Nothing on-air to validate against (first track after boot) — an
       // effect on a cold start would garnish silence; drop it.
-      if (item.track.sweep || item.track.washout || item.track.blend) this.stripEffect(item.track, 'no predecessor');
+      if (item.track.sweep || item.track.washout || item.track.blend || item.track.dissolve) this.stripEffect(item.track, 'no predecessor');
       return;
     }
 
@@ -559,6 +587,7 @@ class Queue {
     // deterministic, not choices — invisible to the ledger in both directions.
     const choice: string | null =
       item.track.sweep ? 'sweep' : item.track.blend ? 'blend'
+        : item.track.dissolve ? 'dissolve'
         : (item.track.washout && !item.track.washoutAuto) ? 'washout'
         : item.track.washoutAuto ? null : 'normal';
     const last2 = this._recentEffects.slice(-2);
@@ -582,23 +611,44 @@ class Queue {
       this.log('mix', 'blend dropped (tracks clash — a handover needs a compatible pair)');
     }
     if (item.track.blend) this.log('mix', `blend armed → ${item.track.title}`);
+    // dissolve (reverb wash) — blend's mirror: beatless ambience only earns
+    // its place across a measurable clash. Also yields to a washout already
+    // riding the PREVIOUS track's exit: both gestures shape the same outgoing
+    // ending (echo tail vs ambient wash), and the washout may carry the
+    // length-cap auto-arm. radio.liq enforces the same precedence as a
+    // belt-and-braces guard; stripping here keeps the pick log honest.
+    if (item.track.dissolve && prevTrack.washout) {
+      delete item.track.dissolve;
+      this.log('mix', 'dissolve dropped (previous track already exits through a washout)');
+    }
+    if (item.track.dissolve && !mix.effectAllowedFor('dissolve', cur, next)) {
+      delete item.track.dissolve;
+      this.log('mix', 'dissolve dropped (tracks too compatible — a blend keeps the groove a wash would kill)');
+    }
+    if (item.track.dissolve) this.log('mix', `dissolve armed → ${item.track.title}`);
     if (item.track.washout) {
       item.track.crossSec = mix.washoutCrossSecondsFor(next, maxSec);
       item.track.washoutDelay = mix.washoutDelayFor(next.bpm);
       const why = item.track.washoutAuto ? ' (length-cap exit)' : '';
       this.log('mix', `washout armed${why}: ${item.track.crossSec}s canvas, ${item.track.washoutDelay}s tap → ${item.track.title}`);
     }
-    const effectFired = !!(item.track.sweep || item.track.washout || item.track.blend);
+    const effectFired = !!(item.track.sweep || item.track.washout || item.track.blend || item.track.dissolve);
 
     // Feature 2 — transition FX, spaced by the chattiness ladder and gated on
     // settings.sfx.enabled; never two transitions in a row, and never a riser
-    // over a sweep/washout transition.
+    // over a sweep/washout transition. Only ARMED here: this runs at drain
+    // time, right after the PREVIOUS track started — the crossfade this
+    // stinger is sized for (prevTrack → item) is a full track away. Playing it
+    // now (the original behaviour) landed a drum-roll a few seconds into a
+    // song, apropos of nothing. onTrackStarted fires it when item airs, i.e.
+    // while that crossfade is actually happening.
     this._transitionsSinceSfx++;
     if (!effectFired && settings.get().sfx?.enabled && this._transitionsSinceSfx >= this.sfxTransitionGap()) {
       const fx = mix.transitionSfxFor(cur, next);
       if (fx) {
         this._transitionsSinceSfx = 0;
-        void this.playSfx(fx);
+        item.transitionSfx = fx;
+        this.log('mix', `transition stinger armed (${fx}) → ${item.track.title}`);
       }
     }
   }
@@ -692,6 +742,55 @@ class Queue {
     }
   }
 
+  // Defer a spoken segment to the NEXT track boundary instead of airing it
+  // immediately. Used for station idents: they have no real-time constraint
+  // (unlike the hourly time check), so ducking the current song mid-vocal at
+  // an arbitrary wall-clock minute is pure loss — at a transition the same
+  // ident lands like real radio. The WAV is rendered NOW (TTS latency off the
+  // air path); onTrackStarted airs it via the light-duck intro channel so the
+  // incoming song stays audible underneath, same feel as an auto-DJ link.
+  //
+  // One slot only: a newer pending segment replaces an unaired older one (on
+  // an aggressive station a fresh ident supersedes a stale one rather than
+  // stacking). All bookkeeping (djLog → recap/opener anti-repeat, session
+  // turn, webhook) happens at AIR time, so the DJ's memory reflects what
+  // actually reached the stream, not what was merely scheduled.
+  async announceAtNextTrack(text, kind = 'announcement', { persona = null, meta = {} }: { persona?: any; meta?: any } = {}) {
+    if (!text || !text.trim()) return;
+    try {
+      const wavPath = await speak(text, { kind, persona });
+      this._pendingVoice = { text, kind, wavPath, persona, meta, t: Date.now() };
+      this.log('scheduler', `Holding ${kind} for the next track boundary`);
+    } catch (err: any) {
+      this.log('error', `Deferred announce failed: ${err.message}`);
+    }
+  }
+
+  // Air the boundary-deferred segment, if one is pending. Called from
+  // onTrackStarted BEFORE airIntro so the ident lands ahead of the track's own
+  // link in the shared voice chain (ident → link reads as a natural hand-off).
+  // The prompt context bakes in the local clock, so a clip that waited past
+  // PENDING_VOICE_MAX_AGE_MS (a long mix, a stream stall) is dropped rather
+  // than aired with a stale time reference — the next cron fire replaces it.
+  async airPendingVoice() {
+    const p = this._pendingVoice;
+    if (!p) return;
+    this._pendingVoice = null;
+    if (Date.now() - p.t > PENDING_VOICE_MAX_AGE_MS) {
+      this.log('scheduler', `Dropped pending ${p.kind} — waited too long for a track boundary`);
+      return;
+    }
+    if (!existsSync(p.wavPath)) return;
+    try {
+      await airVoice(config.liquidsoap.introFile, p.wavPath, p.text, voiceGainDb(p.kind, p.persona));
+      this.log(p.kind, p.text);
+      session.appendTurn({ role: 'segment', kind: p.kind, text: p.text, meta: p.meta });
+      webhooks.notify('dj.say', { text: p.text, kind: p.kind });
+    } catch (err: any) {
+      this.log('error', `Air pending voice failed: ${err.message}`);
+    }
+  }
+
   // Air a queued item's track-tied intro/link. Called from onTrackStarted the
   // moment the item's track actually starts playing, so the voice lands over
   // the RIGHT song rather than over whatever was on-air when it was queued
@@ -735,8 +834,8 @@ class Queue {
   // Writes the effect's file path straight to sfx.txt — no TTS, the audio is
   // already rendered. Liquidsoap's sfx_queue mixes it beneath the voice
   // channels (see liquidsoap/radio.liq). Used by the segment-director agent
-  // to garnish a spoken line, and by applyMixTransition for between-track
-  // stingers.
+  // to garnish a spoken line, and by onTrackStarted for the between-track
+  // stingers applyMixTransition arms at drain time.
   //
   // `underVoice` offsets the write by the voice lead-in (VOICE_LEADIN_MS) so a
   // stinger meant to sit under a spoken line lands with the DJ's first word
@@ -765,6 +864,12 @@ class Queue {
     const key = `${np.subsonic_id || ''}|${np.title}|${np.artist || ''}`;
     if (key === this.lastSeenKey) return;
     this.lastSeenKey = key;
+
+    // A fresh track boundary — air any boundary-deferred segment (station
+    // ident) now. Fired BEFORE airIntro below so the shared voice chain plays
+    // ident → link in that order. Fire-and-forget for the same reason as
+    // airIntro: must not stall the watcher tick.
+    void this.airPendingVoice();
 
     // Snapshot the outgoing track BEFORE the history roll mutates `this.current`
     // — scrobble.onTrackEvent below needs the previous play + its start time
@@ -823,6 +928,13 @@ class Queue {
       // A tracked item matched → controller and Liquidsoap are in sync; clear any
       // dj_queue-empty desync streak accumulated from prior untracked plays.
       this._emptyDjQueueStreak = 0;
+      // Transition stinger armed at drain (applyMixTransition) — fired HERE
+      // because the crossfade this stinger was sized for is airing right now.
+      // Re-gated on the live toggle: the operator may have switched SFX off
+      // in the minutes between drain and air.
+      if (item.transitionSfx && settings.get().sfx?.enabled) {
+        void this.playSfx(item.transitionSfx);
+      }
       // Air this track's intro/link now that it's actually on-air — deferred
       // from queue time so the voice lands over the right song (#189). Fire-
       // and-forget: airIntro's writeHandoff can block up to maxWaitMs and must
@@ -934,7 +1046,23 @@ class Queue {
           } catch (err: any) {
             this.log('error', `Persona handoff failed: ${err.message}`);
           }
-          await djAgent.runTrackEvent(this, ctx, { wantLink });
+          // The pick made now airs when the track that just started ends — so
+          // near a show boundary the rules to pick by are the NEXT show's, not
+          // this one's (a pick queued minutes before the boundary used to
+          // follow the outgoing show's brief, handing the incoming DJ an
+          // off-format opener). Probe a little past the pick's expected start
+          // so a pick that begins just shy of the boundary — and plays mostly
+          // inside the new show — also counts as the new show's. The session
+          // roll and handoff above stay on the live clock: only the pick
+          // looks ahead. Unknown duration → no look-ahead, today's behaviour.
+          const durSec = Number(this.current?.track?.duration);
+          let pickCtx = ctx;
+          let showAt: Date | null = null;
+          if (Number.isFinite(durSec) && durSec > 0) {
+            showAt = new Date(Date.now() + (durSec + PICK_SHOW_LOOKAHEAD_SEC) * 1000);
+            pickCtx = await getFullContext(showAt);
+          }
+          await djAgent.runTrackEvent(this, pickCtx, { wantLink, showAt });
         } catch (err: any) {
           this.log('error', `DJ track event failed: ${err.message}`);
         } finally {
@@ -1129,12 +1257,17 @@ class Queue {
     return out;
   }
 
-  // Poll now-playing.json every 1.5s and dispatch track changes
+  // Poll now-playing.json every 1.5s and dispatch track changes. Each tick
+  // also refreshes the in-memory copy getNowPlaying() serves, so the
+  // per-listener /now-playing poll never has to touch the disk.
   startWatcher() {
-    setInterval(async () => {
-      const np = await this.getNowPlaying();
-      this.onTrackStarted(np);
-    }, 1500);
+    const tick = async () => {
+      this._nowPlaying = await this.readNowPlayingFromDisk();
+      this._nowPlayingFresh = true;
+      this.onTrackStarted(this._nowPlaying);
+    };
+    void tick();
+    setInterval(tick, 1500);
     this.log('scheduler', 'Now-playing watcher started');
   }
 
@@ -1161,8 +1294,22 @@ class Queue {
     };
   }
 
-  // Read the now-playing JSON Liquidsoap writes
+  // Now-playing as Liquidsoap last reported it. Served from the watcher's
+  // in-memory copy: every listener polls /now-playing every ~5s and the
+  // watcher already re-reads the file every 1.5s, so a per-request disk
+  // read + parse buys nothing. Falls back to a direct read until the first
+  // watcher tick lands (or when the watcher was never started, e.g. one-off
+  // scripts). Returns a copy — callers (routes/public.ts) enrich the object
+  // in place and must not leak those fields into the shared cache.
   async getNowPlaying() {
+    const np = this._nowPlayingFresh
+      ? this._nowPlaying
+      : await this.readNowPlayingFromDisk();
+    return np ? { ...np } : null;
+  }
+
+  // Read the now-playing JSON Liquidsoap writes
+  async readNowPlayingFromDisk() {
     try {
       const raw = await readFile(config.liquidsoap.nowPlayingFile, 'utf8');
       return JSON.parse(raw);
@@ -1267,8 +1414,7 @@ async function writeHandoff(path: string, contents: string, { maxWaitMs = 1500 }
       // half-written (or truncated-but-empty) file — its poll handlers read,
       // DELETE, then check non-empty, so a poll landing mid-write would drop
       // this handoff silently. rename(2) is atomic on the same volume.
-      await writeFile(`${path}.tmp`, contents);
-      await rename(`${path}.tmp`, path);
+      await writeFileAtomic(path, contents);
     });
   // Hold the slot until liquidsoap consumes THIS write too, so the next
   // queued writer waits for the audio to land, not just for the write call to
@@ -1386,6 +1532,10 @@ function wavDurationMs(path: string): number | null {
 // 'handoff' (the two-voice persona mic-pass) counts too, so the incoming DJ's
 // next segments don't echo the greeting's opener.
 const VOICE_KINDS = new Set(['dj-speak', 'link', 'station-id', 'hourly-check', 'handoff']);
+// How long a boundary-deferred segment may wait for a track start before it's
+// dropped as stale (its prompt context baked in the clock at generation time).
+// Comfortably past a long album cut, well short of the next ident sounding odd.
+const PENDING_VOICE_MAX_AGE_MS = 20 * 60_000;
 // Kinds whose recap entries are de-duped. Skills are added at load time too.
 // 'handoff' is deliberately NOT deduped — its two lines (sign-off + greeting)
 // are distinct utterances by different voices.
