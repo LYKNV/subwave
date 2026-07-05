@@ -33,12 +33,14 @@ import { V3AlertDialog } from '../ui/alert-dialog';
 import { EditorDialog } from '../ui/editor-dialog';
 import { AiFill } from './AiFill';
 import GenreSuggest from './GenreSuggest';
-import { PersonaPicker, ThemePicker } from './ShowPickers';
+import { PersonaPicker, GuestPersonaPicker, ThemePicker } from './ShowPickers';
 import { cn } from '../../lib/cn';
 
 const NAME_MAX = 60;
 const TOPIC_MAX = 1000;
 const SHOWS_MAX = 64;
+// Mirrors the controller's GUESTS_PER_SHOW cap (settings.ts).
+const GUESTS_MAX = 3;
 
 // Storage keys are 0=Sun..6=Sat (JS getDay); display Mon-first.
 const DAYS = [
@@ -65,6 +67,14 @@ interface Show {
   name: string;
   topic: string;
   personaId: string;
+  /** Guest co-host persona ids (max 3, host excluded). While the show is on
+   *  air the speaker rotation hands some standalone talk breaks (station IDs,
+   *  hourly checks, weather/news segments) to a guest, in their own voice.
+   *  Empty = solo show, exactly today's behaviour. */
+  guestPersonaIds: string[];
+  /** Scripted banter breaks: short multi-voice exchanges between the host and
+   *  guests, aired up to twice an hour. Only meaningful with guests set. */
+  banter: boolean;
   /** '' = Any — the show pins no mood; the autonomous mood (festival >
    *  weather > time of day) applies while it's on air. */
   mood: string;
@@ -379,6 +389,8 @@ export default function ShowsPanel() {
           name: s.name ?? '',
           topic: s.topic ?? '',
           personaId: s.personaId ?? '',
+          guestPersonaIds: Array.isArray(s.guestPersonaIds) ? s.guestPersonaIds : [],
+          banter: s.banter ?? false,
           mood: s.mood ?? '',
           themeId: s.themeId ?? '',
           genre: s.genre ?? '',
@@ -481,7 +493,7 @@ export default function ShowsPanel() {
         ...f,
         shows: [...f.shows, {
           id, name: '', topic: '',
-          personaId: personas[0]?.id || '', mood: '',
+          personaId: personas[0]?.id || '', guestPersonaIds: [], banter: false, mood: '',
           themeId: '', genre: '', fromYear: null, toYear: null, energy: '',
           filtersStrict: false, maxTrackSeconds: null,
           playlistIds: [], playlistStrict: false, excludedPlaylistIds: [],
@@ -671,7 +683,13 @@ export default function ShowsPanel() {
         body: JSON.stringify({
           shows: form.shows.map(s => ({
             id: s.id, name: s.name.trim(), topic: s.topic.trim(),
-            personaId: s.personaId, mood: s.mood,
+            personaId: s.personaId,
+            // Belt-and-suspenders: the host can be switched after guests were
+            // picked, and the server rejects a guest that duplicates the host.
+            guestPersonaIds: (s.guestPersonaIds || []).filter(id => id !== s.personaId),
+            // Banter only means something with guests in the studio.
+            banter: (s.guestPersonaIds?.length ?? 0) > 0 && s.banter,
+            mood: s.mood,
             themeId: s.themeId || '',
             genre: s.genre.trim(), fromYear: s.fromYear, toYear: s.toYear, energy: s.energy || '',
             // Strict only means something with at least one music filter set.
@@ -914,7 +932,12 @@ export default function ShowsPanel() {
             index={i}
             ok={ok}
             hrs={hrs}
-            personaLabel={personaName(s.personaId)}
+            personaLabel={
+              personaName(s.personaId)
+              + ((s.guestPersonaIds?.length ?? 0) > 0
+                ? ` · with ${s.guestPersonaIds.map(personaName).join(' & ')}`
+                : '')
+            }
             onEdit={() => focusShow(i)}
           />
         );
@@ -1088,10 +1111,54 @@ function ShowEditor({
             <PersonaPicker
               personas={personas}
               value={show.personaId}
-              onChange={id => update({ personaId: id })}
+              onChange={id => update({
+                personaId: id,
+                // The new host can't also sit in the guest chairs.
+                guestPersonaIds: (show.guestPersonaIds || []).filter(g => g !== id),
+              })}
               apiBase={apiBase}
             />
           </Field>
+
+          {personas.length > 1 && (
+            <Field>
+              <Label>guest co-hosts</Label>
+              <GuestPersonaPicker
+                personas={personas.filter(p => p.id !== show.personaId)}
+                value={show.guestPersonaIds || []}
+                onChange={ids => update({ guestPersonaIds: ids })}
+                apiBase={apiBase}
+                max={GUESTS_MAX}
+              />
+              <span className="field-hint">
+                Optional, up to {GUESTS_MAX}. While this show is on air, guests
+                take some of the talk breaks — station IDs, time checks,
+                weather/news segments — in their own voice. The host still
+                drives the music and the track intros.
+              </span>
+
+              <div className="mt-1 flex items-start gap-3">
+                <div className="pt-0.5">
+                  <Toggle
+                    on={show.banter && (show.guestPersonaIds?.length ?? 0) > 0}
+                    disabled={(show.guestPersonaIds?.length ?? 0) === 0}
+                    onClick={() => update({ banter: !show.banter })}
+                  />
+                </div>
+                <div className="grid gap-0.5">
+                  <Label className={(show.guestPersonaIds?.length ?? 0) === 0 ? 'opacity-40' : undefined}>
+                    Banter breaks
+                  </Label>
+                  <span className="field-hint">
+                    Short scripted exchanges between the host and guests — a few
+                    lines of real back-and-forth, each voice rendered
+                    separately — up to twice an hour depending on the
+                    persona&apos;s talk frequency. Needs at least one guest.
+                  </span>
+                </div>
+              </div>
+            </Field>
+          )}
 
           <Field>
             <Label>theme override (applied while this show is on air)</Label>

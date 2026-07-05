@@ -357,6 +357,19 @@ class Queue {
     return 0;
   }
 
+  // Timestamp (ms) of the most recent STANDALONE talk break, or 0 — every
+  // voice kind except the track-tied intro channels ('link'/'dj-speak', which
+  // air with nearly every pick and would mute a gap check outright on a chatty
+  // station). Skill kinds (weather/news/…) count via VOICE_KINDS, so a gap
+  // gated on this can't stack onto a segment the listener just heard.
+  getLastTalkBreakAt() {
+    for (const entry of this.djLog) {
+      if (TRACK_TIED_KINDS.has(entry.kind)) continue;
+      if (VOICE_KINDS.has(entry.kind)) return new Date(entry.t).getTime();
+    }
+    return 0;
+  }
+
   // Push a listener request. Adds to upcoming and kicks off the Liquidsoap sender.
   // `introScript` is the spoken intro/link tied to THIS track — it is NOT aired
   // at queue time. drainToLiquidsoap renders it to a WAV ahead of time and
@@ -798,6 +811,46 @@ class Queue {
     } catch (err: any) {
       this.log('error', `Announce failed: ${err.message}`);
     }
+  }
+
+  // Air a short multi-voice exchange (guest-show banter): every line renders
+  // to a WAV FIRST — all-or-nothing, so a TTS failure can't strand half a
+  // conversation on air — then the clips go to the serialized say.txt voice
+  // chain back-to-back (airVoice holds the shared lock for each clip's
+  // playback, so line N+1 lands as line N finishes; the same mechanism that
+  // makes the two-voice persona handoff play cleanly). Each line is booth-
+  // logged speaker-prefixed and appended to the session tagged with its
+  // speaker, so windowMessages names a guest's words as theirs.
+  async announceExchange(lines: { persona: any; text: string }[], kind = 'banter') {
+    const rendered: { persona: any; text: string; wavPath: string }[] = [];
+    try {
+      for (const l of lines) {
+        const wavPath = await speak(l.text, { kind, persona: l.persona });
+        rendered.push({ ...l, wavPath });
+      }
+    } catch (err: any) {
+      this.log('error', `Exchange render failed: ${err.message}`);
+      return false;
+    }
+    for (const l of rendered) {
+      try {
+        await airVoice(config.liquidsoap.sayFile, l.wavPath, l.text, voiceGainDb(kind, l.persona));
+        this.log(kind, `${l.persona?.name ? `${l.persona.name}: ` : ''}${l.text}`);
+        session.appendTurn({
+          role: 'segment', kind, text: l.text,
+          meta: { personaId: l.persona?.id, personaName: l.persona?.name },
+        });
+      } catch (err: any) {
+        this.log('error', `Exchange line failed to air: ${err.message}`);
+      }
+    }
+    // One webhook for the whole exchange — per-line events would read as five
+    // separate segments to a Discord pipe.
+    webhooks.notify('dj.say', {
+      text: rendered.map(l => `${l.persona?.name || 'DJ'}: ${l.text}`).join('\n'),
+      kind,
+    });
+    return true;
   }
 
   // Defer a spoken segment to the NEXT track boundary instead of airing it
@@ -1601,7 +1654,10 @@ function wavDurationMs(path: string): number | null {
 // registerSkillKinds() — so a new skill is recapped without editing this list.
 // 'handoff' (the two-voice persona mic-pass) counts too, so the incoming DJ's
 // next segments don't echo the greeting's opener.
-const VOICE_KINDS = new Set(['dj-speak', 'link', 'station-id', 'hourly-check', 'handoff']);
+const VOICE_KINDS = new Set(['dj-speak', 'link', 'station-id', 'hourly-check', 'handoff', 'banter']);
+// The intro channels tied to a track start rather than the wall clock — the
+// standalone-talk-break clock (getLastTalkBreakAt) skips them.
+const TRACK_TIED_KINDS = new Set(['dj-speak', 'link']);
 // How long a boundary-deferred segment may wait for a track start before it's
 // dropped as stale (its prompt context baked in the clock at generation time).
 // Comfortably past a long album cut, well short of the next ident sounding odd.
@@ -1616,6 +1672,7 @@ const KIND_LABEL: Record<string, string> = {
   'station-id': 'ident',
   'hourly-check': 'hourly',
   'handoff': 'handoff',
+  'banter': 'banter',
 };
 
 // Register the loaded skill kinds (built-in + custom) as recap voice/dedupe
