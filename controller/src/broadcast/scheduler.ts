@@ -11,13 +11,15 @@ import * as subsonic from '../music/subsonic.js';
 import * as dj from '../llm/dj.js';
 import * as library from '../music/library.js';
 import * as settings from '../settings.js';
-import { artistKey } from '../music/recency.js';
 import { normGenre, genreMatches, inYearRange, preferEnergy, preferEnergyStrict, preferMood } from '../music/show-filter.js';
 import { resolveShowPlaylistPool, resolveExcludedPlaylistIds } from '../music/show-playlist.js';
 import { getFullContext } from '../context.js';
 import { queue } from './queue.js';
+import { createPoolBuilder } from './auto-pool.js';
+import { reloadAutoPlaylist } from './liquidsoap-control.js';
 import * as session from './session.js';
 import * as djAgent from './dj-agent.js';
+import * as programme from './programme.js';
 import { cleanupOldVoices } from '../audio/tts.js';
 import { shouldFire } from './dj-gate.js';
 import { djCallsAllowed } from './listeners.js';
@@ -73,8 +75,12 @@ export async function refreshAutoPlaylist() {
 async function refreshAutoPlaylistInner() {
   const ctx = await getFullContext();
   const mood = ctx.dominantMood;
-  // Match the auto-DJ picker's window (dj-agent.pickViaAgent) — 12h.
-  const recent = queue.recentlyPlayedIds(12);
+  // Match the auto-DJ picker's window (dj-agent.pickViaAgent) — 12h. Keyed by
+  // BOTH id and lowercased `title|artist`: a library with duplicate copies of a
+  // song holds N Subsonic ids for it, so an id-only recency filter lets copies
+  // #2..N sail into the fallback and re-air a just-played track (issue #874).
+  // Mirrors collect() in the picker's tool layer.
+  const { ids: recentIds, keys: recentKeys } = queue.recentlyPlayed(12);
 
   // The fallback is what airs when the live AI picks pause (e.g. pause-when-empty
   // with zero listeners). When a show is scheduled for this hour, the fallback
@@ -137,26 +143,21 @@ async function refreshAutoPlaylistInner() {
   // genre/era it honours its track-length cap too.
   const maxDurationSec = settings.effectiveMaxTrackSec(show);
 
-  const pool: any[] = [];
-  const fromSource: Record<string, number> = { 'show-genre': 0, 'show-playlist': 0, mood: 0, playlist: 0, recent: 0, frequent: 0, starred: 0, random: 0 };
-  // Cap each artist's share of the pool. Without this, a deep-catalogue artist
-  // (many mood-tagged / starred / frequent tracks) can dominate the fallback
-  // playlist, so whenever Liquidsoap coasts on auto.m3u the same artist clusters
-  // on air — e.g. one artist's tracks airing 7× purely from this source.
-  const artistInPool = new Map<string, number>();
-  const take = (label: string, items: any[], cap: number) => {
-    let n = 0;
-    for (const t of items) {
-      if (n >= cap || pool.length >= TARGET_POOL) break;
-      if (!t?.id || recent.has(t.id) || pool.find((p: any) => p.id === t.id)) continue;
-      const ak = artistKey(t);
-      if (ak && (artistInPool.get(ak) || 0) >= AUTO_MAX_PER_ARTIST) continue;
-      pool.push({ ...t, _source: label });
-      fromSource[label] = (fromSource[label] || 0) + 1;
-      if (ak) artistInPool.set(ak, (artistInPool.get(ak) || 0) + 1);
-      n++;
-    }
-  };
+  // Balanced pool builder — applies the recency / dedup / artist-cap guards on
+  // every candidate. Recency and dedup key on BOTH id and `title|artist` so a
+  // library with duplicate copies of a song (N distinct ids for one track)
+  // can't slip a just-played track back in or stack copies into the pool (#874).
+  // The artist cap stops a deep-catalogue artist from dominating the fallback.
+  // Pure + unit-tested in scripts/auto-pool.test.ts.
+  const builder = createPoolBuilder({
+    recentIds,
+    recentKeys,
+    targetPool: TARGET_POOL,
+    maxPerArtist: AUTO_MAX_PER_ARTIST,
+  });
+  const pool = builder.pool;
+  const fromSource = builder.fromSource;
+  const take = builder.take;
 
   await library.load();
 
@@ -299,6 +300,14 @@ async function refreshAutoPlaylistInner() {
   // Atomic replace: Liquidsoap watches this file (reload_mode="watch"), so an
   // in-place write can trigger a reload that loads a truncated playlist.
   await writeFileAtomic(config.liquidsoap.autoPlaylist, lines.join('\n'));
+  // Deterministic reload: don't trust Liquidsoap's inotify watch. The atomic
+  // rename above swaps the file's inode, and if the watch ever orphans itself
+  // the fallback loops the last-loaded ~30-track snapshot forever until the
+  // container restarts (issue #874). Telnet `auto.reload` forces a re-read every
+  // time; best-effort so an unreachable mixer (dev / mid-restart) never fails
+  // the refresh — the watch remains as a backstop.
+  const reloaded = await reloadAutoPlaylist();
+  if (!reloaded) queue.log('scheduler', 'Auto-playlist written but telnet reload failed — relying on inotify watch');
 
   // Make the show-scoping visible to the operator (acceptance criteria #629):
   // a misspelled / absent strict genre that silently degraded, and a strict show
@@ -338,12 +347,18 @@ async function refreshAutoPlaylistInner() {
 export async function runHourlyCheck() {
   return withTrace({ kind: 'hourly' }, async () => {
     const ctx = await getFullContext();
+    // Guest rotation: on a show with co-hosts the time check may come from a
+    // guest. Solo shows get the effective persona — behaviour-identical.
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateHourlyTime({
       recap: queue.getDjRecap(),
       context: ctx,
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    await queue.announce(script, 'hourly-check');
+    await queue.announce(script, 'hourly-check', {
+      persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name },
+    });
     return script;
   });
 }
@@ -367,10 +382,28 @@ async function hourlyCheck() {
   // session first drives it — the other no-ops). No ctx → the roll above didn't
   // happen either; leave the handoff pending for the next call site.
   if (ctx) {
+    // Plan the episode BEFORE the mic-pass so a persona handoff into a
+    // programme show can weave the episode angle into the greeting (the
+    // greeting doubles as the show's intro on a persona-change boundary).
+    try {
+      await programme.ensurePlan(ctx);
+    } catch (err) {
+      queue.log('error', `Programme plan failed: ${err.message}`);
+    }
     try {
       await djAgent.runPersonaHandoff(queue, ctx);
     } catch (err) {
       queue.log('error', `Persona handoff failed: ${err.message}`);
+    }
+    // Programme shows: open the episode. The intro owns the top of the show's
+    // first hour, so when it airs (now, or minutes ago via the track-start
+    // call site, or as the handoff greeting above) the generic time check
+    // stands down — the same one-talker-per-slot rule as issue #310.
+    try {
+      const introAired = await programme.onSessionSettled(queue, ctx);
+      if (introAired || programme.suppressHourly()) return;
+    } catch (err) {
+      queue.log('error', `Programme episode hook failed: ${err.message}`);
     }
   }
   if (!shouldFire('hourly')) return;
@@ -391,17 +424,78 @@ export async function runLink() {
     if (!current) throw new Error('nothing is playing — no track to link from');
     const previous = queue.history[0]?.track || null;
     const ctx = await getFullContext();
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateLink({
       previous,
       current,
       context: ctx,
+      // Unlike a pick-attached link, this one airs right now (announce below),
+      // so the live clock in ctx is the air time — the model may speak it.
+      clockIsAirTime: true,
       recap: queue.getDjRecap(),
       recentTracks: queue.getRecentTracks(),
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    await queue.announce(script, 'link');
+    await queue.announce(script, 'link', {
+      persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name },
+    });
     return script;
   });
+}
+
+// ---------------------------------------------------------------------------
+// BANTER
+// A short scripted exchange between the show's host and its guest co-hosts —
+// the multi-voice payoff of guest shows. One structured LLM call writes the
+// whole exchange; queue.announceExchange renders each line in its speaker's
+// own voice and airs them back-to-back through the serialized voice chain.
+// ---------------------------------------------------------------------------
+
+// Gate-free runner — also called directly by the /dj/segment command route as
+// an operator override (which is why it ignores the show's banter toggle: an
+// explicit button press always fires; only the ROSTER is non-negotiable, since
+// a one-person exchange can't exist). The cron wrapper below adds the gates.
+export async function runBanter() {
+  return withTrace({ kind: 'banter' }, async () => {
+    const { host, guests, show } = settings.getOnAirRoster();
+    if (!host || !guests.length) {
+      throw new Error('banter needs a show with guest co-hosts on air');
+    }
+    const ctx = await getFullContext();
+    const lines = await dj.generateBanter({
+      host, guests, show,
+      current: queue.current?.track || null,
+      context: ctx,
+      recap: queue.getDjRecap(),
+      recentOpeners: queue.getRecentOpeners(),
+    });
+    if (!lines) throw new Error('banter generation returned no usable exchange');
+    const ok = await queue.announceExchange(lines, 'banter');
+    if (!ok) throw new Error('banter exchange failed to render');
+    return lines.map(l => `${l.persona.name}: ${l.text}`).join('\n');
+  });
+}
+
+// Minimum quiet gap before an exchange: banter is the longest spoken break we
+// air, so it shouldn't pile onto a talk break the listener just heard.
+const BANTER_MIN_GAP_MS = 5 * 60_000;
+
+async function banterTick() {
+  const { show, guests } = settings.getOnAirRoster();
+  if (!show?.banter || !guests.length) return;  // solo show, or banter not opted in
+  if (!shouldFire('banter')) return;
+  if (!djCallsAllowed()) return;  // nobody listening — save the tokens and the breath
+  if (!optionalSegmentsAllowed()) return;  // over the daily token budget — mute optional segments
+  // Every standalone talk break counts — idents, hourly, handoff, banter AND
+  // the segment-director spots (weather/news/…). Track-tied links don't, or a
+  // chatty DJ-mode station would never banter.
+  if (Date.now() - queue.getLastTalkBreakAt() < BANTER_MIN_GAP_MS) return;
+  try {
+    await runBanter();
+  } catch (err) {
+    queue.log('error', `Banter failed: ${err.message}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -414,6 +508,7 @@ export async function runLink() {
 // ---------------------------------------------------------------------------
 
 async function skillsTick() {
+  if (programme.onAir()) return;  // a programme episode owns its talk moments — the director stands down
   if (!djCallsAllowed()) return;  // nobody listening — skip the segment director
   if (!optionalSegmentsAllowed()) return;  // over the daily token budget — mute optional segments
   try {
@@ -424,6 +519,60 @@ async function skillsTick() {
   } catch (err) {
     queue.log('error', `Segment tick failed: ${err.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// PROGRAMME BEATS
+// The feature beat mid-hour (station-minute :35–:39) and the outro in the
+// closing minutes of the final hour (station-minute :55+). Placement is a
+// STATION-clock fact, but station zones sit at :30/:45 offsets (IST, Nepal),
+// so fixed process-minute crons can land mid-show — the tick runs every 5
+// minutes and dispatches on programme.dueBeat() instead; the beat flags make
+// the repeat ticks inside a window no-ops. The intro has no cron of its own:
+// it rides the session-settled hook (hourlyCheck above + queue's track-start
+// path). Gating (listeners, budget, beat-already-aired) lives in programme.ts.
+// ---------------------------------------------------------------------------
+
+async function programmeTick() {
+  if (!programme.onAir()) return;
+  const beat = programme.dueBeat();
+  if (!beat) return;
+  try {
+    const ctx = await getFullContext();
+    if (beat === 'feature') await programme.featureTick(queue, ctx);
+    else await programme.outroTick(queue, ctx);
+  } catch (err) {
+    queue.log('error', `Programme ${beat} tick failed: ${err.message}`);
+  }
+}
+
+// Gate-free manual runners — the /dj/segment command route. An operator press
+// always fires (only "no programme show on air" throws). Intro/outro re-mark
+// their beat so the autonomous path doesn't re-open or re-close the show; a
+// manual feature deliberately doesn't consume the hour's planned beat.
+export async function runProgrammeIntro() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  const out = await programme.runIntro(queue, ctx);
+  programme.markIntroAired();
+  return out;
+}
+
+export async function runProgrammeFeature() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  return programme.runFeature(queue, ctx);
+}
+
+export async function runProgrammeOutro() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  const out = await programme.runOutro(queue, ctx);
+  session.markProgrammeBeat('outro');
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -439,13 +588,16 @@ async function skillsTick() {
 export async function runStationId({ atNextTrack = false } = {}) {
   return withTrace({ kind: 'station-id' }, async () => {
     const ctx = await getFullContext();
+    const speaker = settings.pickOnAirSpeaker();
     const script = await dj.generateStationId({
       recap: queue.getDjRecap(),
       context: ctx,
       recentOpeners: queue.getRecentOpeners(),
+      persona: speaker,
     });
-    if (atNextTrack) await queue.announceAtNextTrack(script, 'station-id');
-    else await queue.announce(script, 'station-id');
+    const opts = { persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name } };
+    if (atNextTrack) await queue.announceAtNextTrack(script, 'station-id', opts);
+    else await queue.announce(script, 'station-id', opts);
     return script;
   });
 }
@@ -541,6 +693,16 @@ export function startScheduler() {
   // Deliberately NOT :00: the hourly check owns the top of the hour, and firing
   // both there stacked two voice segments on each other (issue #310).
   cron.schedule('15,30,45 * * * *', stationId);
+
+  // Guest-show banter at :20/:50 — minutes no other wall-clock talker owns
+  // (same issue-#310 reasoning as the ident slots). The handler gates on the
+  // show's banter toggle, the live roster, frequency, listeners and budget.
+  cron.schedule('20,50 * * * *', banterTick);
+
+  // Programme beats: feature mid-hour, outro in the final minutes of the
+  // show's last hour — dispatched on STATION-zone minute windows (see
+  // programmeTick). No-ops outside a programme episode.
+  cron.schedule('*/5 * * * *', programmeTick);
 
   // Cleanup every hour
   cron.schedule('0 * * * *', cleanup);

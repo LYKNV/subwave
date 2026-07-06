@@ -24,7 +24,12 @@ export const ANGLES = {
   // so the opener doesn't settle into one shape ("here's…", "coming up…").
   link: [
     'Open mid-thought, as if you never stopped talking — skip "here\'s" / "this is" / "coming up" entirely.',
-    'Lead with one specific image from right now — the hour, the light, the day, the weather — and let the track answer it.',
+    // No "the hour" here: a link is written one track before it airs, so a
+    // clock reference is stale on air (issue #864) — the air-time clock, when
+    // known, reaches the model through the event/prompt clause instead. No
+    // "the weather" either: it isn't in the link context (issue #471), so the
+    // model would only invent it.
+    'Lead with one specific image from right now — the light, the day, the season — and let the track answer it.',
     'Drop one detail about the track now starting (its era, its scene, how its first seconds feel), woven into a sentence, not announced like a title card.',
     'Make one small, true observation that has nothing to do with music, then let the song pick it up.',
     'Name the artist only in passing, folded into a thought — never "this is X by Y".',
@@ -127,10 +132,17 @@ export function buildContextLines(
   if (on('weather') && context?.weather && context.weather.condition && context.weather.condition !== 'unknown') {
     lines.push(`Weather in ${context.weather.location}: ${context.weather.condition}${context.weather.temp != null ? `, ${context.weather.temp}°${context.weather.tempUnit || 'C'}` : ''}`);
   }
-  if (on('festival') && context?.festival) lines.push(`Festival: ${context.festival.name}`);
+  if (on('festival') && context?.festival) {
+    const note = context.festival.description ? ` — ${context.festival.description}` : '';
+    lines.push(`Festival: ${context.festival.name}${note}`);
+  }
   if (on('show') && context?.activeShow) {
     const topic = context.activeShow.topic ? ` — ${context.activeShow.topic}` : '';
-    lines.push(`On now: the show "${context.activeShow.name}"${topic}. Stay loosely on its theme.`);
+    // A programme episode's angle (set by the producer plan, riding on
+    // getFullContext) keeps mid-show links and segments on today's line, not
+    // just the standing brief.
+    const angle = context.activeShow.episodeAngle ? ` Today's episode angle: ${context.activeShow.episodeAngle}.` : '';
+    lines.push(`On now: the show "${context.activeShow.name}"${topic}.${angle} Stay loosely on its theme.`);
   }
   if (on('listeners') && context?.listeners?.count != null) {
     const n = context.listeners.count;

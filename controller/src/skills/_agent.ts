@@ -273,7 +273,12 @@ export async function agenticTick(ctx) {
   if (tickBusy) return;
 
   const now = new Date();
+  // Cadence and capability gating stay keyed to the HOST persona (stable per
+  // show); only the VOICE rotates. A guest co-host may speak this tick's
+  // segment, but which segments are on offer and how often the station talks
+  // never depends on who happened to win the mic.
   const persona = settings.getEffectivePersona(now);
+  const speaker = settings.pickOnAirSpeaker(now);
   // DJ-mode personas read one rung chattier, lowering the floor so more
   // between-track segments (weather, curiosity, deep cuts) get through.
   const freq = settings.effectiveFrequency(persona);
@@ -288,7 +293,7 @@ export async function agenticTick(ctx) {
   // director outright under a 15-minute moderate floor.
   const lastSpoke = Math.max(
     segmentState.lastAnySegment,
-    queue.getLastVoiceAt(['station-id', 'hourly-check', 'handoff']),
+    queue.getLastVoiceAt(['station-id', 'hourly-check', 'handoff', 'banter']),
   );
   if (now.getTime() - lastSpoke < frequencyFloorMs(freq)) return;
 
@@ -311,7 +316,7 @@ export async function agenticTick(ctx) {
     const recentCuriosity = caps.some(c => c.kind === 'curiosity') ? recentAiredCuriosity() : undefined;
     const { object } = await directorAgent.run({
       messages: [{ role: 'user', content: buildSituation(ctx, { contextFields: unionContextFields(caps), recentCuriosity }) }],
-      persona, caps, freq, sfxCatalog,
+      persona: speaker, caps, freq, sfxCatalog,
       ctx, segmentState,
     });
 
@@ -336,8 +341,12 @@ export async function agenticTick(ctx) {
       segmentState.lastWeatherCondition = ctx.weather.condition;
     }
 
-    // queue.announce appends the segment turn into the live session.
-    await queue.announce(seg.text.trim(), seg.kind);
+    // queue.announce appends the segment turn into the live session. The
+    // speaker's id rides in meta so session.windowMessages names a guest's
+    // turn as theirs rather than the host's own words.
+    await queue.announce(seg.text.trim(), seg.kind, {
+      persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name },
+    });
 
     // Record what actually aired so the durable ledger can keep both the tool
     // and the fallback path from repeating it after a restart (issue #577).
@@ -435,9 +444,13 @@ export const forcedDirectorAgent = defineAgent({
 
 // Operator override — fire one capability on demand, bypassing cooldowns, the
 // frequency floor, persona ownership and the enable toggle. Backs POST
-// /dj/skill. `which` is a kind or skill slug (kept identical). Returns the
-// spoken text; throws on an unknown/unready capability or empty output.
-export async function runCapability(which, ctx) {
+// /dj/skill, and the programme feature beat (broadcast/programme.ts), which
+// passes `brief` (the episode plan's feature topic, appended to the situation
+// so the segment is built AROUND it) and `persona` (the rotated on-air
+// speaker — voice, prompt seat, and session attribution move together, same
+// rule as every other rotated segment). Returns the spoken text; throws on an
+// unknown/unready capability or empty output.
+export async function runCapability(which, ctx, { brief = null, persona = null }: any = {}) {
   const cap = allCapabilities().find(c => c.kind === which || c.skill === which);
   if (!cap) throw new Error(`unknown skill: ${which}`);
   if (cap.ready && !cap.ready()) {
@@ -452,13 +465,15 @@ export async function runCapability(which, ctx) {
     throw new Error(`skill "${cap.skill}" is not ready${hint}`);
   }
 
-  const persona = settings.getEffectivePersona(new Date());
+  const speaker = persona || settings.getEffectivePersona(new Date());
   // Empty catalogue when SFX are disabled — the agent is never offered effects.
   const sfxCatalog = settings.get().sfx?.enabled === false ? [] : await sfx.catalog();
   const recentCuriosity = cap.kind === 'curiosity' ? recentAiredCuriosity() : undefined;
+  const situation = buildSituation(ctx, { forced: true, contextFields: effectiveContextFields(cap), recentCuriosity })
+    + (brief ? `\n\n${brief}` : '');
   const { object } = await forcedDirectorAgent.run({
-    messages: [{ role: 'user', content: buildSituation(ctx, { forced: true, contextFields: effectiveContextFields(cap), recentCuriosity }) }],
-    persona, cap, sfxCatalog,
+    messages: [{ role: 'user', content: situation }],
+    persona: speaker, cap, sfxCatalog,
     ctx, segmentState,
   });
 
@@ -473,7 +488,11 @@ export async function runCapability(which, ctx) {
     segmentState.lastWeatherCondition = ctx.weather.condition;
   }
 
-  await queue.announce(text, cap.kind);
+  // A rotated speaker rides through announce so the voice and the session
+  // attribution agree (windowMessages names foreign speakers by meta id).
+  await queue.announce(text, cap.kind, persona
+    ? { persona: speaker, meta: { personaId: speaker?.id, personaName: speaker?.name } }
+    : {});
 
   // Record an operator-fired curiosity line in the durable ledger too, so a
   // later autonomous tick doesn't repeat it (issue #577).
