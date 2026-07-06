@@ -19,6 +19,7 @@ import { createPoolBuilder } from './auto-pool.js';
 import { reloadAutoPlaylist } from './liquidsoap-control.js';
 import * as session from './session.js';
 import * as djAgent from './dj-agent.js';
+import * as programme from './programme.js';
 import { cleanupOldVoices } from '../audio/tts.js';
 import { shouldFire } from './dj-gate.js';
 import { djCallsAllowed } from './listeners.js';
@@ -381,10 +382,28 @@ async function hourlyCheck() {
   // session first drives it — the other no-ops). No ctx → the roll above didn't
   // happen either; leave the handoff pending for the next call site.
   if (ctx) {
+    // Plan the episode BEFORE the mic-pass so a persona handoff into a
+    // programme show can weave the episode angle into the greeting (the
+    // greeting doubles as the show's intro on a persona-change boundary).
+    try {
+      await programme.ensurePlan(ctx);
+    } catch (err) {
+      queue.log('error', `Programme plan failed: ${err.message}`);
+    }
     try {
       await djAgent.runPersonaHandoff(queue, ctx);
     } catch (err) {
       queue.log('error', `Persona handoff failed: ${err.message}`);
+    }
+    // Programme shows: open the episode. The intro owns the top of the show's
+    // first hour, so when it airs (now, or minutes ago via the track-start
+    // call site, or as the handoff greeting above) the generic time check
+    // stands down — the same one-talker-per-slot rule as issue #310.
+    try {
+      const introAired = await programme.onSessionSettled(queue, ctx);
+      if (introAired || programme.suppressHourly()) return;
+    } catch (err) {
+      queue.log('error', `Programme episode hook failed: ${err.message}`);
     }
   }
   if (!shouldFire('hourly')) return;
@@ -489,6 +508,7 @@ async function banterTick() {
 // ---------------------------------------------------------------------------
 
 async function skillsTick() {
+  if (programme.onAir()) return;  // a programme episode owns its talk moments — the director stands down
   if (!djCallsAllowed()) return;  // nobody listening — skip the segment director
   if (!optionalSegmentsAllowed()) return;  // over the daily token budget — mute optional segments
   try {
@@ -499,6 +519,60 @@ async function skillsTick() {
   } catch (err) {
     queue.log('error', `Segment tick failed: ${err.message}`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// PROGRAMME BEATS
+// The feature beat mid-hour (station-minute :35–:39) and the outro in the
+// closing minutes of the final hour (station-minute :55+). Placement is a
+// STATION-clock fact, but station zones sit at :30/:45 offsets (IST, Nepal),
+// so fixed process-minute crons can land mid-show — the tick runs every 5
+// minutes and dispatches on programme.dueBeat() instead; the beat flags make
+// the repeat ticks inside a window no-ops. The intro has no cron of its own:
+// it rides the session-settled hook (hourlyCheck above + queue's track-start
+// path). Gating (listeners, budget, beat-already-aired) lives in programme.ts.
+// ---------------------------------------------------------------------------
+
+async function programmeTick() {
+  if (!programme.onAir()) return;
+  const beat = programme.dueBeat();
+  if (!beat) return;
+  try {
+    const ctx = await getFullContext();
+    if (beat === 'feature') await programme.featureTick(queue, ctx);
+    else await programme.outroTick(queue, ctx);
+  } catch (err) {
+    queue.log('error', `Programme ${beat} tick failed: ${err.message}`);
+  }
+}
+
+// Gate-free manual runners — the /dj/segment command route. An operator press
+// always fires (only "no programme show on air" throws). Intro/outro re-mark
+// their beat so the autonomous path doesn't re-open or re-close the show; a
+// manual feature deliberately doesn't consume the hour's planned beat.
+export async function runProgrammeIntro() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  const out = await programme.runIntro(queue, ctx);
+  programme.markIntroAired();
+  return out;
+}
+
+export async function runProgrammeFeature() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  return programme.runFeature(queue, ctx);
+}
+
+export async function runProgrammeOutro() {
+  const ctx = await getFullContext();
+  await session.maybeRoll(ctx);
+  await programme.ensurePlan(ctx);
+  const out = await programme.runOutro(queue, ctx);
+  session.markProgrammeBeat('outro');
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +698,11 @@ export function startScheduler() {
   // (same issue-#310 reasoning as the ident slots). The handler gates on the
   // show's banter toggle, the live roster, frequency, listeners and budget.
   cron.schedule('20,50 * * * *', banterTick);
+
+  // Programme beats: feature mid-hour, outro in the final minutes of the
+  // show's last hour — dispatched on STATION-zone minute windows (see
+  // programmeTick). No-ops outside a programme episode.
+  cron.schedule('*/5 * * * *', programmeTick);
 
   // Cleanup every hour
   cron.schedule('0 * * * *', cleanup);
