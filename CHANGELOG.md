@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.38.1](https://github.com/perminder-klair/subwave/compare/v0.38.0...v0.38.1) (2026-07-07)
+
+
+### Bug Fixes
+
+* **tts:** build the AIO kokoro venv on Python 3.12 so misaki 0.9.4 installs ([#909](https://github.com/perminder-klair/subwave/issues/909)) ([69c66ac](https://github.com/perminder-klair/subwave/commit/69c66ac5a9d61e2b758cbd0d4a2cd23785129f2e))
+
+## [0.38.0](https://github.com/perminder-klair/subwave/compare/v0.37.0...v0.38.0) (2026-07-07)
+
+
+### Features
+
+* **analyzer:** multi-window CLAP, text-tower search & audio moods, outro-aware transitions ([#894](https://github.com/perminder-klair/subwave/issues/894)) ([eddc138](https://github.com/perminder-klair/subwave/commit/eddc138e4dfe3c9336d0063ecd2d0fee7caa06dc))
+* **mcp:** catch the MCP server up with the controller API + on-air sound effects ([#901](https://github.com/perminder-klair/subwave/issues/901)) ([f51f665](https://github.com/perminder-klair/subwave/commit/f51f665b3ac3eb801ff1f7ccd8bb3492f14f9913))
+* **personas:** add DJ Rocker community persona ([#893](https://github.com/perminder-klair/subwave/issues/893)) ([6e65536](https://github.com/perminder-klair/subwave/commit/6e655366052719095f6f267baf90b70d1700debc))
+
+
+### Bug Fixes
+
+* **admin:** stop long festival descriptions from pushing controls off-card ([#898](https://github.com/perminder-klair/subwave/issues/898)) ([#900](https://github.com/perminder-klair/subwave/issues/900)) ([6f79fbb](https://github.com/perminder-klair/subwave/commit/6f79fbb7aad906ad7b4c38bdcc0c9237ba4ed277))
+* **dj:** let a show's pinned mood and energy override the daypart wind-down ([#899](https://github.com/perminder-klair/subwave/issues/899)) ([a438fd0](https://github.com/perminder-klair/subwave/commit/a438fd0f4cb9288a66a71bfa9d2927f54b20156b))
+* **tts:** honour speech speed for openai-compatible cloud TTS servers ([#897](https://github.com/perminder-klair/subwave/issues/897)) ([9bb5b4f](https://github.com/perminder-klair/subwave/commit/9bb5b4fad1b9b8c4a42700a071cf8c0add2becf1))
+* **tts:** install misaki in the AIO image so Kokoro works again ([#896](https://github.com/perminder-klair/subwave/issues/896)) ([033c844](https://github.com/perminder-klair/subwave/commit/033c8443d6623c61cfae976fd9fd83a684a61151))
+
 ## [0.37.0](https://github.com/perminder-klair/subwave/compare/v0.36.0...v0.37.0) (2026-07-06)
 
 

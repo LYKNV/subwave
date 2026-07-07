@@ -50,12 +50,17 @@ export const DJ_SOULS = [
 ];
 
 // Ordered ascending in chattiness — effectiveFrequency() steps up this ladder.
-export const FREQUENCIES = ['quiet', 'moderate', 'aggressive'];
+// 'silent' is absolute: the persona never talks on its own (no links, idents,
+// hourlies, banter or segments) — only manual /dj/segment triggers, listener
+// requests and programme beats still speak. 'chatty' sits between the
+// historical moderate and aggressive.
+export const FREQUENCIES = ['silent', 'quiet', 'moderate', 'chatty', 'aggressive'];
 
-// Per-persona verbosity. 'concise' is the historical one-liner behaviour;
-// 'extended' roughly doubles every spoken segment for a storytelling DJ.
-// See llm/dj.js LENGTH_PHRASES for the actual length directives.
-export const SCRIPT_LENGTHS = ['concise', 'extended'];
+// Per-persona verbosity, ascending. 'concise' is the historical default;
+// 'one-liner' cuts every segment to a single quick line, 'extended' roughly
+// doubles, 'storyteller' roughly triples for long-form monologues.
+// See llm/internal/prompts/system.ts LENGTH_PHRASES for the actual directives.
+export const SCRIPT_LENGTHS = ['one-liner', 'concise', 'extended', 'storyteller'];
 
 // Per-persona tone dials. Each is 0-10 with 5 (DIAL_NEUTRAL) the default. A
 // model can't distinguish humour=6 from 7, so rather than inject a raw "7/10"
@@ -114,6 +119,8 @@ export function personaToneDirectives(persona: any): string {
 export function effectiveFrequency(persona: any = getEffectivePersona()) {
   const base = FREQUENCIES.includes(persona?.frequency) ? persona.frequency : 'moderate';
   if (!persona?.djMode) return base;
+  // 'silent' is an explicit operator promise — DJ mode never bumps out of it.
+  if (base === 'silent') return base;
   const i = FREQUENCIES.indexOf(base);
   return FREQUENCIES[Math.min(i + 1, FREQUENCIES.length - 1)];
 }
@@ -258,6 +265,16 @@ function clampNumCtx(raw: any, def: number): number {
   return Math.min(131072, Math.max(2048, Math.floor(raw)));
 }
 
+// repeat_penalty for local openai-compatible / locca servers. Clamped to
+// [1.0, 2.0]: 1.0 is OFF (a no-op, never injected), and >2.0 mangles output.
+// Non-numeric/NaN falls back to `def`. See appliedRepeatPenalty() in
+// capabilities.ts — Ollama reads its own value via providerOptions and ignores
+// this field.
+function clampRepeatPenalty(raw: any, def: number): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return def;
+  return Math.min(2.0, Math.max(1.0, raw));
+}
+
 // Coerce a stored agent-deadline value (ms). Clamped to [5s, 180s] and floored
 // to an integer; non-numeric/NaN falls back to `def`. The lower bound keeps a
 // fat-fingered save from making every agent pick fail instantly; the upper
@@ -361,6 +378,9 @@ function applyLlmLegPatch(target: any, patch: any, label: string): void {
   }
   if (l.numCtx !== undefined) {
     target.numCtx = clampNumCtx(Number(l.numCtx), target.numCtx);
+  }
+  if (l.repeatPenalty !== undefined) {
+    target.repeatPenalty = clampRepeatPenalty(Number(l.repeatPenalty), target.repeatPenalty);
   }
   // Forced-tool tool_choice: 'required' (default) or 'auto'. Only those two are
   // legal; anything else is a config error. See forcedToolChoice() / issue #570.
@@ -942,6 +962,15 @@ const DEFAULTS = {
     // if you run those. Ignored for `:cloud` models and every other provider
     // (they manage their own context). 0 → don't send num_ctx (Ollama default).
     numCtx: 16384,
+    // Repetition penalty for local openai-compatible / locca servers (llama.cpp,
+    // vLLM, LM Studio). llama.cpp's own default is 1.0 = OFF, which lets the
+    // tool-loop picker run away repeating a token block until it hits the output
+    // cap and never calls `done`. 1.15 is a sane floor; raise toward 1.25 if a
+    // model still loops, or set 1.0 to disable (e.g. a vLLM server that rejects
+    // the `repeat_penalty` body field). Injected into the request body — the AI
+    // SDK's openai provider has no field for it. Ignored by every other provider
+    // (Ollama reads its own value via providerOptions).
+    repeatPenalty: 1.15,
     // When on, the session DJ agent drives track-picking, links and listener
     // requests as a tool-loop over the session chat history (broadcast/
     // dj-agent.js). When off, the stateless pool picker runs instead — still
@@ -1030,6 +1059,7 @@ const DEFAULTS = {
       reasoning: false,
       toolChoice: 'required',
       numCtx: 16384,
+      repeatPenalty: 1.15,
     },
   },
   // Embedding-propagated library tagger (music/tag-library.ts).
