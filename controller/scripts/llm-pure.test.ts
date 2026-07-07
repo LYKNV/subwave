@@ -463,6 +463,20 @@ async function main() {
     assert.equal(stripThinking('leftover reasoning</think>  the answer'), 'the answer');
     assert.equal(stripThinking('plain text'), 'plain text');
   });
+  await test('stripThinking collapses a </think>-separated repetition loop to the first answer', () => {
+    // Live incident 2026-07-07: glm-5.2:cloud looped the sign-off, emitting
+    // </think> between each repeat until the token cap truncated the tail.
+    const runaway =
+      'Alright, I\'m out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out before I talk myself into a';
+    assert.equal(stripThinking(runaway), 'Alright, I\'m out — good hands, see you tomorrow.');
+    // Never leak a stray tag even when nothing else matches.
+    assert.equal(stripThinking('done for the night</think>'), 'done for the night');
+    // A verbatim two-way repeat (no third segment) is still a loop, not a leak.
+    assert.equal(stripThinking('same line here</think>same line here'), 'same line here');
+  });
   await test('stripThinking strips Gemma/harmony channel reasoning, keeps the final message', () => {
     // thought → final: keep only the final channel's message
     assert.equal(

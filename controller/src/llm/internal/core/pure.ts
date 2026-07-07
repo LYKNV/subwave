@@ -15,7 +15,13 @@
 // `llm.reasoning` is off (provider no-think fetch + the Ollama `think` flag);
 // we still strip any leftover tags defensively here.
 const THINK_TAG_RE = /<think>[\s\S]*?<\/think>\s*/gi;
-const DANGLING_THINK_RE = /^[\s\S]*?<\/think>\s*/i;
+const CLOSE_THINK_RE = /<\/think>/i;
+const ANY_THINK_TAG_RE = /<\/?think>/gi;
+
+// Normalise a segment for the repetition check (lowercase + collapse whitespace).
+function normSeg(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
 
 // Harmony / channel reasoning format (gpt-oss, Gemma-4): the model emits its
 // deliberation in a `thought`/`analysis` channel before the answer's `final`
@@ -36,9 +42,27 @@ const ANY_CHANNEL_OPEN_RE = /<\|channel\|?>/i;
 const HARMONY_TOKENS_RE = /<\|(?:start|end|return|message|channel)\|?>/gi;
 
 export function stripThinking(s: any): any {
-  if (!s) return s;
-  let t = s.replace(THINK_TAG_RE, '').replace(DANGLING_THINK_RE, '');
-  // Keep only the text after the LAST final-channel opener, if any.
+  if (!s || typeof s !== 'string') return s;
+  // 1. Well-formed <think>…</think> blocks.
+  let t = s.replace(THINK_TAG_RE, '');
+  // 2. Stray closing </think> tags with no opener. Two shapes reach here:
+  //    (a) a genuine reasoning leak — `reasoning</think>answer`, ONE close tag,
+  //        the answer follows it → keep the LAST segment.
+  //    (b) a runaway loop where a reasoning model (thinking not actually
+  //        suppressed by the endpoint, e.g. an Ollama :cloud GLM) emits </think>
+  //        as a separator between repeated near-identical answers until it hits
+  //        the output-token cap (live incident 2026-07-07, generateSignoff). The
+  //        tail is a truncated duplicate, so keep the FIRST complete segment.
+  if (CLOSE_THINK_RE.test(t)) {
+    const segs = t.split(/<\/think>/i).map((x) => x.trim()).filter(Boolean);
+    if (segs.length) {
+      const norm = segs.map(normSeg);
+      const hasRepeat = norm.some((v, i) => norm.indexOf(v) !== i);
+      t = segs.length >= 3 || hasRepeat ? segs[0] : segs[segs.length - 1];
+    }
+  }
+  // 3. Harmony / channel reasoning — keep only the text after the LAST
+  //    final-channel opener, if any.
   let lastFinalEnd = -1;
   for (const m of t.matchAll(FINAL_CHANNEL_RE)) {
     lastFinalEnd = (m.index ?? 0) + m[0].length;
@@ -51,10 +75,10 @@ export function stripThinking(s: any): any {
     const open = t.search(ANY_CHANNEL_OPEN_RE);
     if (open !== -1) t = t.slice(0, open);
   }
-  // Sweep up any leftover harmony control tokens (a trailing <|end|>/<|return|>).
-  // These literals never appear in a real DJ script.
-  t = t.replace(HARMONY_TOKENS_RE, '');
-  return t.trim();
+  // 4. Belt-and-suspenders — no stray <think>/</think> tag or leftover harmony
+  //    control token ever reaches TTS/booth. These literals never appear in a
+  //    real DJ script.
+  return t.replace(ANY_THINK_TAG_RE, '').replace(HARMONY_TOKENS_RE, '').trim();
 }
 
 // Pull a JSON object out of a free-text reply: drop ```json fences and any
