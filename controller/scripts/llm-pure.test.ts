@@ -11,12 +11,13 @@ import { generateText, APICallError } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
 import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, errReason, nearestId } from '../src/llm/internal/core/pure.js';
 import { withDeadline, withTransientRetry, retryAfterMs } from '../src/llm/internal/core/retry.js';
-import { providerOptions, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, forcedToolChoice } from '../src/llm/internal/provider/capabilities.js';
+import { providerOptions, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, appliedRepeatPenalty, forcedToolChoice } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
 import { introBudgetPhrase, enforceIntroBudget } from '../src/llm/internal/prompts/intro-budget.js';
 import { embeddingBaseUrl } from '../src/llm/internal/provider/embedding.js';
 import { DEFAULT_LOCCA_EMBED_BASE_URL } from '../src/llm/internal/provider/registry.js';
-import { personaToneDirectives, normalizeDial, DIAL_NEUTRAL, validatePersonasStrict, clampTtsSpeed, TTS_SPEED_DEFAULT, clampMaxOutputTokens, resolveMaxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX } from '../src/settings.js';
+import { personaToneDirectives, normalizeDial, DIAL_NEUTRAL, validatePersonasStrict, clampTtsSpeed, TTS_SPEED_DEFAULT, clampMaxOutputTokens, resolveMaxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, effectiveFrequency, SCRIPT_LENGTHS } from '../src/settings.js';
+import { lengthMode, lengthPhrase } from '../src/llm/internal/prompts/system.js';
 import { showMusicLean } from '../src/llm/internal/prompts/picker.js';
 
 let failures = 0;
@@ -393,6 +394,21 @@ async function main() {
     assert.equal(appliedNumCtx({ provider: 'openai', model: 'gpt-4.1-mini', numCtx: 8192 }), null);
     assert.equal(appliedNumCtx({ provider: 'locca', model: 'qwen3', numCtx: 8192 }), null);
   });
+  await test('appliedRepeatPenalty: body-injection providers only, and only when > 1.0', () => {
+    // openai-compatible + locca inject via the request body (the openai
+    // provider can't carry repeat_penalty in providerOptions).
+    assert.equal(appliedRepeatPenalty({ provider: 'openai-compatible', repeatPenalty: 1.15 }), 1.15);
+    assert.equal(appliedRepeatPenalty({ provider: 'locca', repeatPenalty: 1.25 }), 1.25);
+    // 1.0 (or below) is a no-op — never injected.
+    assert.equal(appliedRepeatPenalty({ provider: 'openai-compatible', repeatPenalty: 1.0 }), null);
+    // Ollama reads its own value via providerOptions.ollama.options — not here
+    // (no double-write into the sampling record).
+    assert.equal(appliedRepeatPenalty({ provider: 'ollama', repeatPenalty: 1.2 }), null);
+    // Cloud providers never inject.
+    assert.equal(appliedRepeatPenalty({ provider: 'openai', repeatPenalty: 1.2 }), null);
+    // Missing / junk value → null, no throw.
+    assert.equal(appliedRepeatPenalty({ provider: 'openai-compatible' }), null);
+  });
 
   await test('forcedToolChoice: only the literal "auto" downgrades; everything else is "required" (issue #570)', () => {
     // Opt-in downgrade for crash-prone forced-tool servers (newer Intel vLLM).
@@ -447,6 +463,37 @@ async function main() {
     assert.equal(stripThinking('<think>reasoning</think>hello'), 'hello');
     assert.equal(stripThinking('leftover reasoning</think>  the answer'), 'the answer');
     assert.equal(stripThinking('plain text'), 'plain text');
+  });
+  await test('stripThinking collapses a </think>-separated repetition loop to the first answer', () => {
+    // Live incident 2026-07-07: glm-5.2:cloud looped the sign-off, emitting
+    // </think> between each repeat until the token cap truncated the tail.
+    const runaway =
+      'Alright, I\'m out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out — good hands, see you tomorrow.</think>' +
+      'Alright, I\'m clocking out before I talk myself into a';
+    assert.equal(stripThinking(runaway), 'Alright, I\'m out — good hands, see you tomorrow.');
+    // Never leak a stray tag even when nothing else matches.
+    assert.equal(stripThinking('done for the night</think>'), 'done for the night');
+    // A verbatim two-way repeat (no third segment) is still a loop, not a leak.
+    assert.equal(stripThinking('same line here</think>same line here'), 'same line here');
+  });
+  await test('stripThinking strips Gemma/harmony channel reasoning, keeps the final message', () => {
+    // thought → final: keep only the final channel's message
+    assert.equal(
+      stripThinking('<|channel|>thought<|message|>let me think…<|channel|>final<|message|>Coming up next: a classic.'),
+      'Coming up next: a classic.',
+    );
+    // token variant without the trailing pipe (<|channel>thought)
+    assert.equal(
+      stripThinking('<|channel>analysis<|message>deliberating<|channel>final<|message>Here we go.'),
+      'Here we go.',
+    );
+    // no final channel — the answer is trapped in the thought channel; strip to
+    // empty rather than speak the deliberation aloud
+    assert.equal(stripThinking('<|channel|>thought<|message|>hmm, still thinking'), '');
+    // plain text with no channel tokens is untouched
+    assert.equal(stripThinking('Just a normal DJ line.'), 'Just a normal DJ line.');
   });
   await test('extractJson pulls the object out of fences and prose', () => {
     assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
@@ -542,6 +589,52 @@ async function main() {
     assert.equal(bare.humour, DIAL_NEUTRAL);   // absent dials default to neutral
     assert.equal(bare.localColour, DIAL_NEUTRAL);
     assert.equal(bare.warmth, DIAL_NEUTRAL);
+  });
+
+  // ---- the 5-rung frequency ladder + 4-rung script-length ladder ----
+  // Every consumer (dj-gate slots, segment floors, link spacing, run
+  // probability, LENGTH_PHRASES) branches on these values; pin the ladder
+  // mechanics and the save path so a rung can't silently vanish.
+  console.log('effectiveFrequency / lengthMode (behaviour ladders):');
+  await test('djMode bumps exactly one rung, capped at aggressive', () => {
+    const p = (frequency: string, djMode = true) => ({ frequency, djMode });
+    assert.equal(effectiveFrequency(p('quiet')), 'moderate');
+    assert.equal(effectiveFrequency(p('moderate')), 'chatty');
+    assert.equal(effectiveFrequency(p('chatty')), 'aggressive');
+    assert.equal(effectiveFrequency(p('aggressive')), 'aggressive');
+    assert.equal(effectiveFrequency(p('chatty', false)), 'chatty');
+  });
+  await test('silent is absolute — djMode never bumps out of it', () => {
+    assert.equal(effectiveFrequency({ frequency: 'silent', djMode: true }), 'silent');
+    assert.equal(effectiveFrequency({ frequency: 'silent', djMode: false }), 'silent');
+  });
+  await test('unknown / missing frequency falls back to moderate', () => {
+    assert.equal(effectiveFrequency({ frequency: 'shouty' }), 'moderate');
+    assert.equal(effectiveFrequency({}), 'moderate');
+  });
+  await test('validatePersonasStrict round-trips the new rungs', () => {
+    const base = { name: 'Nova', soul: 'late-night',
+      tts: { engine: 'piper', cloudProvider: 'openai', voice: '' } };
+    const [saved] = validatePersonasStrict([{ ...base, frequency: 'silent', scriptLength: 'storyteller' }]);
+    assert.equal(saved.frequency, 'silent');
+    assert.equal(saved.scriptLength, 'storyteller');
+    assert.throws(() => validatePersonasStrict([{ ...base, frequency: 'shouty' }]), /frequency/);
+    assert.throws(() => validatePersonasStrict([{ ...base, frequency: 'quiet', scriptLength: 'epic' }]), /scriptLength/);
+  });
+  await test('lengthMode maps every rung to itself, junk to concise', () => {
+    for (const l of SCRIPT_LENGTHS) assert.equal(lengthMode({ scriptLength: l }), l);
+    assert.equal(lengthMode({ scriptLength: 'epic' }), 'concise');
+    assert.equal(lengthMode({}), 'concise');
+    // Object.hasOwn guard: a prototype key must not select a phrase table.
+    assert.equal(lengthMode({ scriptLength: 'toString' }), 'concise');
+  });
+  await test('every rung has a phrase for every segment kind', () => {
+    for (const l of SCRIPT_LENGTHS) {
+      for (const kind of ['intro', 'link', 'stationId', 'hourly', 'adlib', 'segment']) {
+        const phrase = lengthPhrase(kind, { scriptLength: l });
+        assert.ok(typeof phrase === 'string' && phrase.length > 0, `${l}/${kind} empty`);
+      }
+    }
   });
 
   // ---- clampTtsSpeed: per-engine / per-persona speech-rate multiplier ----
