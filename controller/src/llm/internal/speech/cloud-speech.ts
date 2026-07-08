@@ -25,6 +25,53 @@ const CLOUD_DEFAULT_MODELS: Record<string, string> = {
   elevenlabs: 'eleven_flash_v2_5',
 };
 
+// Pure resolution rule for the cloud TTS model a persona will be voiced by,
+// mirroring speak() below plus resolveEngine() in audio/tts.ts: the persona
+// owns the engine when set, otherwise the station defaultEngine speaks; a
+// persona that overrode the provider away from the global one falls back to
+// the new provider's default (openai-compatible has no default so it keeps
+// the global model); a persona voiced by the DEFAULT cloud engine carries no
+// provider override (speakWith only builds cloudOverride for an explicit
+// persona engine === 'cloud'). An unrecognised persona engine string fails
+// closed to '' — resolveEngine would route it to the defaultEngine, but a
+// missing hint is harmless while a wrong one is spoken aloud. Empty string =
+// not voiced by cloud / unresolved — callers treat that as "don't apply
+// model-specific hints". Kept pure and unit-pinned in scripts/llm-pure.test.ts
+// so the "mirror of speak()" claim is testable rather than comment-enforced.
+export function resolveCloudModel(
+  personaTts: { engine?: string; cloudProvider?: string } | null | undefined,
+  cfg: { defaultEngine?: string; provider?: string; model?: string },
+): string {
+  const explicit = personaTts?.engine === 'cloud';
+  if (!explicit && (personaTts?.engine || cfg.defaultEngine !== 'cloud')) return '';
+  const personaProvider = explicit ? personaTts?.cloudProvider : '';
+  if (personaProvider && personaProvider !== cfg.provider) {
+    return CLOUD_DEFAULT_MODELS[personaProvider] || cfg.model || '';
+  }
+  return cfg.model || '';
+}
+
+// The model `persona` actually resolves to at speak() time, or '' when the
+// persona won't be voiced by a usable cloud engine — NOT the raw global model
+// and NOT the persona's provider alone (issue #696). On top of the pure rule
+// above this mirrors resolveEngine()'s key check: an enabled-but-unconfigured
+// cloud engine silently reroutes to a local engine that reads brackets aloud
+// as words, so report no model — and therefore no hint — in that case too.
+// Callers pass this into djSystem() so the DJ prompt layer can gate a hint on
+// what will actually speak.
+export function resolveCloudModelForPersona(persona: any): string {
+  const t: any = settings.get().tts || {};
+  const model = resolveCloudModel(persona?.tts, {
+    defaultEngine: t.defaultEngine,
+    provider: t.cloud?.provider,
+    model: t.cloud?.model,
+  });
+  if (!model) return '';
+  const explicit = persona?.tts?.engine === 'cloud';
+  if (!isConfigured(explicit ? persona?.tts?.cloudProvider || null : null)) return '';
+  return model;
+}
+
 // Speech-rate multiplier limits per provider. A value outside the supported
 // range makes the provider API reject the request, so we clamp before calling.
 // ElevenLabs allows 0.7–1.2; OpenAI allows 0.25–4.0.
