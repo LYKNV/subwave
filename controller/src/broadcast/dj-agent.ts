@@ -22,7 +22,7 @@ import * as journey from '../music/journey.js';
 import * as dj from '../llm/dj.js';
 import { energyForDaypart } from '../context.js';
 import { defineAgent } from '../llm/agent.js';
-import { djObject, nearestId } from '../llm/sdk.js';
+import { djObject, nearestId, modelTolerant } from '../llm/sdk.js';
 import { buildPickerTools } from '../llm/tools.js';
 import { recordPick } from '../llm/log.js';
 import * as budget from './dj-budget.js';
@@ -163,6 +163,13 @@ export function runActive(): boolean {
   return !!(runState && runState.remaining > 0);
 }
 
+// Plain .nullable() fields, deliberately — GLM's malformed spellings of
+// "nothing" (the string "null", an omitted key, a double-JSON-encoded object)
+// are repaired by the modelTolerant wrapper in pickSchema() below, at the
+// OBJECT level. Do not wrap individual fields in a preprocess: a per-field
+// pipe drops that field from the tool inputSchema's `required` array (the AI
+// SDK renders Zod with io:'input'), which invites every provider to omit it —
+// see modelTolerant's comment in core/pure.ts.
 export const PICK_SCHEMA = z.object({
   id: z.string().describe('the exact song id returned by one of the discovery tools — never invent or compose ids'),
   reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener; do not justify, just note what makes THIS pick a fresh step (new artist, a shift in energy/era/texture), not a vibe label you would recycle pick after pick (e.g. "new artist, lifts the energy", never a repeated "mellow reflective step")'),
@@ -187,11 +194,22 @@ export const PICK_SCHEMA_NO_FX = PICK_SCHEMA.extend({
 // persona stretched to 4-6 sentence links on the pool path (generateLink gets
 // lengthPhrase in its prompt) but snapped back to the consts' hard-coded "one
 // or two sentences" whenever the default-on agent picker was doing the talking.
-export function pickSchema() {
+// The plain (un-wrapped) object — for callers that still need to .extend()
+// (repickFromSeen pins `id` to the run's own candidate set). Extend THIS,
+// then re-wrap with modelTolerant; a ZodPreprocess pipe has no .extend.
+function pickSchemaBase() {
   const base = settings.effectsActive() ? PICK_SCHEMA : PICK_SCHEMA_NO_FX;
   return base.extend({
     say: z.string().nullable().describe(`when the latest event message says to write a spoken link, set this to ${dj.lengthPhrase('link')} of natural speech in the DJ voice that INTRODUCE the track you are about to play — set it up, name the artist or capture its feel, vary your opener. Do NOT back-announce, recap, or name the track that just played (a listener request may slip in ahead of your pick, so what aired right before it is not certain). Never state a clock time unless the event message tells you when the link airs — then use exactly that time. When the event says stay silent, set this to null`),
   });
+}
+
+export function pickSchema() {
+  // modelTolerant repairs GLM's malformed nullable spellings ("null"-the-
+  // string, an omitted key) at the object level, on every parse path (done-
+  // tool args, text salvage) — the wire schema stays identical to the plain
+  // object's, all fields still required. See core/pure.ts.
+  return modelTolerant(pickSchemaBase());
 }
 
 // Resolved per run, like pickSchema: the intro length follows the on-air
@@ -319,8 +337,9 @@ function breakerFailure(queue: any) {
 // `pickerAgent.maxSteps` / `pickerAgent.timeoutMs` so test runs match prod
 // without drifting. The hard timeout is what fails fast into the stateless
 // fallback below instead of dragging on a pathological model call — enforced
-// by withDeadline in llm/sdk.ts (main + recovery runs each get the full
-// budget, so worst case per agent call is ~2× this). It comes from
+// by runDeadlined's shared deadline in agent.ts (native run, main run, and
+// both recovery attempts all draw down the SAME overall budget, so worst
+// case per agent call is this value, not a multiple of it). It comes from
 // settings.llm.agentTimeoutMs (default 45s, admin-tunable) — slow
 // reasoning-heavy cloud models routinely need 20-40s per pick, and a pick has
 // a whole track length of slack; the deadline exists to contain the unbounded
@@ -335,9 +354,18 @@ export const pickerAgent = defineAgent({
   // the on-air persona's djMode, and the say length its scriptLength — same
   // reason effectsGuidance() is dynamic. See pickSchema above.
   schema: () => pickSchema(),
-  // The done-tool path ends the loop at step 1 (COMMIT_AFTER_STEPS in sdk.js)
-  // on every provider now; maxSteps is just the backstop.
-  maxSteps: 4,
+  // The done-tool path is meant to end the loop at step 1 (COMMIT_AFTER_STEPS
+  // in agent.ts): step 0 discovers, step 1 commits. That held for every
+  // provider UNTIL GLM (Zhipu/Z.ai) — it can decline the forced `done` call
+  // repeatedly within the SAME conversation rather than complying on the first
+  // attempt, so a taller maxSteps stopped being a rarely-hit backstop and
+  // became a real (and wasted) retry budget: each extra step just grows an
+  // increasingly "I already declined" trail, which made compliance WORSE, not
+  // better, in testing. 2 keeps the main run to exactly discovery + one
+  // committed attempt and hands off to agent.ts's own two-tier recovery (which
+  // includes a clean-context retry) sooner — recovery is the mechanism that
+  // actually rescues these, not more steps on a polluted trail.
+  maxSteps: 2,
   timeoutMs: agentDeadline,
   buildSystem: ({ showAt }: any = {}) => pickSystem(showAt ?? null),
   buildTools: ({ recentIds, recentKeys, hardRecentIds, hardRecentKeys, audioWaypoint, playlistLock, playlistTracks, excludedIds, showAt }) => {
@@ -374,7 +402,8 @@ export const requestAgent = defineAgent({
   // Function form — resolved per run so the intro length follows the on-air
   // persona's scriptLength (see requestSchema).
   schema: () => requestSchema(),
-  maxSteps: 4,
+  // See pickerAgent.maxSteps above — same reasoning.
+  maxSteps: 2,
   timeoutMs: agentDeadline,
   buildSystem: () => requestSystem(),
   // resolveReferences adds the web-backed reference resolver (request path only;
@@ -471,9 +500,9 @@ async function enqueuePick(
 async function repickFromSeen({ seen, badId, wantLink }: { seen: Map<string, any>; badId: string | null; wantLink: boolean }) {
   const ids = [...seen.keys()];
   if (ids.length === 0) return null;
-  const schema = pickSchema().extend({
+  const schema = modelTolerant(pickSchemaBase().extend({
     id: z.enum(ids as [string, ...string[]]).describe('the exact id of one candidate'),
-  });
+  }));
   try {
     return await djObject({
       system: pickSystem(),
