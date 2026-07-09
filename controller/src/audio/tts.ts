@@ -9,6 +9,7 @@ import * as kokoro from './kokoro.js';
 import { applyEdgeFades } from './wav-edges.js';
 import * as chatterbox from './chatterbox.js';
 import * as pocketTts from './pocketTts.js';
+import { heavyEnabledEngines } from './ttsHeavyClient.js';
 import * as remoteTts from './remoteTts.js';
 import * as cloud from '../llm/speech.js';
 import { stripThinking } from '../llm/sdk.js';
@@ -335,6 +336,16 @@ export async function speak(
   const scale = Math.min(settings.TTS_SPEED_MAX, Math.max(settings.TTS_SPEED_MIN, engineSpeed * live));
   const started = Date.now();
   const chars = (speakText || '').length;
+  // Shared fields for every recordTts() outcome below. `text` is capped so the
+  // ring buffer stays small (the admin debug panel polls the whole ring every
+  // ~2s); `persona` names who voiced the segment (null for the global
+  // jingle/default kinds), resolved through the same override path as the
+  // engine so a handoff clip attributes to the outgoing DJ.
+  const callBase = {
+    kind, requested, chars,
+    text: (speakText || '').slice(0, 240),
+    persona: GLOBAL_VOICE_KINDS.has(kind) ? null : (personaFor(persona)?.name || null),
+  };
   try {
     const result = await speakWith(primary, speakText, { outPath, speedScale: scale, language, soul }, personaTts);
     // Bake 40ms edge fades into the rendered clip so hard file boundaries
@@ -343,8 +354,8 @@ export async function speak(
     // non-WAV output (cloud mp3) is left as-is.
     if (typeof result === 'string') await applyEdgeFades(result);
     recordTts({
-      kind, engine: primary, requested, fellBack: requested !== primary,
-      ok: true, ms: Date.now() - started, chars, t: new Date().toISOString(),
+      ...callBase, engine: primary, fellBack: requested !== primary,
+      ok: true, ms: Date.now() - started, t: new Date().toISOString(),
     });
     return result;
   } catch (err) {
@@ -354,8 +365,8 @@ export async function speak(
     const fallback = primary === 'piper' ? 'kokoro' : 'piper';
     if (fallback === 'kokoro' && !kokoro.isAvailable()) {
       recordTts({
-        kind, engine: primary, requested, fellBack: requested !== primary,
-        ok: false, ms: Date.now() - started, chars, error: err.message,
+        ...callBase, engine: primary, fellBack: requested !== primary,
+        ok: false, ms: Date.now() - started, error: err.message,
         t: new Date().toISOString(),
       });
       throw err;
@@ -365,14 +376,14 @@ export async function speak(
       const result = await speakWith(fallback, speakText, { outPath, speedScale: scale, language, soul }, personaTts);
       if (typeof result === 'string') await applyEdgeFades(result);
       recordTts({
-        kind, engine: fallback, requested, fellBack: true,
-        ok: true, ms: Date.now() - started, chars, t: new Date().toISOString(),
+        ...callBase, engine: fallback, fellBack: true,
+        ok: true, ms: Date.now() - started, t: new Date().toISOString(),
       });
       return result;
     } catch (err2) {
       recordTts({
-        kind, engine: fallback, requested, fellBack: true,
-        ok: false, ms: Date.now() - started, chars, error: err2.message,
+        ...callBase, engine: fallback, fellBack: true,
+        ok: false, ms: Date.now() - started, error: err2.message,
         t: new Date().toISOString(),
       });
       throw err2;
@@ -391,6 +402,11 @@ export function availableEngines() {
     kokoro: kokoro.isAvailable(),
     chatterbox: chatterbox.isAvailable(),
     'pocket-tts': pocketTts.isAvailable(),
+    // The tts-heavy sidecar's configured engines (TTS_HEAVY_ENGINES): a
+    // string[] when reachable and reporting it, null otherwise. Lets the admin
+    // badge separate "engine off" (sidecar up, engine disabled) from "sidecar
+    // off" (whole sidecar down). See engineMeta.engineStatus.
+    heavyEnabled: heavyEnabledEngines(),
     // Whether PocketTTS can clone voices (gated weights present). null = not
     // yet known. The admin UI uses this to warn that a cloned .wav voice will
     // silently revert to a built-in when cloning is unavailable (issue #238).
