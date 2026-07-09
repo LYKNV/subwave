@@ -22,12 +22,13 @@ import * as journey from '../music/journey.js';
 import * as dj from '../llm/dj.js';
 import { energyForDaypart } from '../context.js';
 import { defineAgent } from '../llm/agent.js';
-import { djObject, nearestId } from '../llm/sdk.js';
+import { djObject, nearestId, modelTolerant } from '../llm/sdk.js';
 import { buildPickerTools } from '../llm/tools.js';
 import { recordPick } from '../llm/log.js';
 import * as budget from './dj-budget.js';
 import { withTrace, logEvent } from '../observability/events.js';
 import { recencyWindowsForLibrary, effectiveNoRepeatWindow } from '../music/recency.js';
+import { hasEraBound } from '../music/show-filter.js';
 import { djCallsAllowed } from './listeners.js';
 
 // --- Feature 4: DJ-mode mini-runs ------------------------------------------
@@ -163,6 +164,13 @@ export function runActive(): boolean {
   return !!(runState && runState.remaining > 0);
 }
 
+// Plain .nullable() fields, deliberately — GLM's malformed spellings of
+// "nothing" (the string "null", an omitted key, a double-JSON-encoded object)
+// are repaired by the modelTolerant wrapper in pickSchema() below, at the
+// OBJECT level. Do not wrap individual fields in a preprocess: a per-field
+// pipe drops that field from the tool inputSchema's `required` array (the AI
+// SDK renders Zod with io:'input'), which invites every provider to omit it —
+// see modelTolerant's comment in core/pure.ts.
 export const PICK_SCHEMA = z.object({
   id: z.string().describe('the exact song id returned by one of the discovery tools — never invent or compose ids'),
   reason: z.string().describe('internal scratchpad only — max 12 words, never shown to the listener; do not justify, just note what makes THIS pick a fresh step (new artist, a shift in energy/era/texture), not a vibe label you would recycle pick after pick (e.g. "new artist, lifts the energy", never a repeated "mellow reflective step")'),
@@ -187,11 +195,22 @@ export const PICK_SCHEMA_NO_FX = PICK_SCHEMA.extend({
 // persona stretched to 4-6 sentence links on the pool path (generateLink gets
 // lengthPhrase in its prompt) but snapped back to the consts' hard-coded "one
 // or two sentences" whenever the default-on agent picker was doing the talking.
-export function pickSchema() {
+// The plain (un-wrapped) object — for callers that still need to .extend()
+// (repickFromSeen pins `id` to the run's own candidate set). Extend THIS,
+// then re-wrap with modelTolerant; a ZodPreprocess pipe has no .extend.
+function pickSchemaBase() {
   const base = settings.effectsActive() ? PICK_SCHEMA : PICK_SCHEMA_NO_FX;
   return base.extend({
     say: z.string().nullable().describe(`when the latest event message says to write a spoken link, set this to ${dj.lengthPhrase('link')} of natural speech in the DJ voice that INTRODUCE the track you are about to play — set it up, name the artist or capture its feel, vary your opener. Do NOT back-announce, recap, or name the track that just played (a listener request may slip in ahead of your pick, so what aired right before it is not certain). Never state a clock time unless the event message tells you when the link airs — then use exactly that time. When the event says stay silent, set this to null`),
   });
+}
+
+export function pickSchema() {
+  // modelTolerant repairs GLM's malformed nullable spellings ("null"-the-
+  // string, an omitted key) at the object level, on every parse path (done-
+  // tool args, text salvage) — the wire schema stays identical to the plain
+  // object's, all fields still required. See core/pure.ts.
+  return modelTolerant(pickSchemaBase());
 }
 
 // Resolved per run, like pickSchema: the intro length follows the on-air
@@ -319,8 +338,9 @@ function breakerFailure(queue: any) {
 // `pickerAgent.maxSteps` / `pickerAgent.timeoutMs` so test runs match prod
 // without drifting. The hard timeout is what fails fast into the stateless
 // fallback below instead of dragging on a pathological model call — enforced
-// by withDeadline in llm/sdk.ts (main + recovery runs each get the full
-// budget, so worst case per agent call is ~2× this). It comes from
+// by runDeadlined's shared deadline in agent.ts (native run, main run, and
+// both recovery attempts all draw down the SAME overall budget, so worst
+// case per agent call is this value, not a multiple of it). It comes from
 // settings.llm.agentTimeoutMs (default 45s, admin-tunable) — slow
 // reasoning-heavy cloud models routinely need 20-40s per pick, and a pick has
 // a whole track length of slack; the deadline exists to contain the unbounded
@@ -335,9 +355,18 @@ export const pickerAgent = defineAgent({
   // the on-air persona's djMode, and the say length its scriptLength — same
   // reason effectsGuidance() is dynamic. See pickSchema above.
   schema: () => pickSchema(),
-  // The done-tool path ends the loop at step 1 (COMMIT_AFTER_STEPS in sdk.js)
-  // on every provider now; maxSteps is just the backstop.
-  maxSteps: 4,
+  // The done-tool path is meant to end the loop at step 1 (COMMIT_AFTER_STEPS
+  // in agent.ts): step 0 discovers, step 1 commits. That held for every
+  // provider UNTIL GLM (Zhipu/Z.ai) — it can decline the forced `done` call
+  // repeatedly within the SAME conversation rather than complying on the first
+  // attempt, so a taller maxSteps stopped being a rarely-hit backstop and
+  // became a real (and wasted) retry budget: each extra step just grows an
+  // increasingly "I already declined" trail, which made compliance WORSE, not
+  // better, in testing. 2 keeps the main run to exactly discovery + one
+  // committed attempt and hands off to agent.ts's own two-tier recovery (which
+  // includes a clean-context retry) sooner — recovery is the mechanism that
+  // actually rescues these, not more steps on a polluted trail.
+  maxSteps: 2,
   timeoutMs: agentDeadline,
   buildSystem: ({ showAt }: any = {}) => pickSystem(showAt ?? null),
   buildTools: ({ recentIds, recentKeys, hardRecentIds, hardRecentKeys, audioWaypoint, playlistLock, playlistTracks, excludedIds, showAt }) => {
@@ -351,12 +380,12 @@ export const pickerAgent = defineAgent({
     // (issue #447), so no length cap is passed here.
     const activeShow = settings.resolveActiveShow(showAt ?? undefined);
     const strict = !!(activeShow?.filtersStrict);
-    const genreLock = strict && activeShow?.genre ? activeShow.genre : null;
-    const eraLock = strict && (activeShow?.fromYear != null || activeShow?.toYear != null)
-      ? { fromYear: activeShow.fromYear, toYear: activeShow.toYear }
-      : null;
-    const moodLock = strict && activeShow?.mood ? activeShow.mood : null;
-    const energyLock = strict && activeShow?.energy ? activeShow.energy : null;
+    // Each lock is an any-of list (#929): a candidate passes when it matches
+    // ANY entry; the locks AND together across attributes.
+    const genreLock = strict && activeShow?.genres?.length ? activeShow.genres : null;
+    const eraLock = strict && hasEraBound(activeShow?.eras) ? activeShow.eras : null;
+    const moodLock = strict && activeShow?.moods?.length ? activeShow.moods : null;
+    const energyLock = strict && activeShow?.energies?.length ? activeShow.energies : null;
     // playlistLock / playlistTracks are pre-resolved by pickViaAgent (the
     // Navidrome fetch is async; buildTools is sync) and threaded through run().
     const { tools, seen } = buildPickerTools({ recentIds, recentKeys, hardRecentIds, hardRecentKeys, audioWaypoint, genreLock, eraLock, moodLock, energyLock, playlistLock, playlistTracks, excludedIds });
@@ -374,7 +403,8 @@ export const requestAgent = defineAgent({
   // Function form — resolved per run so the intro length follows the on-air
   // persona's scriptLength (see requestSchema).
   schema: () => requestSchema(),
-  maxSteps: 4,
+  // See pickerAgent.maxSteps above — same reasoning.
+  maxSteps: 2,
   timeoutMs: agentDeadline,
   buildSystem: () => requestSystem(),
   // resolveReferences adds the web-backed reference resolver (request path only;
@@ -471,9 +501,9 @@ async function enqueuePick(
 async function repickFromSeen({ seen, badId, wantLink }: { seen: Map<string, any>; badId: string | null; wantLink: boolean }) {
   const ids = [...seen.keys()];
   if (ids.length === 0) return null;
-  const schema = pickSchema().extend({
+  const schema = modelTolerant(pickSchemaBase().extend({
     id: z.enum(ids as [string, ...string[]]).describe('the exact id of one candidate'),
-  });
+  }));
   try {
     return await djObject({
       system: pickSystem(),
@@ -550,10 +580,10 @@ async function pickViaAgent(queue, { wantLink, audioWaypoint = null, current = n
   // The agent returned an id that isn't in the candidate set it was shown.
   // Two-stage salvage before giving up on the run (both observed live):
   //   1. Near-miss repair — the model transcribed a REAL id imperfectly
-  //      (glm-5.1 dropped the final character of a 22-char nanoid it had
-  //      picked from its own tool results). nearestId only accepts a single
-  //      unambiguous prefix / edit-distance-1 match, so this can't misfire
-  //      onto a different track. Free — no model call.
+  //      (glm-5.1 dropped the final character of a 22-char nanoid; small
+  //      local models corrupt 2-3 chars at a time, #939). nearestId only
+  //      accepts an unambiguous prefix / clear-winner edit-distance match,
+  //      so this can't misfire onto a different track. Free — no model call.
   //   2. Corrective re-pick — the model fabricated an id outright (gpt-5-mini
   //      after an empty tool result) while its `seen` map held real
   //      candidates. One djObject call constrained to those ids (grammar-
@@ -894,9 +924,10 @@ async function runRequestViaAgent(queue: any, { requester, text }: { requester: 
     });
 
     let song = object?.id ? extras.seen.get(object.id) : null;
-    // Near-miss repair, same as the pick path: a single unambiguous prefix /
-    // edit-distance-1 match against the run's own candidates rescues an id the
-    // model transcribed imperfectly. No re-pick stage here — a request that
+    // Near-miss repair, same as the pick path: an unambiguous prefix /
+    // clear-winner edit-distance match against the run's own candidates
+    // rescues an id the model transcribed imperfectly (#939). No re-pick
+    // stage here — a request that
     // can't resolve should fall to the caller's stateless matcher cascade,
     // which understands the listener's actual text.
     if (!song && object?.id && extras.seen.size) {

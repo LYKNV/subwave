@@ -7,18 +7,20 @@
 // node:assert-via-tsx style of scripts/picker-recency-regression.test.ts.
 
 import assert from 'node:assert/strict';
+import { z } from 'zod';
 import { generateText, APICallError } from 'ai';
 import { MockLanguageModelV3 } from 'ai/test';
-import { stripThinking, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, errReason, nearestId } from '../src/llm/internal/core/pure.js';
+import { stripThinking, truncationError, extractJson, usageOf, budgetMode, isUnreachable, isTransient, isQuotaOrAuthError, isUpstreamOverloaded, isRateLimited, errReason, nearestId, isElevenLabsV3, snapV3Stability, modelTolerant, schemaHint } from '../src/llm/internal/core/pure.js';
 import { withDeadline, withTransientRetry, retryAfterMs } from '../src/llm/internal/core/retry.js';
 import { providerOptions, needsToolCallObject, repeatPenaltyApplies, appliedNumCtx, appliedRepeatPenalty, forcedToolChoice } from '../src/llm/internal/provider/capabilities.js';
 import { agentPlan } from '../src/llm/internal/strategy/plan.js';
 import { introBudgetPhrase, enforceIntroBudget } from '../src/llm/internal/prompts/intro-budget.js';
 import { embeddingBaseUrl } from '../src/llm/internal/provider/embedding.js';
-import { DEFAULT_LOCCA_EMBED_BASE_URL } from '../src/llm/internal/provider/registry.js';
+import { DEFAULT_LOCCA_EMBED_BASE_URL, openAICompatibleFetch } from '../src/llm/internal/provider/registry.js';
 import { personaToneDirectives, normalizeDial, DIAL_NEUTRAL, validatePersonasStrict, clampTtsSpeed, TTS_SPEED_DEFAULT, clampMaxOutputTokens, resolveMaxOutputTokens, MAX_OUTPUT_TOKENS_MIN, MAX_OUTPUT_TOKENS_MAX, effectiveFrequency, SCRIPT_LENGTHS } from '../src/settings.js';
 import { lengthMode, lengthPhrase } from '../src/llm/internal/prompts/system.js';
 import { showMusicLean } from '../src/llm/internal/prompts/picker.js';
+import { resolveCloudModel } from '../src/llm/internal/speech/cloud-speech.js';
 
 let failures = 0;
 function test(name: string, fn: () => void | Promise<void>) {
@@ -410,6 +412,29 @@ async function main() {
     assert.equal(appliedRepeatPenalty({ provider: 'openai-compatible' }), null);
   });
 
+  console.log('openAICompatibleFetch (body no-think injection for self-hosted llama.cpp/locca):');
+  await test('reasoning ON + forceNoThink OFF: thinking left ON (free-text DJ path keeps reasoning)', async () => {
+    let sent: any = null;
+    const impl = openAICompatibleFetch({ provider: 'locca', reasoning: true }, async (_u: any, init: any) => { sent = JSON.parse(init.body); return {} as any; }, false);
+    await impl('http://x/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'm', messages: [] }) });
+    assert.equal(sent.chat_template_kwargs?.enable_thinking, undefined);
+    assert.equal(sent.reasoning_format, undefined);
+  });
+  await test('reasoning ON + forceNoThink ON: thinking SUPPRESSED (the picker legs — issue: schema-fail-on-picks)', async () => {
+    let sent: any = null;
+    const impl = openAICompatibleFetch({ provider: 'locca', reasoning: true }, async (_u: any, init: any) => { sent = JSON.parse(init.body); return {} as any; }, true);
+    await impl('http://x/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'm', messages: [] }) });
+    assert.equal(sent.chat_template_kwargs.enable_thinking, false);
+    assert.equal(sent.reasoning_format, 'deepseek');
+  });
+  await test('reasoning OFF: thinking suppressed regardless of forceNoThink (existing behaviour preserved)', async () => {
+    let sent: any = null;
+    const impl = openAICompatibleFetch({ provider: 'openai-compatible', reasoning: false }, async (_u: any, init: any) => { sent = JSON.parse(init.body); return {} as any; }, false);
+    await impl('http://x/v1/chat/completions', { method: 'POST', body: JSON.stringify({ model: 'm', messages: [] }) });
+    assert.equal(sent.chat_template_kwargs.enable_thinking, false);
+    assert.equal(sent.reasoning_format, 'deepseek');
+  });
+
   await test('forcedToolChoice: only the literal "auto" downgrades; everything else is "required" (issue #570)', () => {
     // Opt-in downgrade for crash-prone forced-tool servers (newer Intel vLLM).
     assert.equal(forcedToolChoice({ provider: 'openai-compatible', toolChoice: 'auto' }), 'auto');
@@ -478,6 +503,18 @@ async function main() {
     // A verbatim two-way repeat (no third segment) is still a loop, not a leak.
     assert.equal(stripThinking('same line here</think>same line here'), 'same line here');
   });
+  await test('stripThinking drops an unterminated <think> block (token-cap truncation)', () => {
+    // Issue #947: a reasoning model looped inside its <think> block until the
+    // output-token cap cut it off, so the closing </think> never arrived. The
+    // whole body is trapped reasoning — drop it rather than speak it aloud.
+    assert.equal(
+      stripThinking('<think>We need to output spoken words only. Must not use articles. Also no his. Also no her. Also'),
+      '',
+    );
+    // Anything before the opener is real answer text — keep it (mirrors the
+    // harmony no-final-channel rule below).
+    assert.equal(stripThinking('Here we go. <think>wait, should I mention the'), 'Here we go.');
+  });
   await test('stripThinking strips Gemma/harmony channel reasoning, keeps the final message', () => {
     // thought → final: keep only the final channel's message
     assert.equal(
@@ -494,6 +531,28 @@ async function main() {
     assert.equal(stripThinking('<|channel|>thought<|message|>hmm, still thinking'), '');
     // plain text with no channel tokens is untouched
     assert.equal(stripThinking('Just a normal DJ line.'), 'Just a normal DJ line.');
+  });
+  await test('truncationError fails a token-capped reply, passes a finished one', () => {
+    // Issue #947: a 'length' finish means the model ran to the output cap —
+    // for DJ free text that's always a runaway, never a usable script.
+    assert.equal(truncationError({ finishReason: 'stop', text: 'Coming up next.' }), null);
+    assert.equal(truncationError({ finishReason: 'unknown', text: 'x' }), null);
+    assert.equal(truncationError({}), null);
+    const err = truncationError({ finishReason: 'length', text: 'We need to output spoken words only…', usage: { outputTokens: 4000 } });
+    assert.ok(err instanceof Error);
+    // Raw text/usage ride on the error so failureDiagnostics + the console
+    // preview still show WHY the call failed.
+    assert.equal(err.text, 'We need to output spoken words only…');
+    assert.equal(err.finishReason, 'length');
+    assert.deepEqual(err.usage, { outputTokens: 4000 });
+    // The error must not look like a network status to any classifier — it
+    // should propagate straight to the caller's skip-segment path, never
+    // burning same-leg retries or silently failing over to the backup model.
+    assert.equal(isTransient(err), false);
+    assert.equal(isUnreachable(err), false);
+    assert.equal(isQuotaOrAuthError(err), false);
+    assert.equal(isUpstreamOverloaded(err), false);
+    assert.equal(isRateLimited(err), false);
   });
   await test('extractJson pulls the object out of fences and prose', () => {
     assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
@@ -680,14 +739,14 @@ async function main() {
     assert.equal(showMusicLean(null), '');
     assert.equal(showMusicLean(undefined), '');
   });
-  await test('soft genre-only show is byte-for-byte the legacy line', () => {
-    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz' }), SOFT_GENRE_LINE);
+  await test('soft single-genre show is byte-for-byte the legacy line', () => {
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genres: ['Jazz'] }), SOFT_GENRE_LINE);
   });
   await test('filtersStrict=false leaves the soft path unchanged', () => {
-    assert.equal(showMusicLean({ name: 'x', topic: 'y', genre: 'Jazz', filtersStrict: false }), SOFT_GENRE_LINE);
+    assert.equal(showMusicLean({ name: 'x', topic: 'y', genres: ['Jazz'], filtersStrict: false }), SOFT_GENRE_LINE);
   });
   await test('strict filters are a hard rule, not a soft lean', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Hip-Hop', filtersStrict: true });
+    const out = showMusicLean({ name: 'x', topic: 'y', genres: ['Hip-Hop'], filtersStrict: true });
     assert.match(out, /music filters are STRICT/);                  // the unified strict lock (#766)
     assert.match(out, /Hip-Hop tracks/);                            // genre carried into the lock
     assert.match(out, /Keep your talk inside them too/);            // stay-in-filter instruction
@@ -696,25 +755,38 @@ async function main() {
     assert.doesNotMatch(out, /Music steer/);     // no soft line when strict is on
   });
   await test('strict carries the never-starve escape hatch', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Metal', filtersStrict: true });
+    const out = showMusicLean({ name: 'x', topic: 'y', genres: ['Metal'], filtersStrict: true });
     assert.match(out, /never leave dead air/i);   // can stray only to avoid dead air
   });
   await test('strict needs a filter — filtersStrict alone is inert', () => {
     assert.equal(showMusicLean({ name: 'x', topic: 'y', filtersStrict: true }), '');
     // energy alone still bites: the unified toggle locks any pinned filter, not just genre
-    const out = showMusicLean({ name: 'x', topic: 'y', energy: 'high', filtersStrict: true });
+    const out = showMusicLean({ name: 'x', topic: 'y', energies: ['high'], filtersStrict: true });
     assert.match(out, /music filters are STRICT/);
     assert.match(out, /high-energy tracks/);
     assert.doesNotMatch(out, /Music steer/);   // strict, so no soft line
   });
   await test('strict locks genre, era and energy together (unified toggle)', () => {
-    const out = showMusicLean({ name: 'x', topic: 'y', genre: 'Soul', filtersStrict: true, fromYear: 1970, toYear: 1979, energy: 'medium' });
+    const out = showMusicLean({ name: 'x', topic: 'y', genres: ['Soul'], filtersStrict: true, eras: [{ fromYear: 1970, toYear: 1979 }], energies: ['medium'] });
     assert.match(out, /music filters are STRICT/);   // unified strict lock (#766)
     assert.match(out, /Soul tracks/);
     assert.match(out, /the 1970–1979 era/);
     assert.match(out, /medium-energy tracks/);
     assert.doesNotMatch(out, /Music steer/);       // era/energy are strict too — no soft line
     assert.doesNotMatch(out, /lean toward Soul/);  // genre is part of the hard lock
+  });
+  await test('multi-value filters render every entry, any-of (#929)', () => {
+    const soft = showMusicLean({ name: 'x', topic: 'y', genres: ['Hard Rock', 'Metal'], eras: [{ fromYear: 1990, toYear: 1999 }, { fromYear: 2010, toYear: 2019 }], energies: ['high', 'medium'] });
+    assert.match(soft, /lean toward Hard Rock \/ Metal/);
+    assert.match(soft, /1990–1999 or 2010–2019/);        // non-adjacent windows both named
+    assert.match(soft, /favour high \/ medium-energy tracks/);
+    const strictOut = showMusicLean({ name: 'x', topic: 'y', genres: ['Hard Rock', 'Metal'], moods: ['energetic', 'driving'], filtersStrict: true });
+    assert.match(strictOut, /Hard Rock \/ Metal tracks/);
+    assert.match(strictOut, /the energetic \/ driving moods/);
+  });
+  await test('open-ended era windows read as prose', () => {
+    const out = showMusicLean({ name: 'x', topic: 'y', eras: [{ fromYear: null, toYear: 2009 }] });
+    assert.match(out, /prefer tracks from up to 2009/);  // "nothing after the 2000s"
   });
 
   // ---- clampMaxOutputTokens / resolveMaxOutputTokens (per-call cap, #712) ----
@@ -762,6 +834,22 @@ async function main() {
     const seen = ['2igTN1Xw3uJBY9CjdKzZGl', 'H8G6Y1gPsSsMNJwflWbstW'];
     assert.equal(nearestId('3bKpTnYlqR8vD4sXe2aJ0m', seen), null);
   });
+  // The #939 echo-test corruptions, verbatim: small local models corrupt 2-3
+  // chars of a 22-char nanoid (confusable swaps, injected spaces, adjacent
+  // transpositions) — each must resolve back to the id the model meant.
+  await test('repairs a char swap + injected space (#939, distance 2)', () => {
+    const seen = ['923tdZ9Hd7Zw7XNgGGL1DR', 'H8G6Y1gPsSsMNJwflWbstW', '2igTN1Xw3uJBY9CjdKzZGl'];
+    assert.equal(nearestId('923tdZ9HdT7Zw7XNgGG L1DR', seen), '923tdZ9Hd7Zw7XNgGGL1DR');
+  });
+  await test('repairs a space + transposition (#939, distance 3)', () => {
+    const seen = ['w328pyatiNZn9HbMghVPH2', 'H8G6Y1gPsSsMNJwflWbstW', '2igTN1Xw3uJBY9CjdKzZGl'];
+    assert.equal(nearestId('w328pyat iNZn9HbMghVHP2', seen), 'w328pyatiNZn9HbMghVPH2');
+  });
+  await test('refuses when the runner-up is not clearly farther (margin)', () => {
+    // Best is 2 edits away but the runner-up is only 3 — too close to call.
+    const seen = ['AAAAAAAAAAAAAAAAAAAAxx', 'AAAAAAAAAAAAAAAAAAAyyy'];
+    assert.equal(nearestId('AAAAAAAAAAAAAAAAAAAAAA', seen), null);
+  });
   await test('rejects an ambiguous match (two candidates equally close)', () => {
     // Both differ from the query by one trailing character — no safe winner.
     const seen = ['AAAAAAAAAAAAAAAAAAAAAx', 'AAAAAAAAAAAAAAAAAAAAAy'];
@@ -774,6 +862,227 @@ async function main() {
     assert.equal(nearestId('', ['abcdef123456789012345']), null);
     assert.equal(nearestId(undefined as any, ['abcdef123456789012345']), null);
     assert.equal(nearestId('abcdef123456789012345', []), null);
+  });
+
+  // ---- resolveCloudModel: cloud TTS model resolution for the v3 tag hint ----
+  // Pins the "mirror of speak() + resolveEngine()" claim (issue #696): the
+  // model djSystem gates the ElevenLabs v3 hint on must be the one the persona
+  // is actually voiced by at speak() time.
+  console.log('resolveCloudModel (ElevenLabs v3 hint gating, issue #696):');
+  const cloudCfg = { defaultEngine: 'piper', provider: 'elevenlabs', model: 'eleven_v3' };
+  await test('explicit cloud persona with no provider override → global model', () => {
+    assert.equal(resolveCloudModel({ engine: 'cloud' }, cloudCfg), 'eleven_v3');
+  });
+  await test('provider override away from global → new provider default, NOT the global model', () => {
+    // Persona on ElevenLabs while the global cloud provider is OpenAI is
+    // voiced by eleven_flash_v2_5 — gating on the provider alone would hint a
+    // v2 voice that reads the brackets aloud.
+    assert.equal(
+      resolveCloudModel({ engine: 'cloud', cloudProvider: 'elevenlabs' }, { defaultEngine: 'piper', provider: 'openai', model: 'gpt-4o-mini-tts' }),
+      'eleven_flash_v2_5',
+    );
+  });
+  await test('provider override matching the global provider → global model', () => {
+    assert.equal(resolveCloudModel({ engine: 'cloud', cloudProvider: 'elevenlabs' }, cloudCfg), 'eleven_v3');
+  });
+  await test('override to openai-compatible (no per-provider default) keeps the global model', () => {
+    assert.equal(
+      resolveCloudModel({ engine: 'cloud', cloudProvider: 'openai-compatible' }, cloudCfg),
+      'eleven_v3',
+    );
+  });
+  await test('persona with no engine rides the station defaultEngine: cloud', () => {
+    // The common setup: global defaultEngine cloud + untouched personas — a
+    // persona-engine check would miss this and the hint would never fire.
+    assert.equal(
+      resolveCloudModel({}, { defaultEngine: 'cloud', provider: 'elevenlabs', model: 'eleven_v3' }),
+      'eleven_v3',
+    );
+    assert.equal(
+      resolveCloudModel(null, { defaultEngine: 'cloud', provider: 'elevenlabs', model: 'eleven_v3' }),
+      'eleven_v3',
+    );
+  });
+  await test('persona on a local engine → no model, regardless of defaultEngine', () => {
+    assert.equal(resolveCloudModel({ engine: 'piper' }, { defaultEngine: 'cloud', provider: 'elevenlabs', model: 'eleven_v3' }), '');
+    assert.equal(resolveCloudModel({ engine: 'chatterbox' }, { defaultEngine: 'cloud', provider: 'elevenlabs', model: 'eleven_v3' }), '');
+  });
+  await test('no engine anywhere near cloud → no model', () => {
+    assert.equal(resolveCloudModel({}, cloudCfg), '');
+    assert.equal(resolveCloudModel({ engine: '' }, cloudCfg), '');
+  });
+  await test('unknown persona engine string fails closed (no hint beats a spoken bracket)', () => {
+    assert.equal(resolveCloudModel({ engine: 'bogus' }, { defaultEngine: 'cloud', provider: 'elevenlabs', model: 'eleven_v3' }), '');
+  });
+
+  console.log('isElevenLabsV3 (model-family gate):');
+  await test('matches the v3 family, case- and separator-insensitive', () => {
+    assert.equal(isElevenLabsV3('eleven_v3'), true);
+    assert.equal(isElevenLabsV3('ELEVEN_V3'), true);
+    assert.equal(isElevenLabsV3('eleven-v3'), true);
+    assert.equal(isElevenLabsV3('eleven_v3_preview'), true);
+  });
+  await test('rejects v2 families, non-TTS v3 ids, and junk', () => {
+    assert.equal(isElevenLabsV3('eleven_flash_v2_5'), false);
+    assert.equal(isElevenLabsV3('eleven_multilingual_v2'), false);
+    assert.equal(isElevenLabsV3('eleven_ttv_v3'), false);
+    assert.equal(isElevenLabsV3('gpt-4o-mini-tts'), false);
+    assert.equal(isElevenLabsV3(''), false);
+  });
+
+  console.log('snapV3Stability (eleven_v3 discrete-stability guard):');
+  await test('leaves the three allowed rungs untouched', () => {
+    assert.equal(snapV3Stability(0), 0);
+    assert.equal(snapV3Stability(0.5), 0.5);
+    assert.equal(snapV3Stability(1), 1);
+  });
+  await test('snaps arbitrary values to the nearest rung, ties to 0.5', () => {
+    assert.equal(snapV3Stability(0.1), 0);
+    assert.equal(snapV3Stability(0.3), 0.5);
+    assert.equal(snapV3Stability(0.42), 0.5);
+    assert.equal(snapV3Stability(0.9), 1);
+    assert.equal(snapV3Stability(0.25), 0.5); // equidistant 0/0.5 -> 0.5
+    assert.equal(snapV3Stability(0.75), 0.5); // equidistant 0.5/1 -> 0.5
+  });
+  await test('non-finite falls back to the Natural default', () => {
+    assert.equal(snapV3Stability(NaN), 0.5);
+    assert.equal(snapV3Stability(undefined as any), 0.5);
+  });
+
+  // Miniature twins of the real agent schemas (PICK_SCHEMA / segmentSchema)
+  // — same field shapes, same wrapper placement — so these tests pin the
+  // mechanism the live schemas rely on without importing modules that carry
+  // side effects (dj-agent.ts pulls in settings/queue).
+  const pickLike = () => modelTolerant(z.object({
+    id: z.string().describe('the exact id'),
+    reason: z.string(),
+    say: z.string().nullable().describe('spoken line or null'),
+    transition: z.enum(['normal', 'blend']).nullable().describe('transition'),
+  }));
+  const SEGMENT_FALLBACK = { kind: '', text: '', sfx: null };
+  const segmentLike = (onDiscard?: (field: string, value: unknown) => void) => modelTolerant(z.object({
+    reason: z.string(),
+    air: z.boolean(),
+    segment: z.object({
+      kind: z.string(),
+      text: z.string(),
+      sfx: z.string().nullable(),
+    }),
+  }), { objectFallbacks: { segment: { ...SEGMENT_FALLBACK } }, onDiscard });
+
+  console.log('modelTolerant / coerceModelPayload (object-level rescue of GLM\'s malformed shapes — the string "null", an omitted key, a double-JSON-encoded object):');
+  await test('the string "null" coerces to real null for nullable string and enum fields', () => {
+    const parsed: any = pickLike().parse({ id: 'a', reason: 'r', say: 'null', transition: 'null' });
+    assert.equal(parsed.say, null);
+    assert.equal(parsed.transition, null);
+  });
+  await test('an omitted nullable key coerces to null (observed: `done` with `say`/`transition` entirely absent)', () => {
+    const parsed: any = pickLike().parse({ id: 'a', reason: 'r' });
+    assert.deepEqual(parsed, { id: 'a', reason: 'r', say: null, transition: null });
+  });
+  await test('genuine JSON null and genuinely valid values pass through unchanged', () => {
+    const parsed: any = pickLike().parse({ id: 'a', reason: 'r', say: 'a spoken line', transition: null });
+    assert.equal(parsed.say, 'a spoken line');
+    assert.equal(parsed.transition, null);
+    assert.equal((pickLike().parse({ id: 'a', reason: 'r', say: null, transition: 'blend' }) as any).transition, 'blend');
+  });
+  await test('does not widen validation beyond observed junk — other junk still rejects', () => {
+    assert.throws(() => pickLike().parse({ id: 'a', reason: 'r', say: null, transition: 'None' }));
+    assert.throws(() => pickLike().parse({ id: 'a', reason: 'r', say: null, transition: 'nonexistent-transition' }));
+  });
+  await test('a REQUIRED (non-nullable) string field is untouched — an omitted `id`/`reason` still rejects', () => {
+    assert.throws(() => pickLike().parse({ say: null, transition: null }));
+  });
+  await test('does NOT JSON-parse a nullable STRING field — a coincidental JSON-looking answer stays a plain string', () => {
+    const parsed: any = pickLike().parse({ id: 'a', reason: 'r', say: '42', transition: null });
+    assert.equal(parsed.say, '42');
+    assert.equal((pickLike().parse({ id: 'a', reason: 'r', say: 'true', transition: null }) as any).say, 'true');
+  });
+  await test('a nested object double-encoded as a JSON string parses through, recursing so its own nullable fields are repaired too', () => {
+    const parsed: any = segmentLike().parse({
+      reason: 'x',
+      air: true,
+      segment: JSON.stringify({ kind: 'now-playing-dig', sfx: 'null', text: 'a real line' }),
+    });
+    assert.deepEqual(parsed.segment, { kind: 'now-playing-dig', sfx: null, text: 'a real line' });
+  });
+
+  console.log('modelTolerant objectFallbacks (required object field, must never throw) + onDiscard:');
+  await test('a genuinely valid segment passes through unchanged', () => {
+    const parsed: any = segmentLike().parse({ reason: 'r', air: true, segment: { kind: 'weather', text: 'hi', sfx: null } });
+    assert.deepEqual(parsed.segment, { kind: 'weather', text: 'hi', sfx: null });
+  });
+  await test('a missing segment key falls back to the placeholder instead of throwing — and does NOT report a discard (the model said nothing)', () => {
+    const discards: any[] = [];
+    const parsed: any = segmentLike((f, v) => discards.push([f, v])).parse({ reason: 'nothing fresh to say', air: false });
+    assert.deepEqual(parsed.segment, SEGMENT_FALLBACK);
+    assert.deepEqual(discards, []);
+  });
+  await test('the string "null" falls back to the placeholder, no discard reported', () => {
+    const discards: any[] = [];
+    const parsed: any = segmentLike((f, v) => discards.push([f, v])).parse({ reason: 'r', air: false, segment: 'null' });
+    assert.deepEqual(parsed.segment, SEGMENT_FALLBACK);
+    assert.deepEqual(discards, []);
+  });
+  await test('unparseable garbage falls back to the placeholder AND reports the discard (content was thrown away)', () => {
+    const discards: any[] = [];
+    const parsed: any = segmentLike((f, v) => discards.push([f, v])).parse({ reason: 'r', air: true, segment: 'not json at all' });
+    assert.deepEqual(parsed.segment, SEGMENT_FALLBACK);
+    assert.deepEqual(discards, [['segment', 'not json at all']]);
+  });
+  await test('a partially-valid segment (one bad field) falls back and reports the discard', () => {
+    const discards: any[] = [];
+    const parsed: any = segmentLike((f, v) => discards.push([f, v])).parse({ reason: 'r', air: true, segment: { kind: 'weather', text: 42, sfx: null } });
+    assert.deepEqual(parsed.segment, SEGMENT_FALLBACK);
+    assert.equal(discards.length, 1);
+  });
+
+  console.log('modelTolerant wire schema (the regression that motivated object-level placement — AI SDK renders tool inputSchemas with io:\'input\', where a per-field preprocess silently drops the field from `required`):');
+  await test('every field stays in `required` under io:\'input\' — identical to the plain object schema', () => {
+    const rendered: any = z.toJSONSchema(pickLike(), { target: 'draft-7', io: 'input' });
+    assert.deepEqual(rendered.required.sort(), ['id', 'reason', 'say', 'transition']);
+    // Nullable-ness and enum values survive too — the model still sees the contract.
+    assert.deepEqual(rendered.properties.say.anyOf.map((b: any) => b.type).sort(), ['null', 'string']);
+    assert.deepEqual(rendered.properties.transition.anyOf[0].enum, ['normal', 'blend']);
+    // Field descriptions still travel (they are the model's primary coaching channel).
+    assert.equal(rendered.properties.id.description, 'the exact id');
+  });
+  await test('objectFallbacks does not leak a visible "default" into the schema (a field-level .catch() would)', () => {
+    const rendered: any = z.toJSONSchema(segmentLike(), { target: 'draft-7', io: 'input' });
+    assert.deepEqual(rendered.required.sort(), ['air', 'reason', 'segment']);
+    assert.equal(JSON.stringify(rendered).includes('"default"'), false);
+    assert.deepEqual(rendered.properties.segment.required.sort(), ['kind', 'sfx', 'text']);
+  });
+
+  console.log('schemaHint (JSON Schema embedded in djObject\'s free-text recovery prompt):');
+  await test('renders required keys for a flat object schema', () => {
+    const schema = z.object({ id: z.string(), reason: z.string(), say: z.string().nullable() });
+    const hint = schemaHint(schema);
+    assert.equal(typeof hint, 'string');
+    const parsed = JSON.parse(hint as string);
+    assert.deepEqual(parsed.required.sort(), ['id', 'reason', 'say']);
+  });
+  await test('never throws on a schema it cannot render — returns null instead', () => {
+    // z.custom with no shape metadata is the sharpest edge toJSONSchema can hit.
+    const schema = z.custom(() => true);
+    assert.doesNotThrow(() => schemaHint(schema as any));
+  });
+  await test('strips verbose .describe() text so the recovery prompt stays lean', () => {
+    const longDescription = 'x'.repeat(500);
+    const schema = z.object({
+      id: z.string().describe('the exact id'),
+      transition: z.enum(['normal', 'blend']).nullable().describe(longDescription),
+    });
+    const hint = schemaHint(schema) as string;
+    // The structure (keys, types, required-ness) must survive...
+    const parsed = JSON.parse(hint);
+    assert.ok(parsed.properties.id);
+    assert.ok(parsed.properties.transition);
+    assert.deepEqual(parsed.required.sort(), ['id', 'transition']);
+    // ...but none of the description prose, at any nesting depth, does.
+    assert.equal(hint.includes(longDescription), false);
+    assert.equal(hint.includes('the exact id'), false);
+    assert.equal(hint.includes('"description"'), false);
   });
 
   console.log(failures === 0 ? '\nAll llm-pure tests passed.' : `\n${failures} test(s) FAILED.`);

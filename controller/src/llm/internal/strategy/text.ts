@@ -7,7 +7,7 @@
 import { generateText } from 'ai';
 import { withFailover } from '../core/failover.js';
 import { withTransientRetry } from '../core/retry.js';
-import { stripThinking, usageOf, failureDiagnostics } from '../core/pure.js';
+import { stripThinking, truncationError, usageOf, failureDiagnostics } from '../core/pure.js';
 import { providerOptions, repeatPenaltyApplies, samplingWithLocalKnobs } from '../provider/capabilities.js';
 import { resolveMaxOutputTokens } from '../../../settings.js';
 
@@ -50,6 +50,14 @@ export async function djText({
         providerOptions: providerOptions(leg.cfg, { repeatPenalty }),
         ...(signal ? { abortSignal: signal } : {}),
       }), signal);
+      // A free-text DJ script that hit the output-token cap is never a usable
+      // reply — real scripts run ~150 tokens against the 4000-token backstop,
+      // so 'length' means a reasoning model ran away mid-thought (issue #947:
+      // it tied up the TTS GPU for minutes). Fail the call instead —
+      // announce-path callers catch and skip the segment, so the station
+      // stays on air, just without this talk break.
+      const truncated = truncationError(result);
+      if (truncated) throw truncated;
       const out = stripThinking(result.text);
       // Only record sampling knobs that actually reached the model — see
       // repeatPenaltyApplies() and providerOptions handling.
