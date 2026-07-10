@@ -3312,6 +3312,32 @@ html.lite .sw-ripple-circle {
         animation: none;
     }
 }
+/* Slim variant — the same cart-pad language compressed into a one-line button
+   (skills "Run now"): row layout, LED centred on the right, smaller notch.
+   Hover arm / firing blink+sweep come from the base .seg-pad rules. */
+.admin-root .seg-pad.seg-pad--slim {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 7px 24px 7px 11px;
+    clip-path: polygon(0 0, calc(100% - 9px) 0, 100% 9px, 100% 100%, 0 100%);
+}
+.admin-root .seg-pad.seg-pad--slim::before {
+    top: 4px;
+    right: -2px;
+    width: 13px;
+}
+.admin-root .seg-pad.seg-pad--slim .seg-label {
+    font-size: 10px;
+}
+.admin-root .seg-pad.seg-pad--slim .seg-led {
+    top: 50%;
+    right: 9px;
+    width: 5px;
+    height: 5px;
+    transform: translateY(-50%);
+}
 /* Flat — used inside EditorDialog so stacked sections read as one continuous
    modal form separated by hairline dividers, not boxed cards. No border/bg, no
    side padding (the dialog supplies the gutter); a top rule divides each section
@@ -4946,11 +4972,39 @@ html.lite .sw-ripple-circle {
 @media (max-width: 1180px) {
     .observatory-root .obs-main { grid-template-columns: 210px minmax(0, 1fr) 330px; }
 }
+/* ---- galaxy stage (WebGL renderer) ----
+   The map is always night — bloom needs a dark ground in both site themes —
+   so the stage re-declares the theme vars locally; legend, zoom controls and
+   anything else inside inherit a coherent dark palette for free. */
+.observatory-root .cmap-galaxy {
+    --bg: #0d0b09;
+    --ink: #ece6dc;
+    --muted: #9b948a;
+    --separator-strong: rgba(236, 230, 220, 0.25);
+    --ink-soft: rgba(236, 230, 220, 0.08);
+    --field: rgba(236, 230, 220, 0.07);
+    background: #0d0b09;
+}
+/* heat-ramp legend: dark ink start is lifted, matching the stars' night lift */
+.observatory-root .cmap-galaxy .lr-bar { background: linear-gradient(90deg, #6a635a, #d94b2a); }
+
+/* label layer — one transformed inner div; each label counter-scales via --inv
+   so pan/zoom is a single style write, never a re-layout */
+.observatory-root .cmap-labels { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.observatory-root .cmap-labels-inner { position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform; }
+.observatory-root .cmap-glabel { position: absolute; left: 0; top: 0; transform-origin: 0 0; font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase; font-weight: 700; color: #8d867b; opacity: var(--gop, 0); white-space: nowrap; text-shadow: 0 1px 6px rgba(0, 0, 0, 0.9); transition: opacity 0.25s ease; animation: obs-glabel-in 1.2s ease 0.5s backwards; }
+.observatory-root .cmap-tlabel { position: absolute; left: 0; top: 0; transform-origin: 0 0; font-size: 10px; letter-spacing: 0.05em; font-weight: 500; color: #cfc8bb; white-space: nowrap; text-shadow: 0 1px 5px rgba(0, 0, 0, 0.95); animation: obs-tlabel-in 0.3s ease backwards; }
+.observatory-root .cmap-tlabel.acc { color: var(--accent); font-weight: 700; }
+@keyframes obs-glabel-in { from { opacity: 0; } }
+@keyframes obs-tlabel-in { from { opacity: 0; } }
+
 @media (prefers-reduced-motion: reduce) {
     .observatory-root .obs-disc,
     .observatory-root .obs-live-dot::after,
     .observatory-root .cmap-ripple,
-    .observatory-root .wire-line { animation: none !important; }
+    .observatory-root .wire-line,
+    .observatory-root .cmap-glabel,
+    .observatory-root .cmap-tlabel { animation: none !important; }
 }
 
 /* ───────────────────────────────────────────────────────────────────────────
