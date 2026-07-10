@@ -175,6 +175,8 @@ export default function SettingsPanel() {
           remote: 1,
           ...(v.tts?.speed || {}),
         },
+        // Operator speech corrections — hydrate to clean {from, to} rows.
+        corrections: (v.tts?.corrections || []).map(c => ({ from: c.from ?? '', to: c.to ?? '' })),
       },
       llm: {
         provider: v.llm?.provider ?? 'ollama',

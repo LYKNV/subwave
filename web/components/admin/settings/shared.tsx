@@ -65,6 +65,10 @@ export interface TtsForm {
   // Per-engine speech-rate multiplier, keyed by engine id. Always carries all 6
   // known engines, 1.0 = unity = no change. Inert for chatterbox/pocket-tts/remote.
   speed: Record<string, number>;
+  // Operator speech corrections — find→replace pairs applied to every spoken
+  // line before any TTS engine reads it (the editable sibling of the built-in
+  // SUB/WAVE → "Subwave" rule).
+  corrections: { from: string; to: string }[];
 }
 
 export interface LlmFallbackForm {
@@ -238,6 +242,7 @@ export interface SettingsData {
       remote?: { url?: string };
       gainDb?: Record<string, number>;
       speed?: Record<string, number>;
+      corrections?: { from?: string; to?: string }[];
     };
     llm?: Partial<LlmForm>;
     search?: Partial<SearchForm>;
