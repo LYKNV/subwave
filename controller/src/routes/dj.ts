@@ -758,7 +758,9 @@ router.get('/dj/search', requireAdmin, async (req, res) => {
   const offset = Math.max(parseInt(String(req.query?.offset || ''), 10) || 0, 0);
   try {
     await library.load();
-    const songs = await subsonic.search(q, { songCount: limit, songOffset: offset });
+    // includeBlocked: the operator must still find never-play tracks here to
+    // review them; queueing one is refused at the queue gate with a clear 409.
+    const songs = await subsonic.search(q, { songCount: limit, songOffset: offset, includeBlocked: true });
     const results = songs.map(toAdminRow);
     // A full page means there may be more — the UI shows Load more on this
     // rather than a total (search3 doesn't return one).
@@ -827,6 +829,11 @@ router.post('/dj/queue-track', requireAdmin, async (req, res) => {
     // Explicit operator action — bypass the request/AI dedup guard (#619) so a
     // deliberate manual queue always fires, even for an already-queued track.
     const queuePosition = await queue.push({ track, requestedBy: 'studio', allowDuplicate: true });
+    if (queuePosition === -2) {
+      // The never-play blocklist is absolute — even manual queueing is refused
+      // (operator's call). Unblock in admin → Library → Blocked to re-audition.
+      return res.status(409).json({ error: 'track is on the never-play blocklist — unblock it first (Library → Blocked)' });
+    }
     res.json({
       ok: true,
       track: { title: track.title, artist: track.artist || null },
