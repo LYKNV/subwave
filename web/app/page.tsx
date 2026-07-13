@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import PlayerApp from '@/components/PlayerApp';
+import PlayerPageEffects from '@/components/player/PlayerPageEffects';
 import Landing from '@/components/Landing';
 import { absoluteUrl } from '@/lib/seo';
 import { fetchStationIdentity } from '@/lib/station';
@@ -75,5 +76,10 @@ export default async function HomePage() {
   if (mode === 'landing') {
     return <Landing stations={await getShowcaseStations()} />;
   }
-  return <PlayerApp />;
+  return (
+    <>
+      <PlayerPageEffects />
+      <PlayerApp />
+    </>
+  );
 }
