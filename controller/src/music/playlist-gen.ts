@@ -403,7 +403,10 @@ export async function curatePlaylist(
       temperature: 0.6,
       kind: 'playlistCurate',
     });
-    const value = out?.value;
+    // djObject (via withFailover) returns the validated object DIRECTLY — NOT
+    // wrapped in `{ value }`. (An earlier `out?.value` read undefined here, so
+    // every curate silently fell back to the deterministic arranger.)
+    const value = out;
     const chosen = orderByIds(Array.isArray(value?.ids) ? value.ids : [], pool);
     if (chosen.length < 2) return { ...fallback(), name: value?.name, description: value?.description };
     const fitted = fitToCount(chosen, pool, targetCount);
