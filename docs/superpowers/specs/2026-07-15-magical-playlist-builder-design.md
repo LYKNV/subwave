@@ -161,7 +161,8 @@ knobs = {
   eras?: string[], genres?: string[], moods?: string[], energies?: string[],
   artistSpacing?: number,      // min tracks between same artist, default 2
   excludeRecentlyPlayed?: boolean,
-  instrumentalOnly?: boolean   // Kate #3 — vocal-range data, fallback genre/mood tags
+  instrumentalOnly?: boolean,  // Kate #3 — vocal-range data, fallback genre/mood tags
+  maxTrackSeconds?: number     // only include tracks ≤ this long (0/undefined = no cap); soft (keeps unknown-duration rows, relaxes if it starves)
 }
 sources = {
   recentlyAdded?: boolean      // Kate #2a — seed pool from new arrivals

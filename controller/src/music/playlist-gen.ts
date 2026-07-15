@@ -50,6 +50,7 @@ export interface Knobs {
   artistSpacing?: number;
   excludeRecentlyPlayed?: boolean;
   instrumentalOnly?: boolean;
+  maxTrackSeconds?: number;   // only include tracks this long or shorter (0/undefined = no cap)
 }
 
 export interface Sources {
@@ -280,6 +281,15 @@ export async function buildCandidatePool(
     for (const t of pool) if (t.energy && want.has(t.energy)) t.score = (t.score ?? 0) + 0.15;
     const filteredEnergy = pool.filter((t) => !t.energy || want.has(t.energy));
     pool = revertIfStarved(filteredEnergy, pool, knobs, reasons, 'energy');
+  }
+
+  // Max track length: drop tracks whose KNOWN duration exceeds the cap; keep
+  // unknown-duration rows (can't tell) so a partly-un-analysed library still
+  // fills. Soft — relaxes rather than starving.
+  if (knobs.maxTrackSeconds && knobs.maxTrackSeconds > 0) {
+    const cap = knobs.maxTrackSeconds;
+    const withinLen = pool.filter((t) => t.durationSec == null || t.durationSec <= cap);
+    pool = revertIfStarved(withinLen, pool, knobs, reasons, 'track-length');
   }
 
   // Artist-diversity cap: keep the candidate list varied so one prolific artist

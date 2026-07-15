@@ -130,6 +130,7 @@ export default function PlaylistBuilderPanel() {
   const [arc, setArc] = useState<ArcShape>('flat');
   const [count, setCount] = useState(25);
   const [artistSpacing, setArtistSpacing] = useState(2);
+  const [maxTrackSec, setMaxTrackSec] = useState(0); // 0 = no cap
   const [excludeRecent, setExcludeRecent] = useState(false);
   const [instrumentalOnly, setInstrumentalOnly] = useState(false);
   const [recentlyAdded, setRecentlyAdded] = useState(false);
@@ -191,10 +192,11 @@ export default function PlaylistBuilderPanel() {
       artistSpacing,
       excludeRecentlyPlayed: excludeRecent,
       instrumentalOnly,
+      maxTrackSeconds: maxTrackSec || undefined,
     },
     sources: { recentlyAdded },
     excludeTrackIds,
-  }), [prompt, seeds, count, arc, moods, genresText, energies, decadeWindows, artistSpacing, excludeRecent, instrumentalOnly, recentlyAdded]);
+  }), [prompt, seeds, count, arc, moods, genresText, energies, decadeWindows, artistSpacing, excludeRecent, instrumentalOnly, maxTrackSec, recentlyAdded]);
 
   const hasIntent = prompt.trim() || seeds.length || recentlyAdded || moods.length ||
     genresText.trim() || energies.length || decades.length || instrumentalOnly;
@@ -467,6 +469,24 @@ export default function PlaylistBuilderPanel() {
                     <input type="range" min={0} max={5} value={artistSpacing} onChange={e => setArtistSpacing(+e.target.value)} className="mt-1 w-full accent-[var(--accent)]" />
                   </label>
                 </div>
+
+                {/* Max track length */}
+                <label className="block">
+                  <span className="eyebrow text-muted">
+                    Max track length · <span className="mono-num text-ink">{maxTrackSec ? fmtDur(maxTrackSec) : 'off'}</span>
+                  </span>
+                  <input
+                    type="range"
+                    min={0}
+                    max={600}
+                    step={15}
+                    value={maxTrackSec}
+                    onChange={e => setMaxTrackSec(+e.target.value)}
+                    className="mt-1 w-full accent-[var(--accent)]"
+                    aria-label="maximum track length in seconds (0 = no cap)"
+                  />
+                  <span className="mt-0.5 block text-[10px] text-muted">only include tracks this long or shorter · slide to 0 for no cap</span>
+                </label>
 
                 {/* Energy arc */}
                 <div>
