@@ -6,6 +6,7 @@ import express from 'express';
 import { requireAdmin } from '../middleware/auth.js';
 import * as subsonic from '../music/subsonic.js';
 import { queue } from '../broadcast/queue.js';
+import { generatePlaylist, type GenerateInput } from '../music/playlist-gen.js';
 
 export const router = express.Router();
 
@@ -53,17 +54,65 @@ router.get('/playlists/:id', requireAdmin, async (req, res) => {
   }
 });
 
-// POST /playlists — { name, songIds? } → create in Navidrome.
+// POST /playlists — { name, songIds?, playlistId? } → create in Navidrome, or
+// OVERWRITE an existing playlist's tracks + name when playlistId is present (the
+// builder's "save over an existing playlist").
 router.post('/playlists', requireAdmin, async (req, res) => {
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
   if (!name) return res.status(400).json({ error: 'name is required' });
   const songIds = parseIds(req.body?.songIds);
+  const playlistId = typeof req.body?.playlistId === 'string' && req.body.playlistId.trim()
+    ? req.body.playlistId.trim()
+    : undefined;
   try {
-    const playlist = await subsonic.createPlaylist(name, songIds);
-    queue.log('info', `playlist "${name}" created (${songIds.length} tracks)`);
+    const playlist = await subsonic.createPlaylist(name, songIds, { playlistId });
+    // A wholesale overwrite via createPlaylist doesn't touch the name, so patch
+    // it separately in case the operator renamed while saving over.
+    if (playlistId) await subsonic.updatePlaylistMeta(playlistId, { name, public: true });
+    queue.log('info', `playlist "${name}" ${playlistId ? 'overwritten' : 'created'} (${songIds.length} tracks)`);
     res.json({ playlist: playlist || null, added: songIds.length });
   } catch (err: any) {
-    queue.log('error', `playlist create failed: ${err.message}`);
+    queue.log('error', `playlist ${playlistId ? 'overwrite' : 'create'} failed: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /playlists/generate — { prompt?, seedTrackIds?, seedArtist?, knobs?,
+// sources?, excludeTrackIds? } → an UNSAVED, ordered candidate list. The
+// operator edits it, then saves via POST /playlists. Never mutates Navidrome.
+router.post('/playlists/generate', requireAdmin, async (req, res) => {
+  const b = req.body || {};
+  const input: GenerateInput = {
+    prompt: typeof b.prompt === 'string' ? b.prompt : undefined,
+    seedTrackIds: parseIds(b.seedTrackIds),
+    seedArtist: typeof b.seedArtist === 'string' ? b.seedArtist : undefined,
+    knobs: b.knobs && typeof b.knobs === 'object' ? b.knobs : {},
+    sources: b.sources && typeof b.sources === 'object' ? b.sources : {},
+    excludeTrackIds: parseIds(b.excludeTrackIds),
+  };
+  const hasIntent = Boolean(
+    input.prompt?.trim() ||
+    input.seedTrackIds?.length ||
+    input.seedArtist?.trim() ||
+    input.sources?.recentlyAdded ||
+    input.knobs?.moods?.length ||
+    input.knobs?.genres?.length ||
+    input.knobs?.energies?.length ||
+    input.knobs?.eras?.length ||
+    input.knobs?.instrumentalOnly,
+  );
+  if (!hasIntent) {
+    return res.status(400).json({ error: 'give a prompt, seeds, a source, or at least one knob to generate from' });
+  }
+  try {
+    const result = await generatePlaylist(input);
+    if (!result.tracks.length) {
+      return res.json({ ...result, message: 'nothing matched — try loosening the filters, removing seeds, or a broader vibe' });
+    }
+    queue.log('info', `playlist generated (${result.tracks.length} tracks, pool ${result.poolSize}${result.usedFallback ? ', deterministic fallback' : ''})`);
+    res.json(result);
+  } catch (err: any) {
+    queue.log('error', `playlist generate failed: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });

@@ -10,6 +10,7 @@ import {
   Radio,
   BarChart3,
   Disc3,
+  ListMusic,
   CalendarClock,
   Drama,
   Sparkles,
@@ -65,6 +66,7 @@ const NAV_SECTIONS: NavSection[] = [
     label: 'Programming',
     items: [
       { href: '/admin/library', id: 'library', label: 'Library', icon: Disc3 },
+      { href: '/admin/playlists', id: 'playlists', label: 'Playlists', icon: ListMusic },
       { href: '/observatory', id: 'observatory', label: 'Observatory', icon: Telescope },
       { href: '/admin/shows', id: 'shows', label: 'Shows', icon: CalendarClock },
       { href: '/admin/personas', id: 'personas', label: 'Personas', icon: Drama },

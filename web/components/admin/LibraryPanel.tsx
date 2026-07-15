@@ -41,7 +41,6 @@ import { Card, Btn, Eyebrow, Pill, Seg } from './ui';
 import { cn } from '../../lib/cn';
 import TaggingPanel, { num } from './LibraryTaggingPanel';
 import type { Coverage, TaggerState, LibraryStatsLite, Batch, BudgetMode, RescanOpts, TagSteps } from './LibraryTaggingPanel';
-import LibraryPlaylistsTab from './LibraryPlaylistsTab';
 import type { PlaylistSummary } from './LibraryPlaylistsTab';
 
 // ---------------------------------------------------------------------------
@@ -244,7 +243,6 @@ export default function LibraryPanel() {
   // list shared by the add-to-playlist bar and the Playlists tab.
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [playlists, setPlaylists] = useState<PlaylistSummary[] | null>(null);
-  const [playlistsLoading, setPlaylistsLoading] = useState(false);
   const [plBusy, setPlBusy] = useState(false);
 
   // never-play blocklist state — the entry list for the Blocked tab, plus
@@ -564,7 +562,6 @@ export default function LibraryPanel() {
   // -----------------------------------------------------------------------
   const loadPlaylists = useCallback(async () => {
     if (!ready) return;
-    setPlaylistsLoading(true);
     try {
       const r = await adminFetch('/playlists');
       const j = await r.json().catch(() => ({})) as { playlists?: PlaylistSummary[]; error?: string };
@@ -573,8 +570,6 @@ export default function LibraryPanel() {
     } catch (err) {
       notify.err(errorMessage(err));
       setPlaylists([]);
-    } finally {
-      setPlaylistsLoading(false);
     }
   }, [adminFetch, ready]);
 
@@ -1246,12 +1241,21 @@ export default function LibraryPanel() {
       )}
 
       {tab === 'playlists' && (
-        <LibraryPlaylistsTab
-          playlists={playlists}
-          loading={playlistsLoading}
-          onRefresh={loadPlaylists}
-          adminFetch={adminFetch}
-        />
+        // Playlist editing moved to the dedicated Playlist Builder screen
+        // (/admin/playlists) — this tab is now a pointer so old links still land.
+        <div className="border border-ink p-6 text-center">
+          <div className="eyebrow text-muted">Moved</div>
+          <p className="mx-auto mt-2 max-w-md text-sm text-muted">
+            Playlists now live in the <span className="font-bold text-ink">Playlist Builder</span> — generate a set from a
+            vibe, edit it by hand, and save it straight into the Shows picker.
+          </p>
+          <a
+            href="/admin/playlists"
+            className="mt-4 inline-flex items-center gap-2 border border-ink bg-ink px-4 py-2 text-[11px] font-black tracking-[0.18em] text-bg uppercase hover:bg-ink/90"
+          >
+            Open the Playlist Builder →
+          </a>
+        </div>
       )}
 
       {tab === 'blocked' && (
