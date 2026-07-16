@@ -1,20 +1,26 @@
 'use client';
 
 /* Magical Playlist Builder — the "studio console" screen.
-   Spec: docs/superpowers/specs/2026-07-15-magical-playlist-builder-design.md
+   Spec:   docs/superpowers/specs/2026-07-15-magical-playlist-builder-design.md
+   Design: docs/playlist-builder-functional-brief/project/Playlist Builder.dc.html
 
-   Two zones in the newsprint idiom: a CONSOLE (prompt + seeds + knobs → one
-   Generate action) and a DECK (the ordered, hand-editable tracklist with a live
-   tape counter + energy-arc sparkline). Save writes to Navidrome via the
-   existing /playlists routes; the result feeds Shows' playlist picker. */
+   Two panes: a fixed RECIPE rail (vibe prompt + seeds + tuning → Generate /
+   Regenerate / More) and a RESULT pane that is a real state machine — result,
+   empty, generating, no-match, error — with an energy-over-running-order bar
+   graph, AI-curated vs rules-based-fallback attribution, and a save modal
+   (overwrite vs create + keep-in-sync). Saves land in Navidrome via the
+   existing /playlists routes, so the set immediately feeds the Shows picker. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Wand2, Plus, X, GripVertical, RefreshCw, Save, Search, ChevronUp, ChevronDown,
-  Sparkles, Disc3, FolderOpen, FilePlus2, CircleDot, Music4, Radio,
+  Plus, X, Search, ArrowUp, ArrowDown, ChevronRight, ChevronUp, ChevronDown,
+  GripVertical, RefreshCw, Trash2, FolderOpen, FilePlus2, Save,
 } from 'lucide-react';
 import { useAdminAuth } from '../../lib/adminAuth';
-import { Eyebrow, Btn, Pill, MetaChip } from './ui';
+import { useDynamicStyle } from '../../hooks/useDynamicStyle';
+import { Button } from '../ui/button';
+import { Switch } from '../ui/switch';
+import { V3Alert } from '../ui/alert';
 import { cn } from '../../lib/cn';
 
 const API = (process.env.NEXT_PUBLIC_API_URL as string | undefined) || '/api';
@@ -26,6 +32,7 @@ const MOODS = [
   'evening', 'festival', 'cultural',
 ];
 const ENERGIES = ['low', 'medium', 'high'];
+type ArcShape = 'flat' | 'build' | 'peak-then-cool' | 'wind-down';
 const ARCS: { id: ArcShape; label: string; hint: string }[] = [
   { id: 'flat', label: 'Steady', hint: 'even energy throughout' },
   { id: 'build', label: 'Build', hint: 'calm → energetic' },
@@ -33,16 +40,27 @@ const ARCS: { id: ArcShape; label: string; hint: string }[] = [
   { id: 'wind-down', label: 'Wind down', hint: 'high → mellow' },
 ];
 const DECADES: { label: string; fromYear: number; toYear: number }[] = [
-  { label: "60s", fromYear: 1960, toYear: 1969 },
-  { label: "70s", fromYear: 1970, toYear: 1979 },
-  { label: "80s", fromYear: 1980, toYear: 1989 },
-  { label: "90s", fromYear: 1990, toYear: 1999 },
-  { label: "00s", fromYear: 2000, toYear: 2009 },
-  { label: "10s", fromYear: 2010, toYear: 2019 },
-  { label: "20s", fromYear: 2020, toYear: 2029 },
+  { label: '60s', fromYear: 1960, toYear: 1969 },
+  { label: '70s', fromYear: 1970, toYear: 1979 },
+  { label: '80s', fromYear: 1980, toYear: 1989 },
+  { label: '90s', fromYear: 1990, toYear: 1999 },
+  { label: '00s', fromYear: 2000, toYear: 2009 },
+  { label: '10s', fromYear: 2010, toYear: 2019 },
+  { label: '20s', fromYear: 2020, toYear: 2029 },
 ];
 
-type ArcShape = 'flat' | 'build' | 'peak-then-cool' | 'wind-down';
+// Bar palette for the energy graph — theme-aware mixes rather than the mock's
+// light-theme hexes, so dark mode keeps the same low/med/high contrast. Raw
+// values feed SVG `fill` attributes; the class twins style HTML swatches.
+const EN_LOW = 'color-mix(in oklab, var(--ink) 22%, var(--bg))';
+const EN_MED = 'color-mix(in oklab, var(--ink) 80%, var(--bg))';
+const EN_HIGH = 'var(--accent)';
+const EN_LOW_BG = 'bg-[color-mix(in_oklab,var(--ink)_22%,var(--bg))]';
+const EN_MED_BG = 'bg-[color-mix(in_oklab,var(--ink)_80%,var(--bg))]';
+const EN_HIGH_BG = 'bg-[var(--accent)]';
+
+type View = 'result' | 'empty' | 'generating' | 'nomatch' | 'error';
+type GenMode = 'fresh' | 'regenerate' | 'more';
 
 interface DraftTrack {
   id: string;
@@ -69,6 +87,24 @@ interface RawTrackRow {
   duration?: number;
   durationSec?: number;
   year?: number | null;
+  genre?: string | null;
+  energy?: string | null;
+  moods?: string[];
+}
+
+function rowToDraft(s: RawTrackRow): DraftTrack {
+  return {
+    id: s.id,
+    title: s.title || '',
+    artist: s.artist || '',
+    album: s.album,
+    durationSec: s.durationSec ?? s.duration ?? 0,
+    year: s.year,
+    genre: s.genre ?? null,
+    energy: s.energy ?? null,
+    moods: s.moods || [],
+    instrumental: null,
+  };
 }
 
 function fmtDur(sec: number): string {
@@ -79,94 +115,327 @@ function fmtDur(sec: number): string {
   if (h) return `${h}:${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
   return `${m}:${String(ss).padStart(2, '0')}`;
 }
-const energyLevel = (e?: string | null): number => (e === 'low' ? 0 : e === 'high' ? 2 : 1);
+function fmtRun(total: number): string {
+  const h = Math.floor(total / 3600);
+  const m = Math.round((total % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+function relTime(iso: string): string {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const h = Math.floor(mins / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+const energyPct = (e?: string | null): number => (e === 'low' ? 34 : e === 'high' ? 92 : 64);
+const energyColor = (e?: string | null): string => (e === 'low' ? EN_LOW : e === 'high' ? EN_HIGH : EN_MED);
+const energyBgClass = (e?: string | null): string => (e === 'low' ? EN_LOW_BG : e === 'high' ? EN_HIGH_BG : EN_MED_BG);
+// Untagged tracks read '—', not a fake 'med' — an untagged library shouldn't
+// masquerade as uniformly mid-energy (the bars go translucent for the same reason).
+const energyLabel = (e?: string | null): string =>
+  e === 'low' || e === 'medium' || e === 'high' ? (e === 'medium' ? 'med' : e) : '—';
+const energyKnown = (e?: string | null): boolean => e === 'low' || e === 'medium' || e === 'high';
 
-// ── Energy-arc sparkline ──────────────────────────────────────────────────────
-// A hand-drawn feel: the curve of the built set's energy over its runtime.
-function ArcSpark({ tracks, className }: { tracks: DraftTrack[]; className?: string }) {
-  const W = 320;
-  const H = 40;
-  const pts = useMemo(() => {
-    if (tracks.length < 2) return '';
-    const n = tracks.length;
-    return tracks.map((t, i) => {
-      const x = (i / (n - 1)) * W;
-      const y = H - 4 - (energyLevel(t.energy) / 2) * (H - 8);
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    }).join(' ');
-  }, [tracks]);
+// ── shared micro-pieces (design idiom: mono eyebrows, sharp toggles) ─────────
+
+function Eyeb({ children, muted, className }: { children: React.ReactNode; muted?: boolean; className?: string }) {
   return (
-    <svg
-      viewBox={`0 0 ${W} ${H}`}
-      preserveAspectRatio="none"
-      className={cn('block h-10 w-full', className)}
-      aria-hidden
-    >
-      <line x1="0" y1={H - 4} x2={W} y2={H - 4} stroke="var(--separator-strong)" strokeWidth="1" />
-      {pts && (
-        <polyline
-          points={pts}
-          fill="none"
-          stroke="var(--accent)"
-          strokeWidth="2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-        />
-      )}
-    </svg>
+    <span className={cn('font-mono text-[10px] font-bold tracking-[0.16em] uppercase', muted ? 'text-muted' : 'text-ink', className)}>
+      {children}
+    </span>
   );
 }
+
+function Tog({ on, onClick, title, children }: { on: boolean; onClick: () => void; title?: string; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      className={cn(
+        'border px-[11px] py-1.5 font-mono text-[11px] font-semibold tracking-[0.03em] transition',
+        on ? 'border-ink bg-ink text-bg' : 'border-separator-strong bg-bg text-ink hover:border-ink',
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function IconBtn({ onClick, disabled, title, className, children }: {
+  onClick?: () => void; disabled?: boolean; title?: string; className?: string; children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={cn(
+        'grid size-[30px] place-items-center border border-transparent text-muted transition',
+        'hover:border-separator-soft hover:bg-ink-soft hover:text-ink disabled:opacity-25 disabled:hover:border-transparent disabled:hover:bg-transparent',
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Chip({ accent, onRemove, children }: { accent?: boolean; onRemove?: () => void; children: React.ReactNode }) {
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-1.5 border bg-bg px-[7px] py-[3px] font-mono text-[10px] font-semibold tracking-[0.06em] uppercase',
+      accent ? 'border-[var(--accent)] text-vermilion' : 'border-separator-strong text-ink',
+    )}>
+      {children}
+      {onRemove && (
+        <button type="button" onClick={onRemove} className="cursor-pointer text-muted hover:text-ink" title="remove">
+          <X className="size-3" />
+        </button>
+      )}
+    </span>
+  );
+}
+
+function SwitchRow({ label, hint, on, onToggle, mutedLabel }: {
+  label: string; hint: string; on: boolean; onToggle: (v: boolean) => void; mutedLabel?: boolean;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div>
+        <div className={cn('text-[13px] font-semibold', mutedLabel && 'text-muted')}>{label}</div>
+        <div className="font-mono text-[10px] text-muted">{hint}</div>
+      </div>
+      <Switch checked={on} onCheckedChange={onToggle} />
+    </div>
+  );
+}
+
+// ── Energy tape-strip — slim per-track bars + dashed target arc. Collapsible,
+// and every bar is a jump-link: click scrolls its track row into view. ────────
+
+function EnergyGraph({ tracks, arc, open, onToggle, onBarClick }: {
+  tracks: DraftTrack[]; arc: ArcShape; open: boolean; onToggle: () => void; onBarClick: (i: number) => void;
+}) {
+  const n = tracks.length;
+  const arcLabel = ARCS.find(a => a.id === arc)?.label || 'Steady';
+  const noneTagged = useMemo(() => tracks.every(t => !energyKnown(t.energy)), [tracks]);
+  const targetPts = useMemo(() => {
+    const f = (p: number): number => {
+      if (arc === 'build') return p;
+      if (arc === 'wind-down') return 1 - p;
+      if (arc === 'peak-then-cool') return p < 0.6 ? p / 0.6 : 1 - ((p - 0.6) / 0.4) * 0.65;
+      return 0.5;
+    };
+    return tracks.map((_, i) => {
+      const p = n > 1 ? i / (n - 1) : 0;
+      return `${(i + 0.5).toFixed(2)},${(82 - f(p) * 64).toFixed(2)}`;
+    }).join(' ');
+  }, [tracks, arc, n]);
+  if (n === 0) return null;
+  return (
+    <div className="flex-none border-b border-separator-soft px-4 sm:px-6">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex h-7 w-full items-center justify-between gap-3 text-left"
+        title={open ? 'collapse the energy strip' : 'expand the energy strip'}
+      >
+        <span className="flex min-w-0 items-center gap-2.5">
+          <Eyeb muted>Energy</Eyeb>
+          {noneTagged && open && (
+            <span className="truncate font-mono text-[9px] text-muted/80">
+              untagged — run the library tagger (Library → Tag) to chart the real arc
+            </span>
+          )}
+        </span>
+        <span className="flex flex-none items-center gap-3 font-mono text-[9px] text-muted">
+          {open && !noneTagged && (
+            <>
+              <span className="hidden items-center gap-1 sm:flex"><span className={cn('inline-block size-2', EN_LOW_BG)} />low</span>
+              <span className="hidden items-center gap-1 sm:flex"><span className={cn('inline-block size-2', EN_MED_BG)} />med</span>
+              <span className="hidden items-center gap-1 sm:flex"><span className={cn('inline-block size-2', EN_HIGH_BG)} />high</span>
+            </>
+          )}
+          {open && (
+            <span className="flex items-center gap-1">
+              <svg width="14" height="8" aria-hidden><line x1="0" y1="4" x2="14" y2="4" stroke="var(--ink)" strokeWidth="1.5" strokeDasharray="3 2" /></svg>
+              target · {arcLabel}
+            </span>
+          )}
+          {open ? <ChevronUp className="size-3.5" /> : <ChevronDown className="size-3.5" />}
+        </span>
+      </button>
+      {open && (
+        <div className="relative h-11 pb-1.5">
+          <svg viewBox={`0 0 ${n} 100`} preserveAspectRatio="none" className="block h-full w-full">
+            {tracks.map((t, i) => {
+              const pct = energyPct(t.energy);
+              return (
+                <rect
+                  key={`${t.id}-${i}`}
+                  x={(i + 0.1).toFixed(3)}
+                  y={(100 - pct).toFixed(2)}
+                  width={0.8}
+                  height={pct}
+                  fill={energyColor(t.energy)}
+                  onClick={() => onBarClick(i)}
+                  className={cn('cursor-pointer hover:opacity-70', !energyKnown(t.energy) && 'opacity-35')}
+                >
+                  <title>{i + 1}. {t.title} — {t.artist}</title>
+                </rect>
+              );
+            })}
+            <polyline
+              points={targetPts}
+              fill="none"
+              stroke="var(--ink)"
+              strokeWidth="1.5"
+              strokeDasharray="3 2"
+              vectorEffect="non-scaling-stroke"
+              className="pointer-events-none opacity-60"
+            />
+          </svg>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 export default function PlaylistBuilderPanel() {
   const { adminFetch } = useAdminAuth();
 
-  // Console state
+  // Recipe state
   const [prompt, setPrompt] = useState('');
   const [seeds, setSeeds] = useState<SeedChip[]>([]);
+  const [seedArtist, setSeedArtist] = useState('');
   const [moods, setMoods] = useState<string[]>([]);
-  const [genresText, setGenresText] = useState('');
+  const [genres, setGenres] = useState<string[]>([]);
+  const [genreInput, setGenreInput] = useState('');
   const [energies, setEnergies] = useState<string[]>([]);
   const [decades, setDecades] = useState<string[]>([]);
   const [arc, setArc] = useState<ArcShape>('flat');
   const [count, setCount] = useState(25);
   const [artistSpacing, setArtistSpacing] = useState(2);
-  const [maxTrackSec, setMaxTrackSec] = useState(0); // 0 = no cap
+  const [capOn, setCapOn] = useState(false);
+  const [capMin, setCapMin] = useState(6); // minutes, 1–10; only applied when capOn
   const [excludeRecent, setExcludeRecent] = useState(false);
   const [instrumentalOnly, setInstrumentalOnly] = useState(false);
   const [recentlyAdded, setRecentlyAdded] = useState(false);
-  const [tuneOpen, setTuneOpen] = useState(true);
 
-  // Deck state
+  // Result state
+  const [view, setView] = useState<View>('empty');
   const [name, setName] = useState('');
+  const [description, setDescription] = useState<string | null>(null);
   const [tracks, setTracks] = useState<DraftTrack[]>([]);
+  const [reasons, setReasons] = useState<string[]>([]);
+  const [usedFallback, setUsedFallback] = useState(false);
+  const [poolSize, setPoolSize] = useState<number | null>(null);
+  // What the last generation op actually did — frozen so manual edits to the
+  // deck don't rewrite history in the "chose N from M in pool" line. `poolVerb`
+  // keeps 'more' honest: its pool excludes the current deck, so the line
+  // describes that op ("added 15 from 23 in pool"), never a mixed total.
+  const [chosenCount, setChosenCount] = useState(0);
+  const [poolVerb, setPoolVerb] = useState<'chose' | 'added'>('chose');
+  const [errorMsg, setErrorMsg] = useState('');
   const [existingId, setExistingId] = useState<string | undefined>();
   const [keepInSync, setKeepInSync] = useState(false);
   const [syncInfo, setSyncInfo] = useState<{ lastSyncedAt: string | null } | null>(null);
   const [syncing, setSyncing] = useState(false);
-  const [reasons, setReasons] = useState<string[]>([]);
-  const [usedFallback, setUsedFallback] = useState(false);
-
-  // Async / UX state
-  const [generating, setGenerating] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; msg: string } | null>(null);
-  const [savedId, setSavedId] = useState<string | null>(null);
 
-  // Search (seed + manual add)
-  const [seedQuery, setSeedQuery] = useState('');
-  const [seedResults, setSeedResults] = useState<SeedChip[] | null>(null);
-  const [addQuery, setAddQuery] = useState('');
-  const [addResults, setAddResults] = useState<DraftTrack[] | null>(null);
-
-  // Open-existing picker
-  const [pickerOpen, setPickerOpen] = useState(false);
+  // Modals + toast
+  const [modal, setModal] = useState<null | 'open' | 'save'>(null);
+  const [saveName, setSaveName] = useState('');
+  const [saveMode, setSaveMode] = useState<'overwrite' | 'create'>('create');
+  const [saveSync, setSaveSync] = useState(false);
   const [playlists, setPlaylists] = useState<PlaylistSummary[] | null>(null);
+  const [playlistQuery, setPlaylistQuery] = useState('');
+  // Two-click armed delete in the Open modal (the only delete surface since
+  // the old Library Playlists tab became a pointer here).
+  const [armedDelete, setArmedDelete] = useState<string | null>(null);
+
+  // Deck chrome state — the list is the star, everything above it collapses.
+  const [graphOpen, setGraphOpen] = useState(true);
+  const [caveatsOpen, setCaveatsOpen] = useState(false);
+  const [hotRow, setHotRow] = useState<number | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const hotTimer = useRef<number | null>(null);
+  const [toast, setToast] = useState('');
+
+  // Search (seeds + manual add)
+  const [seedQuery, setSeedQuery] = useState('');
+  const [seedResults, setSeedResults] = useState<RawTrackRow[] | null>(null);
+  const [addQuery, setAddQuery] = useState('');
+  const [addResults, setAddResults] = useState<RawTrackRow[] | null>(null);
 
   const dragIndex = useRef<number | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const lastMode = useRef<GenMode>('fresh');
+  const generatingRef = useRef(false);
 
-  const flash = useCallback((kind: 'ok' | 'err', msg: string) => {
-    setToast({ kind, msg });
-    window.setTimeout(() => setToast(null), 4200);
+  // Fill the viewport: measure where the frame actually starts (header height,
+  // Navidrome banner, breadcrumb wrap all vary) and stretch it to the bottom,
+  // leaving the shell's 24px page gutter. When the shell NAV column is taller
+  // than that (short windows), match the nav's bottom instead — otherwise the
+  // grid row stretches past the frame and page-scrolling reveals a dead zone
+  // under the deck. The class-based calc() is only the first-paint estimate.
+  const frameRef = useRef<HTMLDivElement>(null);
+  const [frameH, setFrameH] = useState<number | null>(null);
+  useEffect(() => {
+    const measure = () => {
+      const el = frameRef.current;
+      if (!el) return;
+      if (window.innerWidth < 1024) { setFrameH(null); return; }
+      const top = el.getBoundingClientRect().top + window.scrollY;
+      const fit = window.innerHeight - top - 24;
+      const nav = document.querySelector('.shell-nav');
+      const navFill = nav ? nav.getBoundingClientRect().bottom + window.scrollY - top : 0;
+      setFrameH(Math.max(480, Math.round(Math.max(fit, navFill))));
+    };
+    measure();
+    window.addEventListener('resize', measure);
+    const ro = new ResizeObserver(measure);
+    ro.observe(document.body);
+    return () => { window.removeEventListener('resize', measure); ro.disconnect(); };
+  }, []);
+  useDynamicStyle(frameRef, { height: frameH ? `${frameH}px` : null });
+
+  const flash = useCallback((msg: string) => {
+    setToast(msg);
+    if (toastTimer.current) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(''), 4200);
+  }, []);
+
+  // Escape closes whichever modal is up.
+  useEffect(() => {
+    if (!modal) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setModal(null); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [modal]);
+
+  // Energy-bar → track-row jump: center the row inside the LIST's own scroll
+  // context (scrollIntoView would drag the page along) and flare it briefly.
+  const jumpToRow = useCallback((i: number) => {
+    const list = listRef.current;
+    const row = list?.querySelector<HTMLElement>(`[data-row="${i}"]`);
+    if (!list || !row) return;
+    if (list.scrollHeight > list.clientHeight) {
+      const delta = row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      list.scrollTo({ top: list.scrollTop + delta - list.clientHeight / 2 + row.clientHeight / 2, behavior: 'smooth' });
+    } else {
+      row.scrollIntoView({ behavior: 'smooth', block: 'center' }); // mobile: list flows with the page
+    }
+    setHotRow(i);
+    if (hotTimer.current) window.clearTimeout(hotTimer.current);
+    hotTimer.current = window.setTimeout(() => setHotRow(null), 1600);
   }, []);
 
   const totalSec = useMemo(() => tracks.reduce((s, t) => s + (t.durationSec || 0), 0), [tracks]);
@@ -177,38 +446,39 @@ export default function PlaylistBuilderPanel() {
     return dup;
   }, [tracks]);
 
-  const decadeWindows = useCallback(
-    () => DECADES.filter(d => decades.includes(d.label)).map(d => ({ fromYear: d.fromYear, toYear: d.toYear })),
-    [decades],
-  );
-
   const buildBody = useCallback((excludeTrackIds: string[] = []) => ({
     prompt: prompt.trim() || undefined,
     seedTrackIds: seeds.map(s => s.id),
+    seedArtist: seedArtist || undefined,
     knobs: {
       targetCount: count,
       energyArc: arc,
       moods,
-      genres: genresText.split(',').map(g => g.trim()).filter(Boolean),
+      genres,
       energies,
-      eras: decadeWindows(),
+      eras: DECADES.filter(d => decades.includes(d.label)).map(d => ({ fromYear: d.fromYear, toYear: d.toYear })),
       artistSpacing,
       excludeRecentlyPlayed: excludeRecent,
       instrumentalOnly,
-      maxTrackSeconds: maxTrackSec || undefined,
+      maxTrackSeconds: capOn ? capMin * 60 : undefined,
     },
     sources: { recentlyAdded },
     excludeTrackIds,
-  }), [prompt, seeds, count, arc, moods, genresText, energies, decadeWindows, artistSpacing, excludeRecent, instrumentalOnly, maxTrackSec, recentlyAdded]);
+  }), [prompt, seeds, seedArtist, count, arc, moods, genres, energies, decades, artistSpacing, excludeRecent, instrumentalOnly, capOn, capMin, recentlyAdded]);
 
-  const hasIntent = prompt.trim() || seeds.length || recentlyAdded || moods.length ||
-    genresText.trim() || energies.length || decades.length || instrumentalOnly;
+  const hasIntent = Boolean(
+    prompt.trim() || seeds.length || seedArtist || recentlyAdded || moods.length ||
+    genres.length || energies.length || decades.length || instrumentalOnly,
+  );
 
-  const generate = useCallback(async (mode: 'fresh' | 'regenerate' | 'more') => {
-    if (generating) return;
+  const generating = view === 'generating';
+
+  const generate = useCallback(async (mode: GenMode) => {
+    if (generatingRef.current) return;
+    generatingRef.current = true;
+    lastMode.current = mode;
     const exclude = mode === 'fresh' ? [] : tracks.map(t => t.id);
-    setGenerating(true);
-    setReasons([]);
+    setView('generating');
     try {
       const r = await adminFetch('/playlists/generate', {
         method: 'POST',
@@ -216,58 +486,94 @@ export default function PlaylistBuilderPanel() {
         body: JSON.stringify(buildBody(exclude)),
       });
       const j = await r.json();
-      if (!r.ok) { flash('err', j.error || 'generation failed'); return; }
+      if (!r.ok) {
+        setErrorMsg(j.error || 'generation failed');
+        setView(mode === 'more' && tracks.length ? 'result' : 'error');
+        if (mode === 'more' && tracks.length) flash(j.error || 'could not fetch more');
+        return;
+      }
       const got: DraftTrack[] = j.tracks || [];
+      if (!got.length) {
+        setView(mode === 'more' && tracks.length ? 'result' : 'nomatch');
+        if (mode === 'more' && tracks.length) flash('nothing new matched — loosen the filters');
+        return;
+      }
       setReasons(j.reasons || []);
       setUsedFallback(!!j.usedFallback);
-      if (!got.length) { flash('err', j.message || 'nothing matched — loosen the filters'); return; }
+      setCaveatsOpen(!!j.usedFallback); // fallback matters — open the detail unprompted
+      setPoolSize(typeof j.poolSize === 'number' ? j.poolSize : null);
+      setChosenCount(got.length);
+      setPoolVerb(mode === 'more' ? 'added' : 'chose');
       if (mode === 'more') {
         setTracks(prev => [...prev, ...got]);
-        flash('ok', `added ${got.length} more`);
+        flash(`added ${got.length} more track${got.length === 1 ? '' : 's'}`);
       } else {
         setTracks(got);
         if (j.name && (!name.trim() || mode === 'fresh')) setName(j.name);
-        flash('ok', `${got.length} tracks${j.usedFallback ? ' (deterministic)' : ''}`);
+        setDescription(j.description || null);
+        flash(`${got.length} tracks generated`);
       }
+      setView('result');
     } catch (err) {
-      flash('err', err instanceof Error ? err.message : 'generation failed');
+      setErrorMsg(err instanceof Error ? err.message : 'generation failed');
+      setView(mode === 'more' && tracks.length ? 'result' : 'error');
     } finally {
-      setGenerating(false);
+      generatingRef.current = false;
     }
-  }, [generating, tracks, adminFetch, buildBody, flash, name]);
+  }, [tracks, adminFetch, buildBody, flash, name]);
 
-  // Seed search (debounced)
+  // Seed search (debounced; `stale` guards a slow response from clobbering a
+  // newer query's results)
   useEffect(() => {
     const q = seedQuery.trim();
     if (q.length < 2) { setSeedResults(null); return; }
+    let stale = false;
     const h = window.setTimeout(async () => {
       try {
         const r = await adminFetch(`/dj/search?q=${encodeURIComponent(q)}&limit=8`);
         const j = await r.json();
-        setSeedResults((j.results || j.songs || j.tracks || []).map((s: RawTrackRow) => ({ id: s.id, title: s.title || '', artist: s.artist || '' })));
-      } catch { setSeedResults([]); }
+        if (!stale) setSeedResults(j.results || j.songs || j.tracks || []);
+      } catch { if (!stale) setSeedResults([]); }
     }, 250);
-    return () => window.clearTimeout(h);
+    return () => { stale = true; window.clearTimeout(h); };
   }, [seedQuery, adminFetch]);
 
-  // Manual add search (debounced)
+  // Manual add search (debounced, same staleness guard)
   useEffect(() => {
     const q = addQuery.trim();
     if (q.length < 2) { setAddResults(null); return; }
+    let stale = false;
     const h = window.setTimeout(async () => {
       try {
         const r = await adminFetch(`/dj/search?q=${encodeURIComponent(q)}&limit=10`);
         const j = await r.json();
-        setAddResults((j.results || j.songs || j.tracks || []).map((s: RawTrackRow) => ({
-          id: s.id, title: s.title || '', artist: s.artist || '', album: s.album, durationSec: s.durationSec ?? s.duration ?? 0, year: s.year,
-        })));
-      } catch { setAddResults([]); }
+        if (!stale) setAddResults(j.results || j.songs || j.tracks || []);
+      } catch { if (!stale) setAddResults([]); }
     }, 250);
-    return () => window.clearTimeout(h);
+    return () => { stale = true; window.clearTimeout(h); };
   }, [addQuery, adminFetch]);
+
+  // Distinct artists in the seed results — the "seed the artist" rows.
+  const seedArtists = useMemo(() => {
+    if (!seedResults) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const r of seedResults) {
+      const a = (r.artist || '').trim();
+      if (a && !seen.has(a.toLowerCase())) { seen.add(a.toLowerCase()); out.push(a); }
+      if (out.length >= 2) break;
+    }
+    return out;
+  }, [seedResults]);
 
   const toggle = (list: string[], set: (v: string[]) => void, v: string) =>
     set(list.includes(v) ? list.filter(x => x !== v) : [...list, v]);
+
+  const addGenre = () => {
+    const g = genreInput.trim().replace(/,+$/, '');
+    if (g && !genres.some(x => x.toLowerCase() === g.toLowerCase())) setGenres([...genres, g]);
+    setGenreInput('');
+  };
 
   const move = (from: number, to: number) => {
     if (to < 0 || to >= tracks.length) return;
@@ -280,74 +586,103 @@ export default function PlaylistBuilderPanel() {
     });
   };
   const removeAt = (i: number) => setTracks(prev => prev.filter((_, idx) => idx !== i));
-  const addTrack = (t: DraftTrack) => {
-    setTracks(prev => [...prev, t]);
+  const addTrack = (t: RawTrackRow) => {
+    setTracks(prev => [...prev, rowToDraft(t)]);
     setAddQuery('');
     setAddResults(null);
   };
 
-  const openExisting = useCallback(async () => {
-    setPickerOpen(true);
-    if (playlists) return;
+  const doNew = useCallback(() => {
+    setTracks([]); setName(''); setDescription(null); setExistingId(undefined);
+    setReasons([]); setUsedFallback(false); setPoolSize(null); setChosenCount(0);
+    setErrorMsg(''); setKeepInSync(false); setSyncInfo(null); setView('empty');
+  }, []);
+
+  const openBrowse = useCallback(async () => {
+    setModal('open');
+    setPlaylistQuery('');
+    setPlaylists(null);
+    setArmedDelete(null);
     try {
       const r = await adminFetch('/playlists');
       const j = await r.json();
       setPlaylists(j.playlists || []);
     } catch { setPlaylists([]); }
-  }, [adminFetch, playlists]);
+  }, [adminFetch]);
+
+  const deletePlaylist = useCallback(async (p: PlaylistSummary) => {
+    try {
+      const r = await adminFetch(`/playlists/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) { flash(j.error || 'delete failed'); return; }
+      setPlaylists(prev => (prev ? prev.filter(x => x.id !== p.id) : prev));
+      // The deck keeps the tracks as an unsaved draft; only the server tie is gone.
+      if (existingId === p.id) { setExistingId(undefined); setKeepInSync(false); setSyncInfo(null); }
+      flash(`Deleted “${p.name}” from the music server`);
+    } catch (err) {
+      flash(err instanceof Error ? err.message : 'delete failed');
+    } finally {
+      setArmedDelete(null);
+    }
+  }, [adminFetch, existingId, flash]);
 
   const loadPlaylist = useCallback(async (p: PlaylistSummary) => {
     try {
       const r = await adminFetch(`/playlists/${encodeURIComponent(p.id)}`);
       const j = await r.json();
-      setTracks((j.entries || []).map((e: RawTrackRow) => ({
-        id: e.id, title: e.title || '', artist: e.artist || '', album: e.album, durationSec: e.durationSec ?? 0, year: e.year,
-      })));
+      setTracks((j.entries || []).map(rowToDraft));
       setName(p.name);
+      setDescription(null);
       setExistingId(p.id);
       setKeepInSync(!!p.synced);
       setSyncInfo(p.synced ? { lastSyncedAt: p.lastSyncedAt ?? null } : null);
-      setReasons([]);
-      setPickerOpen(false);
-      flash('ok', `loaded "${p.name}"`);
-    } catch { flash('err', 'could not load playlist'); }
+      setReasons([]); setUsedFallback(false); setPoolSize(null);
+      setModal(null);
+      setView('result');
+      flash(`Loaded “${p.name}” from the music server`);
+    } catch { flash('could not load playlist'); }
   }, [adminFetch, flash]);
 
-  const newEmpty = () => {
-    setTracks([]); setName(''); setExistingId(undefined); setReasons([]); setSavedId(null);
-    setKeepInSync(false); setSyncInfo(null);
-  };
+  const openSave = useCallback(() => {
+    if (!tracks.length) { flash('nothing to save'); return; }
+    setSaveName(name.trim() || '');
+    setSaveMode(existingId ? 'overwrite' : 'create');
+    setSaveSync(keepInSync);
+    setModal('save');
+  }, [tracks.length, name, existingId, keepInSync, flash]);
 
-  const save = useCallback(async () => {
-    if (!name.trim()) { flash('err', 'name the playlist first'); return; }
-    if (!tracks.length) { flash('err', 'nothing to save'); return; }
+  const doSave = useCallback(async () => {
+    const finalName = saveName.trim();
+    if (!finalName) { flash('name the playlist first'); return; }
     setSaving(true);
     try {
+      const overwrite = saveMode === 'overwrite' && existingId;
       const r = await adminFetch('/playlists', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: name.trim(),
+          name: finalName,
           songIds: tracks.map(t => t.id),
-          playlistId: existingId,
-          keepInSync,
-          recipe: keepInSync ? buildBody() : undefined,
+          playlistId: overwrite ? existingId : undefined,
+          keepInSync: saveSync,
+          recipe: saveSync ? buildBody() : undefined,
         }),
       });
       const j = await r.json();
-      if (!r.ok) { flash('err', j.error || 'save failed'); return; }
-      const id = j.playlist?.id || existingId || null;
-      setExistingId(id || undefined);
-      setSavedId(id);
-      if (keepInSync && !syncInfo) setSyncInfo({ lastSyncedAt: null });
-      if (!keepInSync) setSyncInfo(null);
-      flash('ok', (existingId ? 'playlist updated' : 'playlist saved to Navidrome') + (keepInSync ? ' · sync on' : ''));
+      if (!r.ok) { flash(j.error || 'save failed'); return; }
+      const id = j.playlist?.id || (overwrite ? existingId : undefined);
+      setName(finalName);
+      setExistingId(id);
+      setKeepInSync(saveSync);
+      setSyncInfo(saveSync ? (syncInfo ?? { lastSyncedAt: null }) : null);
+      setModal(null);
+      flash(`Saved “${finalName}” to Navidrome${saveSync ? ' · sync on' : ''}`);
     } catch (err) {
-      flash('err', err instanceof Error ? err.message : 'save failed');
+      flash(err instanceof Error ? err.message : 'save failed');
     } finally {
       setSaving(false);
     }
-  }, [name, tracks, existingId, keepInSync, syncInfo, buildBody, adminFetch, flash]);
+  }, [saveName, saveMode, saveSync, existingId, tracks, syncInfo, buildBody, adminFetch, flash]);
 
   const syncNow = useCallback(async () => {
     if (!existingId || syncing) return;
@@ -355,458 +690,715 @@ export default function PlaylistBuilderPanel() {
     try {
       const r = await adminFetch(`/playlists/${encodeURIComponent(existingId)}/sync`, { method: 'POST' });
       const j = await r.json();
-      if (!r.ok) { flash('err', j.error || 'sync failed'); return; }
+      if (!r.ok) { flash(j.error || 'sync failed'); return; }
       setSyncInfo({ lastSyncedAt: new Date().toISOString() });
-      flash('ok', j.added ? `synced · added ${j.added} new track${j.added === 1 ? '' : 's'}` : 'synced · nothing new');
-      // Reload the deck so appended tracks show.
+      flash(j.added ? `Sync complete · added ${j.added} new track${j.added === 1 ? '' : 's'}` : 'Sync complete · nothing new');
       if (j.added) {
         const pr = await adminFetch(`/playlists/${encodeURIComponent(existingId)}`);
         const pj = await pr.json();
-        if (pr.ok) setTracks((pj.entries || []).map((e: RawTrackRow) => ({
-          id: e.id, title: e.title || '', artist: e.artist || '', album: e.album, durationSec: e.durationSec ?? 0, year: e.year,
-        })));
+        if (pr.ok) setTracks((pj.entries || []).map(rowToDraft));
       }
     } catch (err) {
-      flash('err', err instanceof Error ? err.message : 'sync failed');
+      flash(err instanceof Error ? err.message : 'sync failed');
     } finally {
       setSyncing(false);
     }
   }, [existingId, syncing, adminFetch, flash]);
 
-  return (
-    <div className="admin-root mx-auto max-w-[1180px] px-4 pt-6 pb-24 sm:px-6">
-      {/* Masthead */}
-      <header className="mb-6 border-b border-ink pb-4">
-        <div className="flex flex-wrap items-end justify-between gap-3">
-          <div>
-            <Eyebrow>Studio · Programming</Eyebrow>
-            <h1 className="mt-1 flex items-center gap-2 text-3xl font-black tracking-tight text-ink sm:text-4xl">
-              <Wand2 className="size-7 text-vermilion" strokeWidth={2.4} />
-              Playlist Builder
-            </h1>
-            <p className="mt-1 max-w-xl text-sm text-muted">
-              Describe a vibe, drop a few seeds, tune the knobs — the station assembles an ordered set you can reshape by hand, then save straight into the Shows picker.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <Btn sm onClick={openExisting}><FolderOpen className="mr-1 size-3.5" />Open</Btn>
-            <Btn sm onClick={newEmpty}><FilePlus2 className="mr-1 size-3.5" />New</Btn>
-          </div>
-        </div>
-      </header>
+  const showResult = view === 'result' && tracks.length > 0;
+  const showEmpty = view === 'empty' || (view === 'result' && tracks.length === 0);
+  const saveDisabled = !showResult || saving;
+  const filteredPlaylists = useMemo(() => {
+    if (!playlists) return null;
+    const q = playlistQuery.trim().toLowerCase();
+    return q ? playlists.filter(p => p.name.toLowerCase().includes(q)) : playlists;
+  }, [playlists, playlistQuery]);
 
-      <div className="grid grid-cols-1 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
-        {/* ── CONSOLE ── */}
-        <section className="space-y-4">
-          {/* Prompt console */}
-          <div className="relative overflow-hidden border border-ink bg-ink-soft">
-            <div className="flex items-center justify-between border-b border-separator-strong px-3 py-2">
-              <span className="eyebrow text-muted">The vibe</span>
-              <span className="flex items-center gap-1.5 text-[10px] font-bold tracking-eyebrow text-muted uppercase">
-                <CircleDot className={cn('size-3', generating ? 'animate-pulse text-vermilion' : 'text-muted')} />
-                {generating ? 'assembling' : 'ready'}
-              </span>
+  const searchInputClass =
+    'w-full border border-separator-strong bg-field px-[11px] py-[9px] text-sm text-ink outline-none placeholder:text-muted/60 focus:border-ink';
+
+  return (
+    <div className="min-w-0">
+      {/* Open canvas — no box. One hairline divides recipe from deck; the page
+          itself is the surface and the track list takes every spare pixel. */}
+      <div ref={frameRef} className="flex min-w-0 flex-col lg:h-[calc(100dvh-146px)] lg:min-h-[480px] lg:flex-row">
+
+        {/* ============ LEFT: RECIPE ============ */}
+        <aside className="flex min-h-0 flex-none flex-col border-b border-ink lg:w-[380px] lg:border-r lg:border-b-0">
+          <div className="min-h-0 flex-1 pt-1 pr-5 pb-[26px] lg:overflow-y-auto">
+
+            <div className="mb-1.5 font-mono text-[10px] font-bold tracking-[0.2em] text-muted uppercase">Recipe</div>
+            <h1 className="mb-[18px] font-display text-[22px] font-bold tracking-[-0.01em]">
+              Describe the set
+            </h1>
+
+            {/* vibe */}
+            <div className="mb-[22px]">
+              <div className="mb-[7px]"><Eyeb>Vibe</Eyeb></div>
+              <textarea
+                value={prompt}
+                onChange={e => setPrompt(e.target.value)}
+                rows={3}
+                placeholder={'“rainy sunday jazz that warms up halfway through”'}
+                className={cn(searchInputClass, 'resize-none leading-[1.45]')}
+              />
             </div>
-            <textarea
-              value={prompt}
-              onChange={e => setPrompt(e.target.value)}
-              rows={3}
-              placeholder={'“rainy sunday jazz that warms up halfway through”\n“late-night driving synths, moody and instrumental”'}
-              className="w-full resize-none bg-transparent px-3 py-3 font-serif text-lg leading-snug text-ink outline-none placeholder:text-muted/60"
-            />
-            {/* Seeds */}
-            <div className="border-t border-separator-strong px-3 py-2.5">
-              <div className="mb-1.5 flex items-center gap-2">
-                <Sparkles className="size-3.5 text-vermilion" />
-                <span className="eyebrow text-muted">Seeds — anchor tracks</span>
+
+            {/* seeds */}
+            <div className="mb-[22px]">
+              <div className="mb-[7px] flex items-center justify-between">
+                <Eyeb>Seeds</Eyeb>
+                <span className="font-mono text-[10px] text-muted">optional</span>
               </div>
-              {seeds.length > 0 && (
-                <div className="mb-2 flex flex-wrap gap-1.5">
-                  {seeds.map(s => (
-                    <Pill key={s.id} tone="ink" onClick={() => setSeeds(seeds.filter(x => x.id !== s.id))} title="remove seed">
-                      {s.title} · {s.artist} <X className="ml-1 inline size-3" />
-                    </Pill>
-                  ))}
-                </div>
-              )}
               <div className="relative">
-                <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted" />
                 <input
                   value={seedQuery}
                   onChange={e => setSeedQuery(e.target.value)}
-                  placeholder="search a track to seed from…"
-                  className="w-full border border-separator-strong bg-bg py-1.5 pr-2 pl-7 text-sm text-ink outline-none focus:border-ink"
+                  placeholder="Search a track or artist to anchor on…"
+                  className={searchInputClass}
                 />
-                {seedResults && seedResults.length > 0 && (
-                  <div className="absolute z-20 mt-1 max-h-56 w-full overflow-auto border border-ink bg-bg shadow-lg">
+                {seedResults && (seedResults.length > 0 || seedArtists.length > 0) && (
+                  <div className="absolute z-20 max-h-64 w-full overflow-auto border border-t-0 border-ink bg-bg">
                     {seedResults.map(s => (
                       <button
                         key={s.id}
                         type="button"
-                        onClick={() => { if (!seeds.some(x => x.id === s.id)) setSeeds([...seeds, s]); setSeedQuery(''); setSeedResults(null); }}
-                        className="flex w-full items-center gap-2 border-b border-separator-strong px-2 py-1.5 text-left text-sm hover:bg-ink-soft"
+                        onClick={() => {
+                          if (!seeds.some(x => x.id === s.id)) setSeeds([...seeds, { id: s.id, title: s.title || '', artist: s.artist || '' }]);
+                          setSeedQuery(''); setSeedResults(null);
+                        }}
+                        className="flex w-full items-center justify-between gap-2 border-b border-separator-soft px-[11px] py-2 text-left hover:bg-ink-soft"
                       >
-                        <Plus className="size-3 text-vermilion" />
-                        <span className="truncate"><span className="font-semibold text-ink">{s.title}</span> <span className="text-muted">· {s.artist}</span></span>
+                        <span className="min-w-0">
+                          <span className="block truncate text-[13px]">{s.title}</span>
+                          <span className="block truncate font-mono text-[10px] text-muted">{s.artist}</span>
+                        </span>
+                        <Plus className="size-3.5 flex-none text-muted" />
+                      </button>
+                    ))}
+                    {seedArtists.map(a => (
+                      <button
+                        key={a}
+                        type="button"
+                        onClick={() => { setSeedArtist(a); setSeedQuery(''); setSeedResults(null); }}
+                        className="flex w-full items-center justify-between gap-2 border-b border-separator-soft px-[11px] py-2 text-left last:border-b-0 hover:bg-ink-soft"
+                      >
+                        <span className="min-w-0">
+                          <span className="block truncate text-[13px] text-vermilion">Artist · {a}</span>
+                          <span className="block font-mono text-[10px] text-muted">seed everything similar to this artist</span>
+                        </span>
+                        <Plus className="size-3.5 flex-none text-vermilion" />
                       </button>
                     ))}
                   </div>
                 )}
               </div>
+              {(seeds.length > 0 || seedArtist) && (
+                <div className="mt-2.5 flex flex-wrap gap-[7px]">
+                  {seeds.map(s => (
+                    <Chip key={s.id} onRemove={() => setSeeds(seeds.filter(x => x.id !== s.id))}>
+                      {s.title} · {s.artist}
+                    </Chip>
+                  ))}
+                  {seedArtist && (
+                    <Chip accent onRemove={() => setSeedArtist('')}>Artist · {seedArtist}</Chip>
+                  )}
+                </div>
+              )}
             </div>
 
-            {/* Generate bar */}
-            <div className="flex items-center gap-2 border-t border-ink bg-bg px-3 py-2.5">
-              <button
-                type="button"
-                onClick={() => generate('fresh')}
-                disabled={generating || !hasIntent}
-                className={cn(
-                  'group relative flex flex-1 items-center justify-center gap-2 border border-ink px-4 py-2.5 text-sm font-black tracking-eyebrow uppercase transition',
-                  generating || !hasIntent
-                    ? 'cursor-not-allowed bg-ink-soft text-muted'
-                    : 'bg-vermilion text-white hover:brightness-110',
-                )}
-              >
-                <Wand2 className={cn('size-4', generating && 'animate-spin')} />
-                {generating ? 'Assembling…' : tracks.length ? 'Generate fresh' : 'Generate'}
-              </button>
-              {tracks.length > 0 && (
-                <>
-                  <Btn sm onClick={() => generate('regenerate')} disabled={generating} title="new set, same recipe">
-                    <RefreshCw className="size-3.5" />
-                  </Btn>
-                  <Btn sm onClick={() => generate('more')} disabled={generating} title="append more">
-                    <Plus className="size-3.5" />
-                  </Btn>
-                </>
+            <div className="mb-5 h-px bg-separator-strong" />
+
+            {/* target length */}
+            <div className="mb-5">
+              <div className="mb-[9px] flex items-center justify-between">
+                <Eyeb>Target length</Eyeb>
+                <span className="font-mono text-[11px] font-bold text-vermilion">{count} tracks</span>
+              </div>
+              <input type="range" min={5} max={60} value={count} onChange={e => setCount(+e.target.value)} className="w-full accent-[var(--accent)]" />
+              <div className="mt-[5px] flex justify-between font-mono text-[9px] text-muted"><span>5</span><span>60</span></div>
+            </div>
+
+            {/* artist spacing */}
+            <div className="mb-5">
+              <div className="mb-[9px] flex items-center justify-between">
+                <Eyeb>Artist spacing</Eyeb>
+                <span className="font-mono text-[11px] text-muted">{artistSpacing ? `min ${artistSpacing} apart` : 'off'}</span>
+              </div>
+              <input type="range" min={0} max={5} value={artistSpacing} onChange={e => setArtistSpacing(+e.target.value)} className="w-full accent-[var(--accent)]" />
+            </div>
+
+            {/* cap track length */}
+            <div className="mb-5">
+              <div className="mb-[9px] flex items-center justify-between">
+                <Eyeb muted={!capOn}>Cap track length</Eyeb>
+                <Switch checked={capOn} onCheckedChange={setCapOn} />
+              </div>
+              <input
+                type="range" min={1} max={10} value={capMin} disabled={!capOn}
+                onChange={e => setCapMin(+e.target.value)}
+                className="w-full accent-[var(--accent)] disabled:opacity-40"
+                aria-label="maximum track length in minutes"
+              />
+              <div className="mt-[5px] font-mono text-[9px] text-muted">
+                {capOn ? `only tracks ${capMin}:00 or shorter` : 'off — no limit'}
+              </div>
+            </div>
+
+            <div className="mb-5 h-px bg-separator-strong" />
+
+            {/* energy arc */}
+            <div className="mb-5">
+              <div className="mb-[9px]"><Eyeb>Energy arc</Eyeb></div>
+              <div className="flex flex-wrap gap-1.5">
+                {ARCS.map(a => (
+                  <Tog key={a.id} on={arc === a.id} onClick={() => setArc(a.id)} title={a.hint}>{a.label}</Tog>
+                ))}
+              </div>
+            </div>
+
+            {/* moods */}
+            <div className="mb-5">
+              <div className="mb-[9px]"><Eyeb>Moods</Eyeb></div>
+              <div className="flex flex-wrap gap-1.5">
+                {MOODS.map(m => (
+                  <Tog key={m} on={moods.includes(m)} onClick={() => toggle(moods, setMoods, m)}>{m}</Tog>
+                ))}
+              </div>
+            </div>
+
+            {/* energy levels */}
+            <div className="mb-5">
+              <div className="mb-[9px]"><Eyeb>Energy levels</Eyeb></div>
+              <div className="flex flex-wrap gap-1.5">
+                {ENERGIES.map(e => (
+                  <Tog key={e} on={energies.includes(e)} onClick={() => toggle(energies, setEnergies, e)}>
+                    {e.charAt(0).toUpperCase() + e.slice(1)}
+                  </Tog>
+                ))}
+              </div>
+            </div>
+
+            {/* era */}
+            <div className="mb-5">
+              <div className="mb-[9px]"><Eyeb>Era</Eyeb></div>
+              <div className="flex flex-wrap gap-1.5">
+                {DECADES.map(d => (
+                  <Tog key={d.label} on={decades.includes(d.label)} onClick={() => toggle(decades, setDecades, d.label)}>{d.label}</Tog>
+                ))}
+              </div>
+            </div>
+
+            {/* genres */}
+            <div className="mb-5">
+              <div className="mb-[9px]"><Eyeb>Genres</Eyeb></div>
+              <input
+                value={genreInput}
+                onChange={e => setGenreInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' || e.key === ',') { e.preventDefault(); addGenre(); } }}
+                onBlur={() => { if (genreInput.trim()) addGenre(); }}
+                placeholder="Add a genre…"
+                className={searchInputClass}
+              />
+              {genres.length > 0 && (
+                <div className="mt-2.5 flex flex-wrap gap-[7px]">
+                  {genres.map(g => (
+                    <Chip key={g} onRemove={() => setGenres(genres.filter(x => x !== g))}>{g}</Chip>
+                  ))}
+                </div>
               )}
+            </div>
+
+            <div className="mb-[18px] h-px bg-separator-strong" />
+
+            {/* boolean toggles */}
+            <div className="grid gap-[13px]">
+              <SwitchRow label="Instrumental only" hint="skip vocal-forward tracks · best-effort" on={instrumentalOnly} onToggle={setInstrumentalOnly} />
+              <SwitchRow label="Recently added" hint="source from new library arrivals" on={recentlyAdded} onToggle={setRecentlyAdded} />
+              <SwitchRow label="Skip recent plays" hint="avoid tracks that recently aired" on={excludeRecent} onToggle={setExcludeRecent} />
             </div>
           </div>
 
-          {/* Tune drawer */}
-          <div className="border border-ink">
-            <button
-              type="button"
-              onClick={() => setTuneOpen(v => !v)}
-              className="flex w-full items-center justify-between border-b border-separator-strong px-3 py-2"
-            >
-              <span className="flex items-center gap-2"><Disc3 className="size-3.5 text-vermilion" /><span className="eyebrow text-muted">Tune the recipe</span></span>
-              {tuneOpen ? <ChevronUp className="size-4 text-muted" /> : <ChevronDown className="size-4 text-muted" />}
-            </button>
-            {tuneOpen && (
-              <div className="space-y-4 px-3 py-3">
-                {/* Length + spacing */}
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block">
-                    <span className="eyebrow text-muted">Length · <span className="mono-num text-ink">{count}</span> tracks</span>
-                    <input type="range" min={5} max={60} value={count} onChange={e => setCount(+e.target.value)} className="mt-1 w-full accent-[var(--accent)]" />
-                  </label>
-                  <label className="block">
-                    <span className="eyebrow text-muted">Artist gap · <span className="mono-num text-ink">{artistSpacing}</span></span>
-                    <input type="range" min={0} max={5} value={artistSpacing} onChange={e => setArtistSpacing(+e.target.value)} className="mt-1 w-full accent-[var(--accent)]" />
-                  </label>
-                </div>
+          {/* generate footer */}
+          <div className="flex-none border-t border-ink py-3.5 pr-5">
+            <div className="mb-[9px] flex gap-2">
+              <Button
+                variant="accent"
+                className="h-10 flex-1"
+                disabled={generating || !hasIntent}
+                onClick={() => generate('fresh')}
+              >
+                {generating ? 'Assembling…' : 'Generate'}
+              </Button>
+              <Button
+                variant="secondary"
+                className="h-10"
+                disabled={generating || !tracks.length}
+                onClick={() => generate('regenerate')}
+                title="new set, same recipe — excludes current tracks"
+              >
+                Regenerate
+              </Button>
+              <Button
+                variant="ghost"
+                className="h-10"
+                disabled={generating || !tracks.length}
+                onClick={() => generate('more')}
+                title="append new matches"
+              >
+                More
+              </Button>
+            </div>
+            <div className="font-mono text-[10px] leading-[1.5] text-muted">
+              Regenerate excludes current tracks · More appends new matches. Needs a vibe, seed, or any tuning.
+            </div>
+          </div>
+        </aside>
 
-                {/* Max track length */}
-                <label className="block">
-                  <span className="eyebrow text-muted">
-                    Max track length · <span className="mono-num text-ink">{maxTrackSec ? fmtDur(maxTrackSec) : 'off'}</span>
-                  </span>
-                  <input
-                    type="range"
-                    min={0}
-                    max={600}
-                    step={15}
-                    value={maxTrackSec}
-                    onChange={e => setMaxTrackSec(+e.target.value)}
-                    className="mt-1 w-full accent-[var(--accent)]"
-                    aria-label="maximum track length in seconds (0 = no cap)"
-                  />
-                  <span className="mt-0.5 block text-[10px] text-muted">only include tracks this long or shorter · slide to 0 for no cap</span>
-                </label>
+        {/* ============ RIGHT: RESULT ============ */}
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 
-                {/* Energy arc */}
-                <div>
-                  <span className="eyebrow text-muted">Energy arc</span>
-                  <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-                    {ARCS.map(a => (
+            {/* RESULT */}
+            {showResult && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                {/* Deck head — one title row with the toolbar, one meta strip.
+                    Caveats and sync fold into the strip; the list gets the rest. */}
+                <div className="flex-none border-b border-ink px-4 pt-1.5 pb-2.5 sm:px-6">
+                  <div className="flex items-center gap-3">
+                    <input
+                      value={name}
+                      onChange={e => setName(e.target.value)}
+                      placeholder="Untitled set"
+                      className="min-w-0 flex-1 border-b border-transparent bg-transparent py-0.5 font-display text-2xl font-bold tracking-[-0.01em] text-ink outline-none placeholder:text-muted/50 hover:border-separator-soft focus:border-[var(--accent)]"
+                    />
+                    <div className="flex flex-none items-center gap-1.5">
+                      <Button variant="ghost" size="sm" className="h-8" onClick={openBrowse} title="open a playlist from the music server">
+                        <FolderOpen />Open
+                      </Button>
+                      <Button variant="ghost" size="sm" className="h-8" onClick={doNew} title="start a blank draft">
+                        <FilePlus2 />New
+                      </Button>
+                      <Button variant="accent" size="sm" className="h-8" disabled={saveDisabled} onClick={openSave} title="save to Navidrome">
+                        <Save />{existingId ? 'Update' : 'Save'}
+                      </Button>
+                    </div>
+                  </div>
+                  {description && (
+                    <p className="mt-0.5 line-clamp-1 text-[13px] text-muted italic" title={description}>{description}</p>
+                  )}
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-ink">
+                    {poolSize !== null && (usedFallback ? (
+                      <Chip>▲ Fallback</Chip>
+                    ) : (
+                      <Chip accent>✦ AI-curated</Chip>
+                    ))}
+                    <span><b>{tracks.length}</b> tracks</span>
+                    <span className="text-separator-strong">/</span>
+                    <span><b>{fmtRun(totalSec)}</b></span>
+                    {poolSize !== null && (
+                      <>
+                        <span className="text-separator-strong">/</span>
+                        <span className="text-muted">{poolVerb} {chosenCount} from {poolSize} in pool</span>
+                      </>
+                    )}
+                    {(reasons.length > 0 || usedFallback) && (
                       <button
-                        key={a.id}
                         type="button"
-                        onClick={() => setArc(a.id)}
-                        title={a.hint}
+                        onClick={() => setCaveatsOpen(v => !v)}
                         className={cn(
-                          'border px-2 py-1.5 text-[11px] font-bold tracking-wide uppercase transition',
-                          arc === a.id ? 'border-ink bg-ink text-bg' : 'border-separator-strong text-muted hover:border-ink hover:text-ink',
+                          'flex items-center gap-1 border px-1.5 py-px text-[10px] font-bold uppercase transition',
+                          caveatsOpen ? 'border-ink text-ink' : 'border-separator-strong text-muted hover:border-ink hover:text-ink',
                         )}
                       >
-                        {a.label}
+                        △ {usedFallback ? 'no-AI details' : `${reasons.length} caveat${reasons.length === 1 ? '' : 's'}`}
+                        {caveatsOpen ? <ChevronUp className="size-3" /> : <ChevronDown className="size-3" />}
                       </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Moods */}
-                <div>
-                  <span className="eyebrow text-muted">Moods</span>
-                  <div className="mt-1.5 flex flex-wrap gap-1.5">
-                    {MOODS.map(m => (
-                      <button key={m} type="button" onClick={() => toggle(moods, setMoods, m)}
-                        className={cn('border px-2 py-1 text-[11px] font-semibold capitalize transition',
-                          moods.includes(m) ? 'border-vermilion bg-vermilion/10 text-vermilion' : 'border-separator-strong text-muted hover:border-ink hover:text-ink')}>
-                        {m}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* Energies + decades */}
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                  <div>
-                    <span className="eyebrow text-muted">Energy</span>
-                    <div className="mt-1.5 flex gap-1.5">
-                      {ENERGIES.map(e => (
-                        <button key={e} type="button" onClick={() => toggle(energies, setEnergies, e)}
-                          className={cn('flex-1 border px-2 py-1 text-[11px] font-bold uppercase transition',
-                            energies.includes(e) ? 'border-ink bg-ink text-bg' : 'border-separator-strong text-muted hover:border-ink')}>
-                          {e}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div>
-                    <span className="eyebrow text-muted">Era</span>
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                      {DECADES.map(d => (
-                        <button key={d.label} type="button" onClick={() => toggle(decades, setDecades, d.label)}
-                          className={cn('border px-1.5 py-1 text-[11px] font-bold uppercase transition',
-                            decades.includes(d.label) ? 'border-ink bg-ink text-bg' : 'border-separator-strong text-muted hover:border-ink')}>
-                          {d.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Genres */}
-                <label className="block">
-                  <span className="eyebrow text-muted">Genres — comma separated</span>
-                  <input value={genresText} onChange={e => setGenresText(e.target.value)} placeholder="jazz, ambient, hip-hop"
-                    className="mt-1 w-full border border-separator-strong bg-bg px-2 py-1.5 text-sm text-ink outline-none focus:border-ink" />
-                </label>
-
-                {/* Switch-row knobs */}
-                <div className="grid grid-cols-1 gap-2 border-t border-separator-strong pt-3">
-                  <KnobSwitch icon={<Music4 className="size-3.5" />} label="Instrumental only" hint="skip vocal-forward tracks" on={instrumentalOnly} onToggle={() => setInstrumentalOnly(v => !v)} />
-                  <KnobSwitch icon={<Radio className="size-3.5" />} label="Recently added" hint="seed from new arrivals" on={recentlyAdded} onToggle={() => setRecentlyAdded(v => !v)} />
-                  <KnobSwitch icon={<RefreshCw className="size-3.5" />} label="Skip recent plays" hint="avoid what just aired" on={excludeRecent} onToggle={() => setExcludeRecent(v => !v)} />
-                </div>
-              </div>
-            )}
-          </div>
-        </section>
-
-        {/* ── DECK ── */}
-        <section className="border border-ink">
-          {/* Deck head — tape counter + arc */}
-          <div className="border-b border-ink bg-ink-soft px-3 py-3">
-            <div className="flex items-end justify-between gap-3">
-              <input
-                value={name}
-                onChange={e => setName(e.target.value)}
-                placeholder="Untitled set"
-                className="min-w-0 flex-1 border-b border-transparent bg-transparent text-xl font-black text-ink outline-none placeholder:text-muted/50 focus:border-ink"
-              />
-              <div className="shrink-0 text-right">
-                <div className="mono-num text-2xl leading-none font-black text-ink">{fmtDur(totalSec)}</div>
-                <div className="eyebrow text-muted"><span className="mono-num">{tracks.length}</span> tracks</div>
-              </div>
-            </div>
-            <ArcSpark tracks={tracks} className="mt-2" />
-          </div>
-
-          {/* Reasons / fallback strip */}
-          {(reasons.length > 0 || usedFallback) && (
-            <div className="border-b border-separator-strong bg-vermilion/[0.06] px-3 py-2 text-[11px] text-muted">
-              {usedFallback && <div className="mb-0.5 font-bold text-vermilion">Deterministic fallback — the DJ model was unavailable, so this was arranged by energy/relevance.</div>}
-              {reasons.map((r, i) => <div key={i}>· {r}</div>)}
-            </div>
-          )}
-
-          {/* Manual add */}
-          <div className="relative border-b border-separator-strong px-3 py-2">
-            <Search className="pointer-events-none absolute top-1/2 left-5 size-3.5 -translate-y-1/2 text-muted" />
-            <input
-              value={addQuery}
-              onChange={e => setAddQuery(e.target.value)}
-              placeholder="add a track by hand…"
-              className="w-full border border-separator-strong bg-bg py-1.5 pr-2 pl-7 text-sm text-ink outline-none focus:border-ink"
-            />
-            {addResults && addResults.length > 0 && (
-              <div className="absolute right-3 left-3 z-20 mt-1 max-h-64 overflow-auto border border-ink bg-bg shadow-lg">
-                {addResults.map(s => (
-                  <button key={s.id} type="button" onClick={() => addTrack(s)}
-                    className="flex w-full items-center gap-2 border-b border-separator-strong px-2 py-1.5 text-left text-sm hover:bg-ink-soft">
-                    <Plus className="size-3 text-vermilion" />
-                    <span className="truncate"><span className="font-semibold text-ink">{s.title}</span> <span className="text-muted">· {s.artist}</span></span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Tracklist */}
-          <div className="max-h-[58vh] overflow-auto">
-            {tracks.length === 0 ? (
-              <div className="flex flex-col items-center justify-center gap-2 px-4 py-16 text-center">
-                <Disc3 className="size-8 text-muted/50" />
-                <p className="text-sm text-muted">No tracks yet. Describe a vibe and hit <span className="font-bold text-vermilion">Generate</span>, or open an existing playlist.</p>
-              </div>
-            ) : (
-              <ol>
-                {tracks.map((t, i) => (
-                  <li
-                    key={`${t.id}-${i}`}
-                    draggable
-                    onDragStart={() => { dragIndex.current = i; }}
-                    onDragOver={e => e.preventDefault()}
-                    onDrop={() => { if (dragIndex.current != null) move(dragIndex.current, i); dragIndex.current = null; }}
-                    className={cn(
-                      'group flex items-center gap-2 border-b border-separator-strong px-2 py-1.5',
-                      dupeIds.has(t.id) && 'bg-vermilion/[0.06]',
                     )}
-                  >
-                    <GripVertical className="size-4 shrink-0 cursor-grab text-muted/50 group-hover:text-muted" />
-                    <span className="mono-num w-6 shrink-0 text-right text-xs text-muted">{i + 1}</span>
-                    <img
-                      src={`${API}/cover/${encodeURIComponent(t.id)}`}
-                      alt=""
-                      loading="lazy"
-                      className="size-9 shrink-0 border border-separator-strong bg-ink-soft object-cover"
-                    />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-sm font-semibold text-ink">{t.title}</span>
-                      <span className="block truncate text-xs text-muted">{t.artist}</span>
-                    </span>
-                    <span className="hidden shrink-0 items-center gap-1 sm:flex">
-                      {dupeIds.has(t.id) && <MetaChip accent>dupe</MetaChip>}
-                      {t.instrumental === true && <MetaChip>inst</MetaChip>}
-                      {t.energy && <MetaChip>{t.energy}</MetaChip>}
-                    </span>
-                    <span className="mono-num w-10 shrink-0 text-right text-xs text-muted">{fmtDur(t.durationSec || 0)}</span>
-                    <span className="flex shrink-0 items-center opacity-0 transition group-hover:opacity-100">
-                      <button type="button" onClick={() => move(i, i - 1)} disabled={i === 0} title="up" className="p-0.5 text-muted hover:text-ink disabled:opacity-30"><ChevronUp className="size-4" /></button>
-                      <button type="button" onClick={() => move(i, i + 1)} disabled={i === tracks.length - 1} title="down" className="p-0.5 text-muted hover:text-ink disabled:opacity-30"><ChevronDown className="size-4" /></button>
-                      <button type="button" onClick={() => removeAt(i)} title="remove" className="p-0.5 text-muted hover:text-vermilion"><X className="size-4" /></button>
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </div>
+                    {existingId && (keepInSync || syncInfo) && (
+                      <span className="flex items-center gap-2 text-muted">
+                        <span className="text-separator-strong">/</span>
+                        <span>synced {syncInfo?.lastSyncedAt ? relTime(syncInfo.lastSyncedAt) : '· not yet'}</span>
+                        <button
+                          type="button"
+                          onClick={syncNow}
+                          disabled={syncing}
+                          title="check the library for new matches now"
+                          className="flex items-center gap-1 border border-separator-strong px-1.5 py-px text-[10px] font-bold uppercase transition hover:border-ink hover:text-ink disabled:opacity-40"
+                        >
+                          <RefreshCw className={cn('size-3', syncing && 'animate-spin')} />
+                          {syncing ? 'syncing…' : 'sync now'}
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                </div>
 
-          {/* Keep-in-sync row */}
-          <div className="flex items-center justify-between gap-2 border-t border-separator-strong bg-bg px-3 py-2">
-            <KnobSwitch
-              icon={<RefreshCw className="size-3.5" />}
-              label="Keep in sync"
-              hint="auto-add new library songs that match this recipe"
-              on={keepInSync}
-              onToggle={() => setKeepInSync(v => !v)}
-            />
-            {existingId && (keepInSync || syncInfo) && (
-              <div className="flex shrink-0 items-center gap-2">
-                {syncInfo && (
-                  <span className="text-[10px] text-muted">
-                    {syncInfo.lastSyncedAt ? `synced ${new Date(syncInfo.lastSyncedAt).toLocaleDateString()}` : 'not synced yet'}
-                  </span>
+                {/* caveats detail — opt-in fold, auto-opened on fallback */}
+                {caveatsOpen && (reasons.length > 0 || usedFallback) && (
+                  <div className="flex-none border-b border-separator-soft bg-ink-soft px-4 py-2 font-mono text-[11px] leading-[1.6] text-muted sm:px-6">
+                    {usedFallback && (
+                      <div className="font-bold text-vermilion">
+                        arranged without AI — the curation model was unreachable, so this set was ordered by rules (energy + relevance). Regenerate to retry the curator.
+                      </div>
+                    )}
+                    {reasons.map((r, i) => <div key={i}>· {r}</div>)}
+                  </div>
                 )}
-                <Btn sm onClick={syncNow} disabled={syncing} title="check the library for new matches now">
-                  <RefreshCw className={cn('mr-1 size-3.5', syncing && 'animate-spin')} />
-                  {syncing ? 'Syncing…' : 'Sync now'}
-                </Btn>
+
+                <EnergyGraph
+                  tracks={tracks}
+                  arc={arc}
+                  open={graphOpen}
+                  onToggle={() => setGraphOpen(v => !v)}
+                  onBarClick={jumpToRow}
+                />
+
+                {/* add track (slim) */}
+                <div className="relative flex flex-none items-center gap-2.5 border-b border-separator-soft px-4 py-2 sm:px-6">
+                  <Search className="size-4 flex-none text-muted" />
+                  <input
+                    value={addQuery}
+                    onChange={e => setAddQuery(e.target.value)}
+                    placeholder="Add any track from your library…"
+                    className="w-full bg-transparent text-sm text-ink outline-none placeholder:text-muted/60"
+                  />
+                  {addResults && addResults.length > 0 && (
+                    <div className="absolute top-full right-4 left-4 z-20 max-h-64 overflow-auto border border-ink bg-bg shadow-drawer sm:right-6 sm:left-6">
+                      {addResults.map(s => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => addTrack(s)}
+                          className="flex w-full items-center justify-between gap-2 border-b border-separator-soft px-[11px] py-2 text-left last:border-b-0 hover:bg-ink-soft"
+                        >
+                          <span className="min-w-0">
+                            <span className="block truncate text-[13px]">{s.title}</span>
+                            <span className="block truncate font-mono text-[10px] text-muted">{s.artist}{s.album ? ` · ${s.album}` : ''}</span>
+                          </span>
+                          <Plus className="size-3.5 flex-none text-muted" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* track list — the star of the screen; every spare pixel is here */}
+                <div ref={listRef} className="flex-1 pb-8 lg:overflow-y-auto">
+                  {tracks.map((t, i) => (
+                    <div
+                      key={`${t.id}-${i}`}
+                      data-row={i}
+                      draggable
+                      onDragStart={() => { dragIndex.current = i; }}
+                      onDragOver={e => e.preventDefault()}
+                      onDrop={() => { if (dragIndex.current != null) move(dragIndex.current, i); dragIndex.current = null; }}
+                      className={cn(
+                        'group grid grid-cols-[24px_44px_minmax(0,1fr)_auto] items-center gap-3 border-b border-separator-soft px-4 py-[9px] transition-colors hover:bg-ink-soft sm:grid-cols-[18px_24px_44px_minmax(0,1fr)_auto] sm:px-6',
+                        hotRow === i && 'bg-vermilion/10',
+                      )}
+                    >
+                      <div className="hidden cursor-grab place-items-center text-muted sm:grid">
+                        <GripVertical className="size-4" />
+                      </div>
+                      <div className="text-right font-mono text-xs text-muted">{i + 1}</div>
+                      <img
+                        src={`${API}/cover/${encodeURIComponent(t.id)}`}
+                        alt=""
+                        loading="lazy"
+                        className="size-11 border border-ink bg-ink-soft object-cover"
+                      />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate text-sm font-semibold">{t.title}</span>
+                          {dupeIds.has(t.id) && (
+                            <span className="flex-none border border-[var(--accent)] px-1 py-px font-mono text-[9px] font-bold tracking-[0.08em] text-vermilion">DUPLICATE</span>
+                          )}
+                        </div>
+                        <div className="mt-[3px] truncate font-mono text-[11px] text-muted">
+                          {t.artist}{t.album ? ` · ${t.album}` : ''}
+                        </div>
+                        {((t.moods && t.moods.length > 0) || t.instrumental === true) && (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            {(t.moods || []).slice(0, 2).map(m => (
+                              <span key={m} className="border border-separator-soft px-[5px] py-px font-mono text-[9px] tracking-[0.04em] text-muted uppercase">{m}</span>
+                            ))}
+                            {t.instrumental === true && (
+                              <span className="border border-separator-soft px-[5px] py-px font-mono text-[9px] tracking-[0.04em] text-muted uppercase">instrumental</span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="flex flex-col items-end gap-[3px]">
+                          <span className="font-mono text-xs text-ink">{fmtDur(t.durationSec || 0)}</span>
+                          <span className="flex items-center gap-[5px] font-mono text-[10px] text-muted">
+                            <span className={cn('inline-block size-[7px]', energyBgClass(t.energy))} />
+                            {energyLabel(t.energy)}{t.year ? ` · ${t.year}` : ''}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-0.5 transition-opacity lg:opacity-0 lg:group-hover:opacity-100">
+                          <IconBtn onClick={() => move(i, i - 1)} disabled={i === 0} title="Move up"><ArrowUp className="size-[15px]" /></IconBtn>
+                          <IconBtn onClick={() => move(i, i + 1)} disabled={i === tracks.length - 1} title="Move down"><ArrowDown className="size-[15px]" /></IconBtn>
+                          <IconBtn onClick={() => removeAt(i)} title="Remove"><X className="size-[15px]" /></IconBtn>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* EMPTY */}
+            {showEmpty && (
+              <div className="flex flex-1 items-center justify-center p-8 lg:p-10">
+                <div className="w-full max-w-[520px]">
+                  <div className="mb-2.5 font-mono text-[10px] font-bold tracking-[0.2em] text-muted uppercase">New draft</div>
+                  <h2 className="mb-2.5 font-display text-[32px] font-bold tracking-[-0.01em]">
+                    Nothing in the set yet.
+                  </h2>
+                  <p className="mb-[26px] text-sm leading-[1.55] text-muted">
+                    Build a playlist two ways. The station reads its music library and returns an ordered set you can reshape by hand before saving to Navidrome.
+                  </p>
+                  <div className="grid gap-3">
+                    <div className="flex gap-3.5 border border-ink p-4">
+                      <div className="grid size-[26px] flex-none place-items-center border border-ink bg-[var(--accent)] font-mono text-xs font-bold text-white">1</div>
+                      <div>
+                        <div className="mb-0.5 text-sm font-bold">Describe a vibe, then Generate</div>
+                        <div className="text-[13px] leading-[1.5] text-muted">Type a mood on the left, optionally add seed tracks and tuning, and let the curator assemble the set.</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between gap-3.5 border border-separator-strong p-4">
+                      <div className="flex gap-3.5">
+                        <div className="grid size-[26px] flex-none place-items-center border border-ink font-mono text-xs font-bold">2</div>
+                        <div>
+                          <div className="mb-0.5 text-sm font-bold">Open an existing playlist</div>
+                          <div className="text-[13px] leading-[1.5] text-muted">Load one from the music server to edit or regenerate.</div>
+                        </div>
+                      </div>
+                      <Button variant="secondary" size="sm" className="h-8" onClick={openBrowse}>Browse</Button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* GENERATING */}
+            {view === 'generating' && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <div className="flex flex-none items-center justify-center gap-4 px-6 pt-10 pb-[26px]">
+                  <div className="size-[34px] flex-none animate-spin rounded-full border-2 border-separator-strong border-t-[var(--accent)]" />
+                  <div>
+                    <div className="font-display text-[22px] font-bold">Assembling your set…</div>
+                    <div className="mt-1 font-mono text-[11px] text-muted">Scanning candidate tracks · sequencing by energy arc</div>
+                  </div>
+                </div>
+                <div className="flex-1 overflow-hidden px-4 sm:px-6">
+                  <div className="grid gap-[9px]">
+                    {[0, 1, 2, 3, 4].map(i => (
+                      <div key={i} className="h-[60px] animate-pulse border border-separator-soft bg-ink-soft" />
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* NO MATCH */}
+            {view === 'nomatch' && (
+              <div className="flex flex-1 items-center justify-center p-8 lg:p-10">
+                <div className="max-w-[460px] text-center">
+                  <div className="mb-2.5 font-mono text-[10px] font-bold tracking-[0.2em] text-muted uppercase">0 results</div>
+                  <h2 className="mb-2.5 font-display text-[28px] font-bold">
+                    Nothing matched this recipe.
+                  </h2>
+                  <p className="mb-[22px] text-sm leading-[1.55] text-muted">
+                    The filters were too tight for your library. Try widening the era, allowing more moods or energy levels, turning off <span className="text-ink">Instrumental only</span>, or dropping a genre.
+                  </p>
+                  <Button variant="accent" className="h-10" onClick={() => generate(lastMode.current)}>Loosen &amp; try again</Button>
+                </div>
+              </div>
+            )}
+
+            {/* ERROR */}
+            {view === 'error' && (
+              <div className="flex flex-1 items-center justify-center p-8 lg:p-10">
+                <div className="w-full max-w-[480px]">
+                  <V3Alert tone="error" title="generation failed">
+                    {errorMsg || 'The request to the curation service failed.'} Your recipe is untouched. Try again in a moment.
+                  </V3Alert>
+                  <div className="mt-4 flex gap-2.5">
+                    <Button variant="accent" className="h-10" onClick={() => generate(lastMode.current)}>Retry</Button>
+                    <Button variant="ghost" className="h-10" onClick={doNew}>Start over</Button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
 
-          {/* Save toolbar */}
-          <div className="flex items-center gap-2 border-t border-ink bg-bg px-3 py-2.5">
-            <button
-              type="button"
-              onClick={save}
-              disabled={saving || !tracks.length || !name.trim()}
-              className={cn(
-                'flex flex-1 items-center justify-center gap-2 border border-ink px-4 py-2 text-sm font-black tracking-eyebrow uppercase transition',
-                saving || !tracks.length || !name.trim() ? 'cursor-not-allowed bg-ink-soft text-muted' : 'bg-ink text-bg hover:bg-ink/90',
-              )}
-            >
-              <Save className="size-4" />
-              {saving ? 'Saving…' : existingId ? 'Update playlist' : 'Save to Navidrome'}
-            </button>
-            {savedId && (
-              <a href="/admin/shows" className="border border-vermilion px-3 py-2 text-[11px] font-bold tracking-eyebrow text-vermilion uppercase hover:bg-vermilion/10">
-                Pin to a show →
-              </a>
-            )}
-          </div>
         </section>
       </div>
 
-      {/* Open-existing picker */}
-      {pickerOpen && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center bg-ink/40 p-4 pt-24" onClick={() => setPickerOpen(false)}>
-          <div className="w-full max-w-md border border-ink bg-bg shadow-xl" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between border-b border-ink px-3 py-2">
-              <span className="eyebrow text-muted">Open a playlist</span>
-              <button type="button" onClick={() => setPickerOpen(false)}><X className="size-4 text-muted hover:text-ink" /></button>
+      {/* TOAST */}
+      {toast && (
+        <div className="fixed top-[70px] right-6 z-[60] flex max-w-[340px] items-center gap-3 bg-ink px-3.5 py-3 text-bg shadow-drawer">
+          <span className="text-[13px] leading-[1.4]">{toast}</span>
+          <button type="button" onClick={() => setToast('')} className="flex-none text-bg/70 hover:text-bg" title="dismiss">
+            <X className="size-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* OPEN-EXISTING MODAL */}
+      {modal === 'open' && (
+        <div
+          className="fixed inset-0 z-[80] flex items-start justify-center bg-[rgba(20,18,14,0.42)] p-5 pt-16"
+          onClick={() => setModal(null)}
+        >
+          <div
+            className="flex max-h-[78vh] w-full max-w-[560px] flex-col border border-ink bg-bg shadow-drawer"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-ink px-5 py-4">
+              <div>
+                <div className="font-mono text-[10px] font-bold tracking-[0.18em] text-muted uppercase">Music server</div>
+                <h3 className="mt-0.5 font-display text-xl font-bold">Open a playlist</h3>
+              </div>
+              <IconBtn onClick={() => setModal(null)} title="close"><X className="size-4" /></IconBtn>
             </div>
-            <div className="max-h-[50vh] overflow-auto">
-              {playlists === null ? (
+            <div className="px-5 pt-3.5 pb-2.5">
+              <input
+                value={playlistQuery}
+                onChange={e => setPlaylistQuery(e.target.value)}
+                placeholder="Search playlists…"
+                className={searchInputClass}
+              />
+            </div>
+            <div className="flex-1 overflow-y-auto px-5 pb-4">
+              {filteredPlaylists === null ? (
                 <div className="px-3 py-8 text-center text-sm text-muted">Loading…</div>
-              ) : playlists.length === 0 ? (
-                <div className="px-3 py-8 text-center text-sm text-muted">No playlists yet.</div>
-              ) : playlists.map(p => (
-                <button key={p.id} type="button" onClick={() => loadPlaylist(p)}
-                  className="flex w-full items-center justify-between gap-2 border-b border-separator-strong px-3 py-2 text-left hover:bg-ink-soft">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-sm font-semibold text-ink">{p.name}</span>
-                    {p.synced && <MetaChip accent>synced</MetaChip>}
+              ) : filteredPlaylists.length === 0 ? (
+                <div className="px-3 py-8 text-center text-sm text-muted">
+                  {playlistQuery ? 'No playlists match.' : 'No playlists yet.'}
+                </div>
+              ) : filteredPlaylists.map(p => (
+                <div
+                  key={p.id}
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => loadPlaylist(p)}
+                  onKeyDown={e => { if (e.key === 'Enter') loadPlaylist(p); }}
+                  className="mt-2 flex w-full cursor-pointer items-center justify-between gap-3 border border-separator-soft p-3 text-left transition-colors hover:bg-ink-soft"
+                >
+                  <span className="min-w-0">
+                    <span className="flex items-center gap-2">
+                      <span className="truncate text-sm font-semibold">{p.name}</span>
+                      {p.synced && (
+                        <span className="flex-none border border-[var(--accent)] px-[5px] py-px font-mono text-[9px] font-bold tracking-[0.06em] text-vermilion">SYNCED</span>
+                      )}
+                    </span>
+                    <span className="mt-[3px] block font-mono text-[11px] text-muted">
+                      {p.songCount} tracks{p.synced && p.lastSyncedAt ? ` · synced ${relTime(p.lastSyncedAt)}` : ''}
+                    </span>
                   </span>
-                  <span className="mono-num shrink-0 text-xs text-muted">{p.songCount}</span>
-                </button>
+                  <span className="flex flex-none items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={e => {
+                        e.stopPropagation();
+                        if (armedDelete === p.id) { void deletePlaylist(p); }
+                        else { setArmedDelete(p.id); window.setTimeout(() => setArmedDelete(a => (a === p.id ? null : a)), 2600); }
+                      }}
+                      title={armedDelete === p.id ? 'click again to delete from Navidrome' : 'delete playlist'}
+                      className={cn(
+                        'flex items-center gap-1 border px-1.5 py-1 font-mono text-[9px] font-bold tracking-[0.06em] uppercase transition',
+                        armedDelete === p.id
+                          ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                          : 'border-transparent text-muted hover:border-separator-strong hover:text-ink',
+                      )}
+                    >
+                      <Trash2 className="size-3.5" />
+                      {armedDelete === p.id && 'sure?'}
+                    </button>
+                    <ChevronRight className="size-4 flex-none text-muted" />
+                  </span>
+                </div>
               ))}
             </div>
           </div>
         </div>
       )}
 
-      {/* Toast */}
-      {toast && (
-        <div className={cn(
-          'fixed bottom-6 left-1/2 z-50 -translate-x-1/2 border px-4 py-2 text-sm font-semibold shadow-lg',
-          toast.kind === 'ok' ? 'border-ink bg-ink text-bg' : 'border-vermilion bg-vermilion text-white',
-        )}>
-          {toast.msg}
+      {/* SAVE MODAL */}
+      {modal === 'save' && (
+        <div
+          className="fixed inset-0 z-[80] flex items-start justify-center bg-[rgba(20,18,14,0.42)] p-5 pt-16"
+          onClick={() => setModal(null)}
+        >
+          <div className="w-full max-w-[480px] border border-ink bg-bg shadow-drawer" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between border-b border-ink px-5 py-4">
+              <div>
+                <div className="font-mono text-[10px] font-bold tracking-[0.18em] text-muted uppercase">
+                  {tracks.length} tracks · {fmtRun(totalSec)}
+                </div>
+                <h3 className="mt-0.5 font-display text-xl font-bold">Save playlist</h3>
+              </div>
+              <IconBtn onClick={() => setModal(null)} title="close"><X className="size-4" /></IconBtn>
+            </div>
+            <div className="grid gap-4 px-5 py-[18px]">
+              <div>
+                <div className="mb-[7px]"><Eyeb>Name</Eyeb></div>
+                <input value={saveName} onChange={e => setSaveName(e.target.value)} placeholder="Untitled set" className={searchInputClass} />
+              </div>
+              {existingId && (
+                <div className="grid gap-2">
+                  {([
+                    { id: 'overwrite' as const, label: 'Overwrite existing', hint: `updates “${name || saveName || 'this playlist'}” on the server` },
+                    { id: 'create' as const, label: 'Create a new playlist', hint: 'leaves the original untouched' },
+                  ]).map(opt => {
+                    const on = saveMode === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setSaveMode(opt.id)}
+                        className={cn('flex items-center gap-[11px] border p-3 text-left', on ? 'border-[var(--accent)]' : 'border-separator-strong')}
+                      >
+                        <span className={cn('grid size-3.5 flex-none place-items-center rounded-full border', on ? 'border-[var(--accent)]' : 'border-separator-strong')}>
+                          {on && <span className="size-[7px] rounded-full bg-[var(--accent)]" />}
+                        </span>
+                        <span>
+                          <span className="block text-[13px] font-semibold">{opt.label}</span>
+                          <span className="block font-mono text-[10px] text-muted">{opt.hint}</span>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3 border-t border-separator-soft pt-3.5">
+                <div>
+                  <div className="text-[13px] font-semibold">Keep in sync</div>
+                  <div className="max-w-[280px] font-mono text-[10px] leading-[1.5] text-muted">
+                    Remembers this recipe and appends new matching songs after library tagging.
+                  </div>
+                </div>
+                <Switch checked={saveSync} onCheckedChange={setSaveSync} />
+              </div>
+            </div>
+            <div className="flex items-center justify-between gap-3 border-t border-ink px-5 py-3.5">
+              <span className="font-mono text-[10px] text-muted">
+                Then pin it to a show in <a href="/admin/shows" className="text-vermilion hover:text-ink">Shows</a> →
+              </span>
+              <div className="flex gap-2.5">
+                <Button variant="ghost" className="h-10" onClick={() => setModal(null)}>Cancel</Button>
+                <Button variant="accent" className="h-10" disabled={saving || !saveName.trim()} onClick={doSave}>
+                  {saving ? 'Saving…' : 'Save playlist'}
+                </Button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>
-  );
-}
-
-function KnobSwitch({ icon, label, hint, on, onToggle }: { icon: React.ReactNode; label: string; hint: string; on: boolean; onToggle: () => void }) {
-  return (
-    <button type="button" onClick={onToggle} className="flex items-center justify-between gap-2 text-left">
-      <span className="flex items-center gap-2">
-        <span className={cn('flex size-6 items-center justify-center border', on ? 'border-vermilion text-vermilion' : 'border-separator-strong text-muted')}>{icon}</span>
-        <span>
-          <span className="block text-sm font-semibold text-ink">{label}</span>
-          <span className="block text-[11px] text-muted">{hint}</span>
-        </span>
-      </span>
-      <span className={cn('relative h-5 w-9 shrink-0 border transition', on ? 'border-vermilion bg-vermilion/20' : 'border-separator-strong bg-transparent')}>
-        <span className={cn('absolute top-0.5 size-3.5 transition-all', on ? 'left-[18px] bg-vermilion' : 'left-0.5 bg-muted')} />
-      </span>
-    </button>
   );
 }
