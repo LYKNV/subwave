@@ -1,5 +1,4 @@
-// The magical playlist builder engine (spec:
-// docs/superpowers/specs/2026-07-15-magical-playlist-builder-design.md).
+// The magical playlist builder engine.
 //
 // Two stages, both fed by machinery that already exists:
 //   1. buildCandidatePool — merge candidates from vector (searchBySound /

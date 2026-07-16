@@ -1,7 +1,6 @@
 // Append-only sync for recipe-backed playlists. Re-resolves a saved recipe and
 // appends library songs that are (a) new since the last sync and (b) still match
 // the recipe — reusing the builder's own candidate-pool engine, no LLM call.
-// See docs/superpowers/specs/2026-07-15-playlist-recipe-sync-design.md.
 
 import * as subsonic from './subsonic.js';
 import * as library from './library.js';

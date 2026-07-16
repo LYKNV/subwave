@@ -1,8 +1,6 @@
 'use client';
 
 /* Magical Playlist Builder — the "studio console" screen.
-   Spec:   docs/superpowers/specs/2026-07-15-magical-playlist-builder-design.md
-   Design: docs/playlist-builder-functional-brief/project/Playlist Builder.dc.html
 
    Two panes: a fixed RECIPE rail (vibe prompt + seeds + tuning → Generate /
    Regenerate / More) and a RESULT pane that is a real state machine — result,

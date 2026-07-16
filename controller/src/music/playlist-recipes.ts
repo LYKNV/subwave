@@ -2,7 +2,6 @@
 // stays a plain Navidrome playlist (the track store); this side-file remembers
 // the vibe/seed/knob recipe that built it, so the sync engine can re-resolve it
 // and append newly-matching library songs. See
-// docs/superpowers/specs/2026-07-15-playlist-recipe-sync-design.md.
 //
 // Small, single-purpose: load / persist (atomic) + get / list / upsert / remove.
 // A missing file is an empty store; a corrupt file degrades to empty (never
