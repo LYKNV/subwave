@@ -20,6 +20,9 @@ import {
   orderByIds,
   fitToCount,
   totalDurationSec,
+  filterByDurationBand,
+  filterByBpmBand,
+  filterByArtists,
   type PoolTrack,
 } from '../src/music/playlist-gen-pure.js';
 
@@ -258,6 +261,68 @@ function t(id: string, over: Partial<PoolTrack> = {}): PoolTrack {
 {
   assert.equal(totalDurationSec([{ durationSec: 100 }, { durationSec: 50 }, { durationSec: null }]), 150);
   assert.equal(totalDurationSec([]), 0);
+}
+
+// ── filterByDurationBand ─────────────────────────────────────────────────────
+{
+  const pool = [
+    t('short', { durationSec: 67 }),
+    t('inband', { durationSec: 180 }),
+    t('edge-lo', { durationSec: 120 }),
+    t('edge-hi', { durationSec: 240 }),
+    t('long', { durationSec: 300 }),
+    t('unknown', { durationSec: null }),
+    t('zero', { durationSec: 0 }),
+  ];
+  // Full band: known out-of-band drops, band edges are inclusive, unknown stays.
+  const band = filterByDurationBand(pool, 120, 240).map((x) => x.id);
+  assert.deepEqual(band, ['inband', 'edge-lo', 'edge-hi', 'unknown', 'zero'],
+    'band keeps edges + unknown/zero-as-unknown, drops known out-of-band');
+  // Min-only and max-only.
+  assert.ok(!filterByDurationBand(pool, 120, 0).some((x) => x.id === 'short'), 'min-only drops short');
+  assert.ok(filterByDurationBand(pool, 120, 0).some((x) => x.id === 'long'), 'min-only keeps long');
+  assert.ok(!filterByDurationBand(pool, 0, 240).some((x) => x.id === 'long'), 'max-only drops long');
+  assert.ok(filterByDurationBand(pool, 0, 240).some((x) => x.id === 'short'), 'max-only keeps short');
+  // No band = identity (fresh array).
+  assert.equal(filterByDurationBand(pool, 0, 0).length, pool.length);
+}
+
+// ── filterByBpmBand ──────────────────────────────────────────────────────────
+{
+  const pool = [
+    t('slow', { bpm: 70 }),
+    t('mid', { bpm: 120 }),
+    t('fast', { bpm: 180 }),
+    t('unknown', { bpm: null }),
+    t('zero', { bpm: 0 }),
+  ];
+  const band = filterByBpmBand(pool, 100, 140).map((x) => x.id);
+  assert.deepEqual(band, ['mid', 'unknown', 'zero'], 'bpm band keeps in-band + un-analysed');
+  assert.deepEqual(filterByBpmBand(pool, 150, 0).map((x) => x.id), ['fast', 'unknown', 'zero'], 'min-only');
+  assert.deepEqual(filterByBpmBand(pool, 0, 90).map((x) => x.id), ['slow', 'unknown', 'zero'], 'max-only');
+  assert.equal(filterByBpmBand(pool, 0, 0).length, pool.length, 'no band = identity');
+}
+
+// ── filterByArtists ──────────────────────────────────────────────────────────
+{
+  const pool = [
+    t('solo', { artist: 'Karan Aujla' }),
+    t('collab', { artist: 'Karan Aujla & Ikky' }),
+    t('feat', { artist: 'DIVINE feat. Karan Aujla' }),
+    t('caseless', { artist: 'KARAN AUJLA' }),
+    t('other', { artist: 'Diljit Dosanjh' }),
+    t('blank', { artist: '' }),
+    t('nullart', { artist: null }),
+  ];
+  const hits = filterByArtists(pool, ['Karan Aujla']).map((x) => x.id);
+  assert.deepEqual(hits, ['solo', 'collab', 'feat', 'caseless'],
+    'credit substring match is case-insensitive; blank credits drop');
+  // Multiple artists OR together.
+  const both = filterByArtists(pool, ['karan aujla', 'diljit']).map((x) => x.id);
+  assert.ok(both.includes('other') && both.includes('solo'), 'multiple artists OR');
+  // Empty / whitespace-only list = identity.
+  assert.equal(filterByArtists(pool, []).length, pool.length);
+  assert.equal(filterByArtists(pool, ['  ']).length, pool.length, 'blank names ignored');
 }
 
 console.log('✓ playlist-gen-pure tests passed');

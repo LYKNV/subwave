@@ -242,6 +242,41 @@ export function fitToCount(
   return [...selected, ...filler];
 }
 
+// ── Recipe band/allow-list filters ───────────────────────────────────────────
+// Shared soft-filter semantics: a KNOWN value outside the band drops the row;
+// an unknown value (null/undefined/<=0) keeps it — a partly-un-analysed library
+// must still fill. Callers wrap these in revertIfStarved for the relax path.
+
+export function filterByDurationBand(pool: PoolTrack[], minSec: number, maxSec: number): PoolTrack[] {
+  if (!minSec && !maxSec) return [...pool];
+  return pool.filter((t) => {
+    const d = typeof t.durationSec === 'number' && t.durationSec > 0 ? t.durationSec : null;
+    if (d == null) return true;
+    return (!minSec || d >= minSec) && (!maxSec || d <= maxSec);
+  });
+}
+
+export function filterByBpmBand(pool: PoolTrack[], minBpm: number, maxBpm: number): PoolTrack[] {
+  if (!minBpm && !maxBpm) return [...pool];
+  return pool.filter((t) => {
+    const b = typeof t.bpm === 'number' && t.bpm > 0 ? t.bpm : null;
+    if (b == null) return true;
+    return (!minBpm || b >= minBpm) && (!maxBpm || b <= maxBpm);
+  });
+}
+
+// Artist allow-list: keep tracks whose artist credit mentions ANY chosen name,
+// case-insensitively — "A & B" and "A feat. C" both count for A. Tracks with a
+// blank credit drop (an allow-list can't vouch for them). Empty list = identity.
+export function filterByArtists(pool: PoolTrack[], artists: string[]): PoolTrack[] {
+  const wanted = artists.map((a) => a.trim().toLowerCase()).filter(Boolean);
+  if (!wanted.length) return [...pool];
+  return pool.filter((t) => {
+    const credit = (t.artist || '').toLowerCase();
+    return credit !== '' && wanted.some((w) => credit.includes(w));
+  });
+}
+
 // Running total in seconds — drives the builder's live "tape counter".
 export function totalDurationSec(tracks: Array<{ durationSec?: number | null }>): number {
   return tracks.reduce((sum, t) => sum + (t.durationSec ?? 0), 0);

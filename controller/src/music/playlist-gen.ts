@@ -26,6 +26,9 @@ import {
   orderByIds,
   fitToCount,
   pickDeterministic,
+  filterByDurationBand,
+  filterByBpmBand,
+  filterByArtists,
   ARC_SHAPES,
   type ArcShape,
   type PoolTrack,
@@ -281,16 +284,10 @@ export async function buildCandidatePool(
   const excluded = new Set([...(input.excludeTrackIds || []), ...(knobs.excludeRecentlyPlayed ? (input.recentPlayIds || []) : [])]);
   if (excluded.size) pool = pool.filter((t) => !excluded.has(t.id));
 
-  // Artist allow-list: keep only tracks whose artist credit mentions one of
-  // the chosen names ("A & B", "A feat. C" all count). Soft — reverts with a
+  // Artist allow-list (pure helper, unit-pinned). Soft — reverts with a
   // reason if the library barely knows these artists.
   if (knobs.artists?.length) {
-    const wanted = knobs.artists.map((a) => a.trim().toLowerCase()).filter(Boolean);
-    const matches = pool.filter((t) => {
-      const credit = (t.artist || '').toLowerCase();
-      return credit !== '' && wanted.some((w) => credit.includes(w));
-    });
-    pool = revertIfStarved(matches, pool, knobs, reasons, 'artist');
+    pool = revertIfStarved(filterByArtists(pool, knobs.artists), pool, knobs, reasons, 'artist');
   }
 
   // Instrumental-only (Kate #3): drop known-vocal; keep instrumental + unknown.
@@ -332,11 +329,7 @@ export async function buildCandidatePool(
   const minLen = knobs.minTrackSeconds && knobs.minTrackSeconds > 0 ? knobs.minTrackSeconds : 0;
   const maxLen = knobs.maxTrackSeconds && knobs.maxTrackSeconds > 0 ? knobs.maxTrackSeconds : 0;
   if (minLen || maxLen) {
-    const withinLen = pool.filter((t) =>
-      t.durationSec == null ||
-      ((!minLen || t.durationSec >= minLen) && (!maxLen || t.durationSec <= maxLen)),
-    );
-    pool = revertIfStarved(withinLen, pool, knobs, reasons, 'track-length');
+    pool = revertIfStarved(filterByDurationBand(pool, minLen, maxLen), pool, knobs, reasons, 'track-length');
   }
 
   // BPM band (analyzer tempo): same soft semantics — known out-of-band drops,
@@ -348,11 +341,7 @@ export async function buildCandidatePool(
     if (known < Math.min(clampCount(knobs.targetCount ?? DEFAULT_COUNT), 12)) {
       reasons.push('bpm filter is best-effort — few tracks have tempo analysis (run the analyzer pass in Library)');
     }
-    const withinBpm = pool.filter((t) =>
-      !(typeof t.bpm === 'number' && t.bpm > 0) ||
-      ((!minBpm || t.bpm >= minBpm) && (!maxBpm || t.bpm <= maxBpm)),
-    );
-    pool = revertIfStarved(withinBpm, pool, knobs, reasons, 'bpm');
+    pool = revertIfStarved(filterByBpmBand(pool, minBpm, maxBpm), pool, knobs, reasons, 'bpm');
   }
 
   // Artist-diversity cap: keep the candidate list varied so one prolific artist
