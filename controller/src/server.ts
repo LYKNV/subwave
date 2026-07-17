@@ -18,6 +18,7 @@ import { getFullContext } from './context.js';
 import { loadCuriosityLedger } from './skills/curiosity.js';
 import { startScheduler } from './broadcast/scheduler.js';
 import { startListenerMonitor } from './broadcast/listeners.js';
+import { startStreamIdleMonitor } from './broadcast/stream-idle.js';
 import { startAudienceMonitor } from './broadcast/audience.js';
 import * as likes from './broadcast/likes.js';
 import { cors } from './middleware/cors.js';
@@ -275,6 +276,7 @@ app.listen(config.server.port, async () => {
 
   queue.startWatcher();
   startListenerMonitor();
+  startStreamIdleMonitor();
   startAudienceMonitor().catch(err => console.error('[audience] init failed:', err.message));
   // Load likes up front so the sync readers (pickSystem's favourites lean, the
   // pool picker's listener-liked source) see data from the first pick.
