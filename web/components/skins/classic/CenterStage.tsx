@@ -2,16 +2,17 @@
 
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, m } from 'motion/react';
-import { Coins } from 'lucide-react';
+import { Coins, Heart } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import { useTrackLike } from '@/components/skins/sharedHooks';
 import { fmtTime } from '@/lib/format';
 import { useDynamicStyle } from '@/hooks/useDynamicStyle';
 import { useElapsed } from '@/hooks/useElapsed';
 import DjThinkingLine from './DjThinkingLine';
 import CountUp from './CountUp';
-import { Ripple } from './ui/ripple';
+import { Ripple } from '@/components/ui/ripple';
 import { isDjTurn } from '@/lib/sessionFeed';
-import { useStationOrigin } from '@/lib/stationOrigin';
+import { useStationClient } from '@/lib/stationClient';
 import type { NowPlayingTrack, QueueEntry, SessionTurn } from '@/lib/types';
 
 /** How close to the end of the current track (seconds) the "up next" tease
@@ -48,6 +49,32 @@ function buildMoodPhrase(t: NowPlayingTrack | null): string {
   return parts.join(SEP);
 }
 
+/** The like heart (#991) — one tap stars the on-air track for everyone
+ *  listening (and, when the operator enables it, into Navidrome). Renders
+ *  nothing when likes are disabled or nothing likeable is on air. */
+function LikeHeart() {
+  const { available, liked, pending, count, like } = useTrackLike();
+  if (!available) return null;
+  return (
+    <button
+      type="button"
+      onClick={like}
+      disabled={pending || liked}
+      aria-pressed={liked}
+      aria-label={liked ? 'Liked' : 'Like this track'}
+      title={liked ? 'Liked — saved to the station favourites' : 'Like this track'}
+      className={cn(
+        'v3-focus ml-[10px] inline-flex cursor-pointer items-center gap-[4px] border-0 bg-transparent p-0 align-middle transition-colors',
+        liked ? 'text-vermilion' : 'text-muted hover:text-ink',
+        pending && 'opacity-60',
+      )}
+    >
+      <Heart size={15} strokeWidth={1.75} fill={liked ? 'currentColor' : 'none'} aria-hidden="true" />
+      {count > 0 && <span className="v3-tab-num text-[11px]">{count}</span>}
+    </button>
+  );
+}
+
 export interface CenterStageProps {
   nowPlaying: NowPlayingTrack | null;
   /** Epoch ms when the current track started (from useStationFeed). */
@@ -70,7 +97,7 @@ export interface CenterStageProps {
 }
 
 export default memo(function CenterStage({ nowPlaying, trackStartedAt, llmTokens, feed, djLineOn, boothBuddyOn, offline, upNext, onOpenBooth, onOpenTimeline }: CenterStageProps) {
-  const { apiUrl } = useStationOrigin();
+  const client = useStationClient();
   // The 1s elapsed tick lives here, in the component that displays it, so it
   // only re-renders this subtree — not the whole player (see useElapsed).
   const elapsed = useElapsed(trackStartedAt);
@@ -84,9 +111,7 @@ export default memo(function CenterStage({ nowPlaying, trackStartedAt, llmTokens
   const hasMeta = metaTokens.length > 0 || moodPhrase.length > 0;
   const duration = nowPlaying?.duration ?? 0;
   const subsonicId = nowPlaying?.subsonic_id ?? null;
-  const coverSrc = subsonicId
-    ? `${apiUrl}/cover/${encodeURIComponent(subsonicId)}`
-    : null;
+  const coverSrc = subsonicId ? client.coverUrl(subsonicId) : null;
   const showArt = !!coverSrc && !offline;
   // Title key keeps placeholder + real titles in the same AnimatePresence so
   // the first-track-arrives transition cross-dissolves the "scanning" line out.
@@ -282,6 +307,7 @@ export default memo(function CenterStage({ nowPlaying, trackStartedAt, llmTokens
                     <span className="text-ink">{nowPlaying?.artist || 'Unknown artist'}</span>
                     {nowPlaying?.album && <span> · {nowPlaying.album}</span>}
                     {nowPlaying?.year && <span> · {nowPlaying.year}</span>}
+                    <LikeHeart />
                   </div>
                   {hasMeta && (
                     <div className="v3-caption mt-[10px] text-muted">
