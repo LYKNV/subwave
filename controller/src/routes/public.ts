@@ -343,7 +343,10 @@ router.get('/dj', async (req, res) => {
       // shared link reads the same whoever is on air (issue #1086). '' = unset;
       // the web app falls back to the persona tagline.
       stationDescription: s.stationDescription || '',
-      location: s.weather?.locationName || '',
+      // Unauthenticated: publish the broad on-air location, never the precise
+      // weather label. Pairing a station name with an exact town here is the
+      // doxxing vector this field exists to close.
+      location: settings.resolveOnAirLocation(s),
       locale: s.locale,
     });
   } catch (err) {
