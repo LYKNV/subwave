@@ -2994,8 +2994,8 @@ html.lite .sw-ripple-circle {
 .admin-root .shell-body {
     display: grid;
     grid-template-columns: 200px 1fr;
-    gap: 28px;
-    padding: 24px 28px;
+    gap: 20px;
+    padding: 16px 20px;
     max-width: 1440px;
     margin: 0 auto;
 }
