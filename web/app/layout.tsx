@@ -1,7 +1,7 @@
 import './globals.css';
 import type { Metadata, Viewport } from 'next';
 import type { ReactNode } from 'react';
-import { Fraunces, Plus_Jakarta_Sans, JetBrains_Mono, Doto, Space_Grotesk, Instrument_Serif } from 'next/font/google';
+import { Fraunces, Plus_Jakarta_Sans, JetBrains_Mono, Doto, Space_Grotesk, Instrument_Serif, IBM_Plex_Mono, Space_Mono, Fira_Code } from 'next/font/google';
 import { GoogleAnalytics } from '@next/third-parties/google';
 import { THEME_INIT_SCRIPT } from '@/lib/theme';
 import { LITE_INIT_SCRIPT } from '@/lib/lite';
@@ -58,11 +58,36 @@ const plusJakarta = Plus_Jakarta_Sans({
   variable: '--font-sans',
 });
 
+// JetBrains is the default data face. Its next/font variable is --font-jetbrains
+// now (not --font-mono), because the `font-mono` utility follows the themeable
+// --mono-font token (globals.css @theme), which defaults to JetBrains.
 const jetbrainsMono = JetBrains_Mono({
   subsets: ['latin', 'latin-ext'],
   weight: ['300', '400', '500', '700', '800'],
   display: 'swap',
-  variable: '--font-mono',
+  variable: '--font-jetbrains',
+});
+
+// Curated monospace faces a theme can select via the --mono-font token — reaches
+// the mono-forward skins (Subamp, TTY) and everything using `font-mono`.
+const ibmPlexMono = IBM_Plex_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+  variable: '--font-ibm-plex-mono',
+});
+
+const spaceMono = Space_Mono({
+  subsets: ['latin'],
+  weight: ['400', '700'],
+  display: 'swap',
+  variable: '--font-space-mono',
+});
+
+const firaCode = Fira_Code({
+  subsets: ['latin'],
+  display: 'swap',
+  variable: '--font-fira-code',
 });
 
 const DESCRIPTION =
@@ -140,7 +165,7 @@ export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html
       lang="en"
-      className={`${fraunces.variable} ${plusJakarta.variable} ${jetbrainsMono.variable} ${doto.variable} ${spaceGrotesk.variable} ${instrumentSerif.variable}`}
+      className={`${fraunces.variable} ${plusJakarta.variable} ${jetbrainsMono.variable} ${doto.variable} ${spaceGrotesk.variable} ${instrumentSerif.variable} ${ibmPlexMono.variable} ${spaceMono.variable} ${firaCode.variable}`}
       suppressHydrationWarning
     >
       <head>

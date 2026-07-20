@@ -13,6 +13,7 @@ import {
   THEME_TOKEN_KEYS,
   SWATCH_KEYS,
   DISPLAY_FONT_IDS,
+  MONO_FONT_IDS,
   tokenType,
   isValidTokenValue,
 } from '../src/theme-tokens.js';
@@ -70,10 +71,20 @@ test('colour tokens accept real values, reject breakout payloads', () => {
   assert.ok(!isValidTokenValue('--bg', 'x'.repeat(101)), 'over-long rejected');
 });
 
-test('font token accepts only curated ids', () => {
+test('display font token accepts only curated display ids', () => {
   for (const id of DISPLAY_FONT_IDS) assert.ok(isValidTokenValue('--display-font', id), `id ${id}`);
   assert.ok(!isValidTokenValue('--display-font', 'comic-sans'), 'unknown font id rejected');
   assert.ok(!isValidTokenValue('--display-font', 'var(--x), serif'), 'raw font string rejected');
+});
+
+test('mono font token accepts only curated mono ids', () => {
+  for (const id of MONO_FONT_IDS) assert.ok(isValidTokenValue('--mono-font', id), `mono id ${id}`);
+  assert.ok(!isValidTokenValue('--mono-font', 'courier'), 'unknown mono id rejected');
+});
+
+test('display + mono font sets validate disjointly', () => {
+  assert.ok(!isValidTokenValue('--display-font', 'jetbrains'), 'mono id rejected for display token');
+  assert.ok(!isValidTokenValue('--mono-font', 'fraunces'), 'display id rejected for mono token');
 });
 
 test('grain token accepts [0,1] numbers only', () => {

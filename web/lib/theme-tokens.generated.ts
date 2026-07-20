@@ -5,12 +5,14 @@
 
 export type TokenType = 'color' | 'font' | 'grain';
 export type TokenGroup = 'surface' | 'text' | 'accent' | 'structure' | 'type' | 'texture';
+export type FontSet = 'display' | 'mono';
 
 export interface TokenDescriptor {
   key: string;
   label: string;
   group: TokenGroup;
   type: TokenType;
+  fontSet?: FontSet;
 }
 
 export const THEME_TOKENS: readonly TokenDescriptor[] = [
@@ -96,7 +98,15 @@ export const THEME_TOKENS: readonly TokenDescriptor[] = [
     "key": "--display-font",
     "label": "display font",
     "group": "type",
-    "type": "font"
+    "type": "font",
+    "fontSet": "display"
+  },
+  {
+    "key": "--mono-font",
+    "label": "mono font",
+    "group": "type",
+    "type": "font",
+    "fontSet": "mono"
   },
   {
     "key": "--grain",
@@ -106,9 +116,12 @@ export const THEME_TOKENS: readonly TokenDescriptor[] = [
   }
 ];
 
-export const THEME_TOKEN_KEYS: readonly string[] = ["--bg","--surface","--surface-border","--field","--ink","--muted","--ink-faint","--accent","--accent-2","--accent-soft","--line","--soft-border","--overlay","--display-font","--grain"];
+export const THEME_TOKEN_KEYS: readonly string[] = ["--bg","--surface","--surface-border","--field","--ink","--muted","--ink-faint","--accent","--accent-2","--accent-soft","--line","--soft-border","--overlay","--display-font","--mono-font","--grain"];
 
 export const SWATCH_KEYS = ["--bg","--ink","--accent","--overlay"] as const;
 
 export const DISPLAY_FONT_IDS = ["fraunces","doto","space-grotesk","instrument-serif"] as const;
 export type DisplayFontId = (typeof DISPLAY_FONT_IDS)[number];
+
+export const MONO_FONT_IDS = ["jetbrains","ibm-plex-mono","space-mono","fira-code"] as const;
+export type MonoFontId = (typeof MONO_FONT_IDS)[number];

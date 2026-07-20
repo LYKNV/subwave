@@ -80,7 +80,7 @@
      `font-display` headline app-wide. */
   --font-sans: var(--font-sans);
   --font-display: var(--display-font);
-  --font-mono: var(--font-mono);
+  --font-mono: var(--mono-font);
 }
 
 /* V3 / Frequency — newsprint cream, near-black ink, hot vermilion.
@@ -146,9 +146,11 @@
     --line: color-mix(in oklab, var(--ink) 70%, var(--bg));
     --accent-2: var(--accent);
     --accent-soft: color-mix(in oklab, var(--accent) 14%, var(--bg));
-    /* Default display face; the --display-font token (a curated id resolved to
-     a family stack in lib/theme) overrides it, and font-display follows it. */
+    /* Default display + mono faces; the --display-font / --mono-font tokens (a
+     curated id resolved to a family stack in lib/theme) override them, and the
+     font-display / font-mono utilities follow them. */
     --display-font: var(--font-fraunces);
+    --mono-font: var(--font-jetbrains);
 }
 
 /* Dark palette — applied either by manual override (data-theme="dark") or

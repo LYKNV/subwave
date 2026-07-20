@@ -17,6 +17,7 @@ import {
   THEME_TOKEN_KEYS,
   SWATCH_KEYS,
   DISPLAY_FONT_IDS,
+  MONO_FONT_IDS,
 } from '../src/theme-tokens.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -31,12 +32,14 @@ const body = `// GENERATED FILE — do not edit by hand.
 
 export type TokenType = 'color' | 'font' | 'grain';
 export type TokenGroup = ${groups};
+export type FontSet = 'display' | 'mono';
 
 export interface TokenDescriptor {
   key: string;
   label: string;
   group: TokenGroup;
   type: TokenType;
+  fontSet?: FontSet;
 }
 
 export const THEME_TOKENS: readonly TokenDescriptor[] = ${JSON.stringify(THEME_TOKENS, null, 2)};
@@ -47,6 +50,9 @@ export const SWATCH_KEYS = ${JSON.stringify([...SWATCH_KEYS])} as const;
 
 export const DISPLAY_FONT_IDS = ${JSON.stringify([...DISPLAY_FONT_IDS])} as const;
 export type DisplayFontId = (typeof DISPLAY_FONT_IDS)[number];
+
+export const MONO_FONT_IDS = ${JSON.stringify([...MONO_FONT_IDS])} as const;
+export type MonoFontId = (typeof MONO_FONT_IDS)[number];
 `;
 
 writeFileSync(OUT, body);

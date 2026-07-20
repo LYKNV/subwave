@@ -8,28 +8,37 @@
 // THEME_INIT_SCRIPT so there's no flash. Once /themes responds, the fresh
 // token map is applied + cached for the next visit.
 
-import { THEME_TOKEN_KEYS, type DisplayFontId } from './theme-tokens.generated';
+import { THEME_TOKEN_KEYS, type DisplayFontId, type MonoFontId } from './theme-tokens.generated';
 
 const TOKEN_KEY_SET = new Set<string>(THEME_TOKEN_KEYS);
 const TOKEN_CACHE_KEY = 'subwave-theme-tokens';
 const OVERRIDE_KEY = 'subwave-theme-override';
 
-// A theme stores --display-font as a curated id; resolve it to a real family
-// stack here (the stacks reference next/font variables set in app/layout.tsx).
-// Keyed by DisplayFontId so TypeScript fails the build if the curated set grows
-// without a matching stack.
-const FONT_STACKS: Record<DisplayFontId, string> = {
+// A theme stores --display-font / --mono-font as a curated id; resolve it to a
+// real family stack here (the stacks reference next/font variables set in
+// app/layout.tsx). Keyed by DisplayFontId | MonoFontId so TypeScript fails the
+// build if either curated set grows without a matching stack.
+const FONT_STACKS: Record<DisplayFontId | MonoFontId, string> = {
+  // display faces (--display-font)
   'fraunces': 'var(--font-fraunces), Georgia, serif',
-  'doto': 'var(--font-doto), var(--font-mono), monospace',
+  'doto': 'var(--font-doto), var(--font-jetbrains), monospace',
   'space-grotesk': 'var(--font-space-grotesk), var(--font-sans), sans-serif',
   'instrument-serif': 'var(--font-instrument-serif), Georgia, serif',
+  // mono faces (--mono-font)
+  'jetbrains': 'var(--font-jetbrains), ui-monospace, monospace',
+  'ibm-plex-mono': 'var(--font-ibm-plex-mono), ui-monospace, monospace',
+  'space-mono': 'var(--font-space-mono), ui-monospace, monospace',
+  'fira-code': 'var(--font-fira-code), ui-monospace, monospace',
 };
 
-/** Resolve a `--display-font` token value: a curated id → its family stack, or
- *  the value unchanged (already a stack, or unset). Used by the theme builder's
- *  live preview to render sample text in the picked face. */
-export function resolveDisplayFont(id: string): string {
-  return FONT_STACKS[id as DisplayFontId] ?? id;
+// Token keys whose value is a curated font id (resolved to a family stack).
+const FONT_TOKEN_KEYS = new Set(['--display-font', '--mono-font']);
+
+/** Resolve a font-token value (--display-font / --mono-font): a curated id →
+ *  its family stack, or the value unchanged (already a stack, or unset). Used
+ *  by the theme builder's live preview to render sample text in the picked face. */
+export function resolveFont(id: string): string {
+  return FONT_STACKS[id as DisplayFontId | MonoFontId] ?? id;
 }
 
 export type ThemeMode = 'light' | 'dark';
@@ -52,7 +61,7 @@ export function applyTheme(theme: Theme): void {
   const html = document.documentElement;
   for (const [k, v] of Object.entries(theme.tokens)) {
     if (!TOKEN_KEY_SET.has(k)) continue;
-    const value = k === '--display-font' ? (FONT_STACKS[v as DisplayFontId] ?? v) : v;
+    const value = FONT_TOKEN_KEYS.has(k) ? resolveFont(v) : v;
     html.style.setProperty(k, value);
   }
   html.setAttribute('data-theme', theme.mode);
@@ -114,7 +123,7 @@ export const THEME_INIT_SCRIPT = `
           var k = keys[i];
           var v = t.tokens[k];
           if (typeof v === 'string') {
-            if (k === '--display-font' && fonts[v]) v = fonts[v];
+            if ((k === '--display-font' || k === '--mono-font') && fonts[v]) v = fonts[v];
             html.style.setProperty(k, v);
           }
         }

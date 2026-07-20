@@ -28,7 +28,11 @@ export interface TokenDescriptor {
   group: TokenGroup;
   /** Governs how a theme-supplied value is validated + edited. */
   type: TokenType;
+  /** For `type: 'font'` — which curated font set the value is drawn from. */
+  fontSet?: FontSet;
 }
+
+export type FontSet = 'display' | 'mono';
 
 // Curated display faces a theme may pick. `id` is what a theme stores in
 // --display-font; the web layer resolves it to a font-family stack (the stacks
@@ -40,6 +44,21 @@ export const DISPLAY_FONT_IDS = [
   'instrument-serif',
 ] as const;
 export type DisplayFontId = (typeof DISPLAY_FONT_IDS)[number];
+
+// Curated monospace faces for --mono-font — reaches the mono-forward skins
+// (Subamp's LCD deck, the TTY terminal) and everything using the `font-mono`
+// utility. JetBrains is the default data face.
+export const MONO_FONT_IDS = [
+  'jetbrains',
+  'ibm-plex-mono',
+  'space-mono',
+  'fira-code',
+] as const;
+export type MonoFontId = (typeof MONO_FONT_IDS)[number];
+
+export function fontIdsFor(set: FontSet): readonly string[] {
+  return set === 'mono' ? MONO_FONT_IDS : DISPLAY_FONT_IDS;
+}
 
 export const THEME_TOKENS: readonly TokenDescriptor[] = [
   // Surfaces / depth
@@ -60,7 +79,8 @@ export const THEME_TOKENS: readonly TokenDescriptor[] = [
   { key: '--soft-border', label: 'soft border', group: 'structure', type: 'color' },
   { key: '--overlay', label: 'overlay', group: 'structure', type: 'color' },
   // Type
-  { key: '--display-font', label: 'display font', group: 'type', type: 'font' },
+  { key: '--display-font', label: 'display font', group: 'type', type: 'font', fontSet: 'display' },
+  { key: '--mono-font', label: 'mono font', group: 'type', type: 'font', fontSet: 'mono' },
   // Texture
   { key: '--grain', label: 'grain', group: 'texture', type: 'grain' },
 ] as const;
@@ -88,11 +108,12 @@ export const COLOR_VAL_RE = /^[^;{}<>]{1,100}$/;
 // curated ids (never a free font string, so no unloaded-face FOUT and nothing
 // exotic reaches the DOM). Grain → a number in [0,1]. Unknown key → false.
 export function isValidTokenValue(key: string, value: string): boolean {
-  switch (tokenType(key)) {
+  const desc = TOKEN_BY_KEY.get(key);
+  switch (desc?.type) {
     case 'color':
       return COLOR_VAL_RE.test(value);
     case 'font':
-      return (DISPLAY_FONT_IDS as readonly string[]).includes(value);
+      return fontIdsFor(desc.fontSet ?? 'display').includes(value);
     case 'grain': {
       const v = value.trim();
       // Require a plain decimal — Number('') and Number('  ') are 0, and
