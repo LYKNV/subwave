@@ -1463,8 +1463,12 @@ html.lite .sw-ripple-circle {
     content: "";
     flex: 1;
     height: 1px;
-    background: currentColor;
-    opacity: 0.4;
+    /* Second editorial colour: the eyebrow label stays --accent, its trailing
+       rule takes --accent-2. Identical to the label on mono themes (accent-2
+       falls back to accent), a two-tone marker on themes that set a distinct
+       second accent (Press, Neon, Sunset, Vinyl, Cyberpunk). */
+    background: var(--accent-2);
+    opacity: 0.5;
     min-width: 24px;
 }
 
