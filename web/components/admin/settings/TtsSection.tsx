@@ -257,7 +257,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
         </span>
       </div>
 
-      <p className="mt-2 text-[11px] leading-[1.55] text-muted">
+      <p className="mt-2 text-[14px] leading-[1.55] text-muted">
         {engine} is a heavy PyTorch engine, so the controller image doesn’t carry it.
         It ships in the optional <code>tts-heavy</code> sidecar. Until that’s running,
         every segment routed here <strong>falls back to Piper</strong>. The DJ never
@@ -267,7 +267,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
       <div className="mt-3 text-[10px] font-bold tracking-[0.16em] text-ink uppercase">
         Turn it on
       </div>
-      <ol className="mt-1.5 grid list-decimal gap-2 pl-[18px] text-[11px] leading-[1.55] text-muted marker:font-bold marker:text-[var(--danger)]">
+      <ol className="mt-1.5 grid list-decimal gap-2 pl-[18px] text-[14px] leading-[1.55] text-muted marker:font-bold marker:text-[var(--danger)]">
         <li>
           Bring the sidecar up alongside the stack:
           <code className="mt-1 block w-fit max-w-full overflow-x-auto bg-[var(--ink-soft)] px-2 py-1">
@@ -287,7 +287,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
         </li>
       </ol>
 
-      <p className="mt-2.5 text-[10px] leading-[1.5] text-muted">
+      <p className="mt-2.5 text-[14px] leading-[1.5] text-muted">
         Legacy single-image path: rebuild the controller with{' '}
         <code>--build-arg {buildArg}</code> (only if you built a custom image on the
         pre-sidecar pattern).
@@ -582,7 +582,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
               <span className="text-[11px] font-bold tracking-[0.12em] text-vermilion uppercase">
                 Default engine now · {savedEngineLabel}
               </span>
-              <span className="text-[11px] leading-[1.5] text-muted">
+              <span className="text-[14px] leading-[1.5] text-muted">
                 {activeDetail} {ttsDirty ? 'Your edits below aren’t live until you Save.' : 'This is the saved, running config.'}
                 {savedEngineMissing && (
                   <span className="text-[var(--danger)]"> This engine isn’t installed in this build, so segments fall back to Piper. See the setup steps below.</span>

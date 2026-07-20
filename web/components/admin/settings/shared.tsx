@@ -397,7 +397,7 @@ export function SectionHeader({ eyebrow, title, sub, metrics, manualHref, manual
         <div className="mt-1.5 text-[22px] font-extrabold tracking-[-0.02em]">
           {title}
         </div>
-        <div className="mt-1.5 max-w-[560px] text-[13px] leading-[1.55] text-muted">
+        <div className="mt-1.5 max-w-[600px] text-[14px] leading-[1.55] text-muted">
           {sub}
         </div>
         {manualHref && (
@@ -474,7 +474,7 @@ export function KeyStatus({ envVar, present }: KeyStatusProps) {
         <span className={cn('text-[11px] font-bold tracking-[0.12em] uppercase', toneClass)}>
           {present ? 'API key found in environment' : 'API key missing'}
         </span>
-        <span className="text-[12px] leading-[1.5] text-muted">
+        <span className="text-[14px] leading-[1.5] text-muted">
           {present ? (
             <>The controller has <code>{envVar}</code> set, so this provider is ready to use.</>
           ) : (

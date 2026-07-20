@@ -296,7 +296,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
               <span className="text-[11px] font-bold tracking-[0.12em] text-vermilion uppercase">
                 Routing now · {llmProviderLabel(activeProvider)}
               </span>
-              <span className="text-[11px] leading-[1.5] text-muted">
+              <span className="text-[14px] leading-[1.5] text-muted">
                 {activeModel
                   ? <>Model <code>{activeModel}</code>, every LLM call goes here. {llmDirty ? 'Your edits below aren’t live until you Save.' : 'This is the saved, running config.'}</>
                   : <>No model is set for this provider yet.</>}
@@ -605,7 +605,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
           <div className="grid grid-cols-[1fr_auto] items-center gap-4">
             <div>
               <div className="text-[13px] font-bold">Use a backup LLM</div>
-              <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+              <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                 When the primary host can&apos;t be reached (connection refused,
                 DNS failure, timeout, e.g. a GPU box that&apos;s powered off), the
                 call is retried once against this backup, then routes straight back
@@ -880,7 +880,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
               <div className="grid grid-cols-[1fr_auto] items-center gap-4">
                 <div>
                   <div className="text-[13px] font-bold">Backup chain-of-thought</div>
-                  <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+                  <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                     Whether the backup model may emit a reasoning step. Off by
                     default, like the primary.
                   </div>
@@ -906,7 +906,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         <div className="grid grid-cols-[1fr_auto] items-center gap-4">
           <div>
             <div className="text-[13px] font-bold">Chain-of-thought</div>
-            <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+            <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
               When off, the picker tells the model to skip or minimize its
               internal thinking step. Wired across providers that expose a
               thinking knob: Ollama, openai-compatible (Qwen3), Gemini 2.5/3.x,
@@ -961,7 +961,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         <div className="grid grid-cols-[1fr_auto] items-center gap-4">
           <div>
             <div className="text-[13px] font-bold">Agentic picker</div>
-            <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+            <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
               When on, the next-track picker is a tool-using agent that explores the library
               itself. Needs a model that handles multi-step tool calls well. Leave off for
               small local models &mdash; skill segments (weather, news, &hellip;) then also run as a
@@ -1007,7 +1007,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
           <div className="mt-4 grid grid-cols-[1fr_auto] items-center gap-4">
             <div>
               <div className="text-[13px] font-bold">Resolve described requests via web</div>
-              <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+              <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                 When on, a listener who <em>describes</em> a track instead of naming it
                 (&ldquo;the song from the new Dune movie&rdquo;) gets it looked up on the
                 web, then matched against your library. Needs a web-search provider
@@ -1053,7 +1053,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
         <div className="grid grid-cols-[1fr_auto] items-center gap-4">
           <div>
             <div className="text-[13px] font-bold">Pause DJ when empty</div>
-            <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+            <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
               When on, the DJ stops making LLM calls (track picks, links, station
               IDs, hourly checks, segments and listener requests) whenever Icecast
               reports zero listeners. The stream keeps playing from the auto
@@ -1123,7 +1123,7 @@ export function LlmSection({ data, form, setForm, busy, saveSettings, adminFetch
           <div className="mt-4 grid grid-cols-[1fr_auto] items-center gap-4">
             <div>
               <div className="text-[13px] font-bold">Always answer requests</div>
-              <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+              <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                 When on, listener requests are still answered by the AI DJ even
                 over the cap &mdash; a human asked, so honour it. When off,
                 requests over the cap fall back to plain library matching like

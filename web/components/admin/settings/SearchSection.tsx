@@ -130,7 +130,7 @@ export function SearchSection({ data, form, setForm, busy, saveSettings, adminFe
               <span className="text-[11px] font-bold tracking-[0.12em] text-vermilion uppercase">
                 Routing now · {searchProviderLabel(savedSearch.provider || 'duckduckgo')}
               </span>
-              <span className="text-[11px] leading-[1.5] text-muted">
+              <span className="text-[14px] leading-[1.5] text-muted">
                 {searchDirty
                   ? <>Your edits below aren&apos;t live until you Save.</>
                   : <>This is the saved, running config.</>}

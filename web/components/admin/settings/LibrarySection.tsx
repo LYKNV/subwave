@@ -300,7 +300,7 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
         <div className="grid grid-cols-[1fr_auto] items-center gap-4">
           <div>
             <div className="text-[13px] font-bold">Embedding-propagated tagging</div>
-            <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+            <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
               When off, the bulk tagger refuses to start. Single-track retags
               from the Library admin page still work (they bypass the
               embedding pipeline).
@@ -404,7 +404,7 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
                     {llmProviderLabel(effectiveProvider)} can’t make embeddings
                   </span>
                 </div>
-                <p className="mt-2 text-[11px] leading-[1.55] text-muted">
+                <p className="mt-2 text-[14px] leading-[1.55] text-muted">
                   {e.provider ? (
                     <><code>{llmProviderLabel(effectiveProvider)}</code> is a chat-only provider, with no embeddings endpoint, so the tagger can’t use it.</>
                   ) : (
@@ -802,7 +802,7 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
           <div className="grid grid-cols-[1fr_auto] items-center gap-4">
             <div>
               <div className="text-[13px] font-bold">Last.fm tags</div>
-              <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+              <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                 With a Last.fm API key configured (Scrobbling), crowd tags come
                 straight from the Last.fm API and work on vanilla Navidrome.
                 Without a key it falls back to Navidrome&apos;s{' '}
@@ -832,7 +832,7 @@ export function LibrarySection({ data, form, setForm, busy, saveSettings, adminF
           <div className="grid grid-cols-[1fr_auto] items-center gap-4">
             <div>
               <div className="text-[13px] font-bold">Lyrics</div>
-              <div className="mt-0.5 max-w-[480px] text-[11px] leading-[1.5] text-muted">
+              <div className="mt-0.5 max-w-[480px] text-[14px] leading-[1.5] text-muted">
                 Fetch a short lyric excerpt per track and fold it into the
                 embedding text. Improves propagation quality on
                 lyrically-driven tracks (folk, hip-hop, singer-songwriter);

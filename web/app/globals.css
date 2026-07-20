@@ -3451,9 +3451,9 @@ html.lite .sw-ripple-circle {
     gap: 6px;
 }
 .admin-root .field-hint {
-    font-size: 11px;
+    font-size: 14px;
     color: var(--muted);
-    line-height: 1.45;
+    line-height: 1.5;
 }
 
 /* Key/value table */
