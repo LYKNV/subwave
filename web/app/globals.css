@@ -2872,6 +2872,11 @@ html.lite .sw-ripple-circle {
     --danger: #c5302a;
     --ink-soft: color-mix(in oklab, var(--ink) 6%, transparent);
     --ink-softer: color-mix(in oklab, var(--ink) 3%, transparent);
+    /* Higher-contrast muted than the listener surfaces: admin is a dense
+       control panel, so labels + help copy need to clear the readable-contrast
+       floor (the theme's editorial --muted sits ~3.5:1 on the card). Derived
+       from --ink/--bg so it tracks the palette and flips in dark mode. */
+    --muted: color-mix(in oklab, var(--ink) 55%, var(--bg));
     --muted-2: color-mix(in oklab, var(--muted) 70%, var(--bg));
     /* Two-tone surface split so cards always read as panels instead of
      dissolving into the page. Light mode keeps cards at the bright cream and
