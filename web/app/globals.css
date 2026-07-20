@@ -2926,10 +2926,10 @@ html.lite .sw-ripple-circle {
     align-items: center;
     gap: 16px;
     padding: 14px 28px;
-    /* Lift the header off the (darker) page body onto the elevated surface, so
-       the bar reads as a distinct chrome strip instead of dissolving into the
-       page. */
-    background: var(--surface);
+    /* Lift the header off the (darker) page body onto the same off-white card
+       fill as the rest of the console, so the bar reads as a distinct chrome
+       strip instead of dissolving into the page. */
+    background: var(--card-bg);
     border-bottom: 1px solid var(--ink);
     flex-wrap: wrap;
 }
@@ -3015,11 +3015,12 @@ html.lite .sw-ripple-circle {
 .admin-root .shell-nav .nav-item {
     position: relative; /* hosts the motion.span layoutId background */
     border: 1px solid var(--line);
-    /* Sit on the elevated surface with a crisp hairline so each item reads as a
-       button lifted off the (darker) page, instead of a faint outline dissolving
-       into it. The .active item's black fill comes from the motion layoutId
-       span, so its own background stays transparent. */
-    background: var(--surface);
+    /* Sit on the same card fill as the rest of the console (--card-bg, the
+       off-white that lifts off the darker --page-bg) with a crisp hairline, so
+       each item reads as a button matching the other panels instead of a faint
+       outline dissolving into the page. The .active item's black fill comes from
+       the motion layoutId span, so its own background stays transparent. */
+    background: var(--card-bg);
     color: var(--ink);
     padding: 8px 10px;
     font-size: 11px;
@@ -3048,9 +3049,9 @@ html.lite .sw-ripple-circle {
     z-index: 1;
 }
 .admin-root .shell-nav .nav-item:hover {
-    /* Darken the surface slightly on hover (keeps the lifted-card feel) and
+    /* Darken the card fill slightly on hover (keeps the lifted-card feel) and
        firm the border to full ink. */
-    background: color-mix(in oklab, var(--surface) 90%, var(--ink));
+    background: color-mix(in oklab, var(--card-bg) 90%, var(--ink));
     border-color: var(--ink);
 }
 .admin-root .shell-nav .nav-item:hover .nav-icon {
