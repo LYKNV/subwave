@@ -153,7 +153,7 @@ function TtsSpeedField({
       <div className="field-hint">
         {supported
           ? <>Slow down or speed up this engine. <code>1.00×</code> = no change.</>
-          : <>Not supported by this engine — only Piper, Kokoro and cloud honour speed.</>}
+          : <>Not supported by this engine: only Piper, Kokoro and cloud honour speed.</>}
       </div>
     </div>
   );
@@ -209,7 +209,7 @@ function ElevenLabsVoiceSettingsField({
     <>
       {slider(
         'Stability',
-        <>Lower is more expressive but can wander; higher is steadier but flatter. ElevenLabs default is <code>50%</code>. Note: the <code>eleven_v3</code> model only accepts 0%, 50% or 100% — other values are rounded to the nearest.</>,
+        <>Lower is more expressive but can wander; higher is steadier but flatter. ElevenLabs default is <code>50%</code>. Note: the <code>eleven_v3</code> model only accepts 0%, 50% or 100%; other values round to the nearest.</>,
         'voiceStability',
       )}
       {slider(
@@ -257,7 +257,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
         </span>
       </div>
 
-      <p className="mt-2 text-[11px] leading-[1.55] text-muted">
+      <p className="mt-2 text-[14px] leading-[1.55] text-muted">
         {engine} is a heavy PyTorch engine, so the controller image doesn’t carry it.
         It ships in the optional <code>tts-heavy</code> sidecar. Until that’s running,
         every segment routed here <strong>falls back to Piper</strong>. The DJ never
@@ -267,7 +267,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
       <div className="mt-3 text-[10px] font-bold tracking-[0.16em] text-ink uppercase">
         Turn it on
       </div>
-      <ol className="mt-1.5 grid list-decimal gap-2 pl-[18px] text-[11px] leading-[1.55] text-muted marker:font-bold marker:text-[var(--danger)]">
+      <ol className="mt-1.5 grid list-decimal gap-2 pl-[18px] text-[14px] leading-[1.55] text-muted marker:font-bold marker:text-[var(--danger)]">
         <li>
           Bring the sidecar up alongside the stack:
           <code className="mt-1 block w-fit max-w-full overflow-x-auto bg-[var(--ink-soft)] px-2 py-1">
@@ -287,7 +287,7 @@ function HeavyEngineSetupGuide({ engine, buildArg }: { engine: 'Chatterbox' | 'P
         </li>
       </ol>
 
-      <p className="mt-2.5 text-[10px] leading-[1.5] text-muted">
+      <p className="mt-2.5 text-[14px] leading-[1.5] text-muted">
         Legacy single-image path: rebuild the controller with{' '}
         <code>--build-arg {buildArg}</code> (only if you built a custom image on the
         pre-sidecar pattern).
@@ -582,7 +582,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
               <span className="text-[11px] font-bold tracking-[0.12em] text-vermilion uppercase">
                 Default engine now · {savedEngineLabel}
               </span>
-              <span className="text-[11px] leading-[1.5] text-muted">
+              <span className="text-[14px] leading-[1.5] text-muted">
                 {activeDetail} {ttsDirty ? 'Your edits below aren’t live until you Save.' : 'This is the saved, running config.'}
                 {savedEngineMissing && (
                   <span className="text-[var(--danger)]"> This engine isn’t installed in this build, so segments fall back to Piper. See the setup steps below.</span>
@@ -951,7 +951,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
                       Used when a Cloud persona hasn’t set its own voice.{' '}
                       {discoveredVoices.length > 0
                         ? <>{discoveredVoices.length} voice{discoveredVoices.length === 1 ? '' : 's'} found
-                            on your {isCompat ? 'server' : 'account'} — or choose <em>Custom voice id…</em> to
+                            on your {isCompat ? 'server' : 'account'}. Or choose <em>Custom voice id…</em> to
                             enter one that isn’t listed.</>
                         : <>Pick a default, or choose <em>Custom voice id…</em> for any other OpenAI voice
                             name / ElevenLabs voice id.</>}
@@ -1005,7 +1005,7 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
                   className="max-w-[360px]"
                 />
                 <div className="field-hint">
-                  Optional — only if your server requires one (e.g. SUB/WAVE DJ
+                  Optional, only if your server requires one (e.g. SUB/WAVE DJ
                   Brain); most self-hosted servers accept any non-empty key.
                   Blank keeps the existing key. Saved with these settings, takes
                   effect immediately.
@@ -1047,12 +1047,12 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
                 className="max-w-[360px]"
               />
               <div className="field-hint">
-                Any self-hosted TTS server that renders audio over HTTP — POST{' '}
+                Any self-hosted TTS server that renders audio over HTTP: POST{' '}
                 <code>/speak</code> returns the audio in the response body, gated
                 on a <code>/health</code> probe (Qwen3-TTS clone, F5-TTS,
                 CosyVoice, your own server…). The audio comes back over the wire,
                 so no shared volume is needed. Must be reachable from the
-                controller container — use the host&apos;s LAN or Tailscale IP,
+                controller container. Use the host&apos;s LAN or Tailscale IP,
                 not <code>127.0.0.1</code>.
               </div>
             </div>
@@ -1107,10 +1107,10 @@ export function TtsSection({ data, form, setForm, busy, saveSettings, adminFetch
         <div className="field">
           <div className="field-hint">
             Find→replace rules applied to every spoken line before the voice engine
-            reads it — for names and terms the engines mispronounce (<em>GHz</em> →
+            reads it, for names and terms the engines mispronounce (<em>GHz</em> →
             <em> gigahertz</em>, <em>Hozier</em> → <em>Ho-zeer</em>). Case-insensitive,
             matches whole words and phrases; leave the spoken form empty to drop the
-            phrase entirely. Saved rules apply from the next spoken line — no restart.
+            phrase entirely. Saved rules apply from the next spoken line, no restart.
           </div>
           {/* Capped so a long rule list scrolls instead of stretching the card;
               the pr-2 keeps rows clear of the scrollbar. */}
