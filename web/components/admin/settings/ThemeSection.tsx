@@ -6,6 +6,7 @@ import { useDynamicStyle } from '../../../hooks/useDynamicStyle';
 import { notify, errorMessage } from '../../../lib/notify';
 import { applyTheme, cacheTheme, resolveFont } from '../../../lib/theme';
 import { V3AlertDialog } from '../../ui/alert-dialog';
+import { Modal } from '../../ui/modal';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
 import { Card, Btn, Pill, Seg } from '../ui';
@@ -33,7 +34,7 @@ interface ThemeDef {
   mode: 'light' | 'dark';
   tokens: Record<string, string>;
   // Set by the controller's /themes responses. Built-ins ship in the image and
-  // can't be removed; only user themes (state/themes/*.json) show a Remove button.
+  // can't be removed; only user themes (state/themes/*.json) show Edit/Remove.
   builtin?: boolean;
 }
 
@@ -90,23 +91,45 @@ function ThemePreview({ tokens, mode }: { tokens: Record<string, string>; mode: 
   );
 }
 
-// Create a custom theme from a description (AI-drafted) or by hand, then save it
-// as state/themes/<id>.json via POST /themes. Tokens are editable before save so
-// the operator reviews the palette first.
-function ThemeCreator({
+// Create or edit a custom theme — AI-drafted from a description or built by hand,
+// saved as state/themes/<id>.json via POST /themes. Passing an existing theme's
+// id overwrites that file (edit); omitting it derives a new id from the name
+// (create). Tokens are editable and previewed live before save.
+function ThemeEditorModal({
+  open,
+  onOpenChange,
+  editing,
   adminFetch,
   onSaved,
 }: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  editing: ThemeDef | null;
   adminFetch: (path: string, init?: RequestInit) => Promise<Response>;
-  onSaved: (themes: ThemeDef[]) => void;
+  onSaved: (themes: ThemeDef[], savedId?: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const isEdit = editing != null;
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [mode, setMode] = useState<'light' | 'dark'>('dark');
   const [tokens, setTokens] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // Seed the form each time the modal opens: from the theme being edited, or
+  // blank for a fresh create. Keyed on `open` so re-opening always starts clean.
+  useEffect(() => {
+    if (!open) return;
+    setErr(null);
+    if (editing) {
+      setName(editing.name);
+      setDescription(editing.description || '');
+      setMode(editing.mode);
+      setTokens({ ...editing.tokens });
+    } else {
+      setName(''); setDescription(''); setMode('dark'); setTokens({});
+    }
+  }, [open, editing]);
 
   const applyDraft = (t: {
     name?: string;
@@ -120,10 +143,6 @@ function ThemeCreator({
     if (t.tokens) setTokens(prev => ({ ...prev, ...t.tokens }));
   };
 
-  const reset = () => {
-    setName(''); setDescription(''); setTokens({}); setErr(null); setOpen(false);
-  };
-
   const save = async () => {
     if (!name.trim() || saving) return;
     setSaving(true); setErr(null);
@@ -131,16 +150,20 @@ function ThemeCreator({
       // Drop blank tokens — an omitted token derives from the base palette in
       // globals.css, and an empty value would fail the typed validator.
       const cleaned = Object.fromEntries(Object.entries(tokens).filter(([, v]) => v.trim() !== ''));
+      const body: Record<string, unknown> = { name: name.trim(), description: description.trim(), mode, tokens: cleaned };
+      // Pass the id when editing so the same state/themes/<id>.json is overwritten
+      // even if the operator renamed it; omit it on create so a fresh id is derived.
+      if (isEdit && editing) body.id = editing.id;
       const r = await adminFetch('/themes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), description: description.trim(), mode, tokens: cleaned }),
+        body: JSON.stringify(body),
       });
       const j = (await r.json().catch(() => ({}))) as { error?: string; themes?: ThemeDef[] };
       if (!r.ok) throw new Error(j.error || `failed (${r.status})`);
-      onSaved(j.themes ?? []);
-      notify.ok(`saved "${name.trim()}"`);
-      reset();
+      onSaved(j.themes ?? [], isEdit && editing ? editing.id : undefined);
+      notify.ok(`${isEdit ? 'updated' : 'saved'} "${name.trim()}"`);
+      onOpenChange(false);
     } catch (e) {
       setErr(errorMessage(e));
     } finally {
@@ -148,86 +171,90 @@ function ThemeCreator({
     }
   };
 
-  if (!open) {
-    return (
-      <Btn sm tone="accent" onClick={() => setOpen(true)}>Create theme with AI</Btn>
-    );
-  }
-
   return (
-    <div className="grid w-full basis-full gap-3 border border-ink p-3">
-      <AiFill<{ name?: string; description?: string; mode?: 'light' | 'dark'; tokens?: Record<string, string> }>
-        endpoint="/generate/theme"
-        resultKey="theme"
-        adminFetch={adminFetch}
-        placeholder="e.g. a warm sepia newspaper, easy on the eyes"
-        extra={{ mode }}
-        onApply={applyDraft}
-      />
-      <div className="grid grid-cols-[1fr_auto] items-end gap-3">
-        <div className="field">
-          <Label>theme name</Label>
-          <Input value={name} maxLength={60} onChange={(e: ChangeEvent<HTMLInputElement>) => setName(e.target.value)} placeholder="e.g. Sepia Press" />
-        </div>
-        <Seg
-          value={mode}
-          onChange={(v) => setMode(v as 'light' | 'dark')}
-          options={[{ id: 'dark', label: 'Dark' }, { id: 'light', label: 'Light' }]}
+    <Modal
+      open={open}
+      onOpenChange={onOpenChange}
+      width={640}
+      title={isEdit ? 'edit theme' : 'create theme'}
+      sub={name.trim() || 'a custom palette'}
+      footer={
+        <>
+          {err && <span className="mr-auto text-[12px] text-[var(--danger)]">{err}</span>}
+          <Btn onClick={() => onOpenChange(false)} disabled={saving}>Cancel</Btn>
+          <Btn tone="accent" onClick={save} disabled={saving || !name.trim()}>
+            {saving ? 'Saving…' : isEdit ? 'Save changes' : 'Save theme'}
+          </Btn>
+        </>
+      }
+    >
+      <div className="grid gap-3">
+        <AiFill<{ name?: string; description?: string; mode?: 'light' | 'dark'; tokens?: Record<string, string> }>
+          endpoint="/generate/theme"
+          resultKey="theme"
+          adminFetch={adminFetch}
+          placeholder="e.g. a warm sepia newspaper, easy on the eyes"
+          extra={{ mode }}
+          onApply={applyDraft}
         />
-      </div>
-      <div className="grid gap-1.5">
-        {THEME_TOKENS.map(({ key, label, type, group, fontSet }, i) => (
-          <div key={key} className="grid gap-1.5">
-            {group !== (i > 0 ? THEME_TOKENS[i - 1]?.group : null) && (
-              <div className="mt-2 text-[10px] tracking-[0.16em] text-ink-faint uppercase first:mt-0">{group}</div>
-            )}
-            <div className="grid grid-cols-[auto_5.5rem_1fr] items-center gap-2">
-              <span className="inline-flex shrink-0 border border-ink">
-                <Swatch color={type === 'color' ? tokens[key] : undefined} />
-              </span>
-              <span className="text-[11px] tracking-[0.12em] text-muted uppercase">{label}</span>
-              {type === 'font' ? (
-                <select
-                  value={tokens[key] || ''}
-                  onChange={(e: ChangeEvent<HTMLSelectElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
-                  className="border border-ink bg-field px-2 py-1.5 font-mono text-[12px] text-ink"
-                >
-                  <option value="">default ({fontSet === 'mono' ? 'jetbrains' : 'fraunces'})</option>
-                  {(fontSet === 'mono' ? MONO_FONT_IDS : DISPLAY_FONT_IDS).map(id => <option key={id} value={id}>{id}</option>)}
-                </select>
-              ) : type === 'grain' ? (
-                <div className="flex items-center gap-2">
-                  <input
-                    type="range" min={0} max={1} step={0.05}
-                    value={tokens[key] ? Number(tokens[key]) : 0}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
-                    className="w-full accent-vermilion"
-                    aria-label={label}
-                  />
-                  <span className="w-8 shrink-0 text-right font-mono text-[11px] text-muted">{tokens[key] || '—'}</span>
-                </div>
-              ) : (
-                <Input
-                  value={tokens[key] || ''}
-                  maxLength={100}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
-                  placeholder="#000000 or rgba(…)"
-                  className="font-mono text-[12px]"
-                />
-              )}
-            </div>
+        <div className="grid grid-cols-[1fr_auto] items-end gap-3">
+          <div className="field">
+            <Label>theme name</Label>
+            <Input value={name} maxLength={60} onChange={(e: ChangeEvent<HTMLInputElement>) => setName(e.target.value)} placeholder="e.g. Sepia Press" />
           </div>
-        ))}
+          <Seg
+            value={mode}
+            onChange={(v) => setMode(v as 'light' | 'dark')}
+            options={[{ id: 'dark', label: 'Dark' }, { id: 'light', label: 'Light' }]}
+          />
+        </div>
+        <div className="grid gap-1.5">
+          {THEME_TOKENS.map(({ key, label, type, group, fontSet }, i) => (
+            <div key={key} className="grid gap-1.5">
+              {group !== (i > 0 ? THEME_TOKENS[i - 1]?.group : null) && (
+                <div className="mt-2 text-[10px] tracking-[0.16em] text-ink-faint uppercase first:mt-0">{group}</div>
+              )}
+              <div className="grid grid-cols-[auto_5.5rem_1fr] items-center gap-2">
+                <span className="inline-flex shrink-0 border border-ink">
+                  <Swatch color={type === 'color' ? tokens[key] : undefined} />
+                </span>
+                <span className="text-[11px] tracking-[0.12em] text-muted uppercase">{label}</span>
+                {type === 'font' ? (
+                  <select
+                    value={tokens[key] || ''}
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
+                    className="border border-ink bg-field px-2 py-1.5 font-mono text-[12px] text-ink"
+                  >
+                    <option value="">default ({fontSet === 'mono' ? 'jetbrains' : 'fraunces'})</option>
+                    {(fontSet === 'mono' ? MONO_FONT_IDS : DISPLAY_FONT_IDS).map(id => <option key={id} value={id}>{id}</option>)}
+                  </select>
+                ) : type === 'grain' ? (
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range" min={0} max={1} step={0.05}
+                      value={tokens[key] ? Number(tokens[key]) : 0}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
+                      className="w-full accent-vermilion"
+                      aria-label={label}
+                    />
+                    <span className="w-8 shrink-0 text-right font-mono text-[11px] text-muted">{tokens[key] || '—'}</span>
+                  </div>
+                ) : (
+                  <Input
+                    value={tokens[key] || ''}
+                    maxLength={100}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setTokens(prev => ({ ...prev, [key]: e.target.value }))}
+                    placeholder="#000000 or rgba(…)"
+                    className="font-mono text-[12px]"
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        <ThemePreview tokens={tokens} mode={mode} />
       </div>
-      <ThemePreview tokens={tokens} mode={mode} />
-      {err && <span className="text-[12px] text-[var(--danger)]">{err}</span>}
-      <div className="flex gap-2">
-        <Btn sm tone="accent" onClick={save} disabled={saving || !name.trim()}>
-          {saving ? 'Saving…' : 'Save theme'}
-        </Btn>
-        <Btn sm onClick={reset} disabled={saving}>Cancel</Btn>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -236,6 +263,8 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<ThemeDef | null>(null);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editing, setEditing] = useState<ThemeDef | null>(null);
 
   const activeId = data.values?.theme?.active;
   const PUBLIC_API = (process.env.NEXT_PUBLIC_API_URL as string | undefined) || '/api';
@@ -293,6 +322,16 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
     await saveSettings({ theme: { active: theme.id } });
   };
 
+  // When an edit saves, refresh the list and — if the edited theme is the one
+  // on air — re-apply it so the admin page updates now (the poll would too).
+  const onSaved = (next: ThemeDef[], savedId?: string) => {
+    setThemes(next);
+    if (savedId && savedId === activeId) {
+      const saved = next.find(t => t.id === savedId);
+      if (saved) { applyTheme(saved); cacheTheme(saved); }
+    }
+  };
+
   // Delete a user theme's state/themes/<id>.json. If it was the active theme,
   // fall back to the first remaining one (built-ins lead the list) through the
   // normal selection flow so nothing points at a now-missing id.
@@ -315,7 +354,7 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
       <SectionHeader
         eyebrow="skin & themes"
         title="The player’s layout and the station-wide palette."
-        sub={<>The <strong>skin</strong> is the full-screen layout every listener sees; the <strong>theme</strong> is the palette it — and the admin UI — render in. Built-in themes ship with the controller; drop custom JSONs in <code>state/themes/</code> and hit <em>Refresh</em>.</>}
+        sub={<>The <strong>skin</strong> is the full-screen layout every listener sees; the <strong>theme</strong> is the palette it (and the admin UI) render in. Built-in themes ship with the controller; drop custom JSONs in <code>state/themes/</code> and hit <em>Refresh</em>.</>}
         metrics={[
           { n: activeSkinName, l: 'skin', accent: true },
           { n: themes ? String(themes.length) : '—', l: 'themes' },
@@ -335,6 +374,92 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
         </div>
       </Card>
 
+      {/* Themes — the palette picker merged with create / edit / refresh. */}
+      <Card title="Themes" sub="the station-wide palette">
+        <div className="grid gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Btn sm tone="accent" onClick={() => { setEditing(null); setEditorOpen(true); }}>
+              Create theme
+            </Btn>
+            <Btn sm onClick={refresh} disabled={refreshing || busy}>
+              {refreshing ? 'Refreshing…' : 'Refresh'}
+            </Btn>
+          </div>
+          <div className="field-hint">
+            Describe a look in the editor and we&apos;ll draft the palette, or drop a JSON
+            theme file in <code>state/themes/</code> and hit <em>Refresh</em>, no controller
+            restart needed. The folder&apos;s <code>README.md</code> lists the format and the
+            allowed token keys.
+          </div>
+          {error && (
+            <div className="field-hint text-[var(--danger)]">
+              Couldn’t load themes: {error}
+            </div>
+          )}
+          {!themes && !error && (
+            <div className="text-[13px] text-muted italic">loading…</div>
+          )}
+          {themes && (
+            <div className="grid gap-2">
+              {themes.map(t => {
+                const isActive = t.id === activeId;
+                return (
+                  <div key={t.id} className="flex items-stretch gap-2">
+                    <button
+                      type="button"
+                      onClick={() => choose(t)}
+                      disabled={busy}
+                      className={cn(
+                        'flex min-w-0 flex-1 items-center gap-3 border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60',
+                        isActive
+                          ? 'border-vermilion bg-[var(--ink-softer)]'
+                          : 'border-ink bg-bg hover:bg-[var(--overlay)]',
+                      )}
+                    >
+                      <span className="inline-flex shrink-0 border border-ink" aria-hidden="true">
+                        {SWATCH_KEYS.map(k => (
+                          <Swatch key={k} color={t.tokens[k]} />
+                        ))}
+                      </span>
+                      <div className="grid min-w-0 flex-1 gap-0.5">
+                        <span className="text-[12px] font-bold tracking-[0.12em] uppercase">
+                          {t.name}
+                        </span>
+                        <span className="text-[11px] leading-[1.4] text-muted">
+                          {t.description || (t.mode === 'dark' ? 'Dark palette' : 'Light palette')}
+                        </span>
+                      </div>
+                      {isActive && <Pill tone="accent" dot>active</Pill>}
+                    </button>
+                    {!t.builtin && (
+                      <>
+                        <Btn
+                          sm
+                          onClick={() => { setEditing(t); setEditorOpen(true); }}
+                          disabled={busy}
+                          title="Edit this custom theme"
+                        >
+                          Edit
+                        </Btn>
+                        <Btn
+                          sm
+                          tone="danger"
+                          onClick={() => setConfirmRemove(t)}
+                          disabled={busy}
+                          title="Remove this custom theme"
+                        >
+                          Remove
+                        </Btn>
+                      </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </Card>
+
       <Card title="Tune-in overlay" sub="the full-bleed “tap to tune in” gate">
         <div className="field">
           <Label>Show the tune-in overlay</Label>
@@ -351,7 +476,7 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
           <div className="field-hint">
             The full-screen “Tap to tune in” gate a new listener lands on. When
             off, the player loads paused with no takeover and listeners start the
-            stream from the skin’s own play button — browsers can’t autoplay, so a
+            stream from the skin’s own play button; browsers can’t autoplay, so a
             tap is always needed somewhere. Applies live, no restart.
           </div>
         </div>
@@ -372,88 +497,20 @@ export function ThemeSection({ data, busy, saveSettings, adminFetch }: ThemeSect
           </div>
           <div className="field-hint">
             A small animated mascot that leads the DJ line on the listener player,
-            reacting to what the DJ is doing — on-air, picking, or idle — and tap it
+            reacting to what the DJ is doing (on-air, picking, or idle), and tap it
             for a reaction. When off, the line falls back to the classic ♪/◇ marker.
             Applies live, no restart.
           </div>
         </div>
       </Card>
 
-      <Card title="Create theme" sub="state/themes/*.json">
-        <div className="grid gap-3">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <Btn sm onClick={refresh} disabled={refreshing || busy}>
-              {refreshing ? 'Refreshing…' : 'Refresh themes'}
-            </Btn>
-            <ThemeCreator adminFetch={adminFetch} onSaved={setThemes} />
-          </div>
-          <div className="field-hint">
-            Describe a look above and we&apos;ll draft the palette, or drop a JSON
-            theme file in <code>state/themes/</code> and click <em>Refresh</em>,
-            no controller restart needed. The folder includes a
-            <code>README.md</code> with the format and the allowed token keys.
-          </div>
-        </div>
-      </Card>
-
-      <Card title="Picker" sub="active station theme">
-        {error && (
-          <div className="field-hint text-[var(--danger)]">
-            Couldn’t load themes: {error}
-          </div>
-        )}
-        {!themes && !error && (
-          <div className="text-[13px] text-muted italic">loading…</div>
-        )}
-        {themes && (
-          <div className="grid gap-2">
-            {themes.map(t => {
-              const isActive = t.id === activeId;
-              return (
-                <div key={t.id} className="flex items-stretch gap-2">
-                  <button
-                    type="button"
-                    onClick={() => choose(t)}
-                    disabled={busy}
-                    className={cn(
-                      'flex min-w-0 flex-1 items-center gap-3 border p-3 text-left disabled:cursor-not-allowed disabled:opacity-60',
-                      isActive
-                        ? 'border-vermilion bg-[var(--ink-softer)]'
-                        : 'border-ink bg-bg hover:bg-[var(--overlay)]',
-                    )}
-                  >
-                    <span className="inline-flex shrink-0 border border-ink" aria-hidden="true">
-                      {SWATCH_KEYS.map(k => (
-                        <Swatch key={k} color={t.tokens[k]} />
-                      ))}
-                    </span>
-                    <div className="grid min-w-0 flex-1 gap-0.5">
-                      <span className="text-[12px] font-bold tracking-[0.12em] uppercase">
-                        {t.name}
-                      </span>
-                      <span className="text-[11px] leading-[1.4] text-muted">
-                        {t.description || (t.mode === 'dark' ? 'Dark palette' : 'Light palette')}
-                      </span>
-                    </div>
-                    {isActive && <Pill tone="accent" dot>active</Pill>}
-                  </button>
-                  {!t.builtin && (
-                    <Btn
-                      sm
-                      tone="danger"
-                      onClick={() => setConfirmRemove(t)}
-                      disabled={busy}
-                      title="Remove this custom theme"
-                    >
-                      Remove
-                    </Btn>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </Card>
+      <ThemeEditorModal
+        open={editorOpen}
+        onOpenChange={setEditorOpen}
+        editing={editing}
+        adminFetch={adminFetch}
+        onSaved={onSaved}
+      />
 
       <V3AlertDialog
         open={confirmRemove != null}
