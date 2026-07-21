@@ -167,8 +167,8 @@ export function SearchSection({ data, form, setForm, busy, saveSettings, adminFe
                 : provider === 'tavily'
                 ? 'Tavily, paid web search with full results and an answer summary. Needs an API key.'
                 : provider === 'brave'
-                ? 'Brave Search API — real web + news results for artist queries. Metered billing with $5/month in free credits (~1,000 queries; a card on file is required). SUB/WAVE caches every search for 30 minutes.'
-                : 'SearXNG, self-hosted meta-search aggregating Google, Brave, DDG and more. No API key needed — just a running SearXNG instance.'}
+                ? 'Brave Search API: real web + news results for artist queries. Metered billing with $5/month in free credits (~1,000 queries; a card on file is required). SUB/WAVE caches every search for 30 minutes.'
+                : 'SearXNG, self-hosted meta-search aggregating Google, Brave, DDG and more. No API key needed, just a running SearXNG instance.'}
             </div>
           </div>
 
