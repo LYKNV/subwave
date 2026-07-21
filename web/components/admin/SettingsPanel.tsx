@@ -137,6 +137,12 @@ export default function SettingsPanel() {
       stationDescription: v.stationDescription ?? '',
       timezone: v.timezone ?? '',
       locale: normalizeStationLocale(v.locale),
+      privacy: {
+        privatePlayer: v.privacy?.privatePlayer ?? false,
+        listenerAuth: v.privacy?.listenerAuth ?? false,
+        // Arrives as the 'set' sentinel ('' when unset) — never the secret.
+        password: v.privacy?.password ?? '',
+      },
       kokoroLang: v.tts?.kokoro?.lang ?? '',
       weather: {
         lat: String(v.weather?.lat ?? ''),

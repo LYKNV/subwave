@@ -189,6 +189,14 @@ export interface LoudnessForm {
   source: LoudnessSource;
 }
 
+export interface PrivacyForm {
+  privatePlayer: boolean;
+  listenerAuth: boolean;
+  /** Round-trips the 'set' redaction sentinel when saved and untouched.
+   *  One shared secret behind both locks above. */
+  password: string;
+}
+
 export interface FormState {
   jingleRatio: string;
   crossfadeDuration: string;
@@ -207,6 +215,7 @@ export interface FormState {
   search: SearchForm;
   embedding: EmbeddingForm;
   scrobble: ScrobbleForm;
+  privacy: PrivacyForm;
   likes: LikesForm;
 }
 
@@ -294,6 +303,7 @@ export interface SettingsData {
     };
     sfx?: { enabled?: boolean };
     ui?: { boothBuddy?: boolean; skin?: string; tuneInOverlay?: boolean };
+    privacy?: { privatePlayer?: boolean; listenerAuth?: boolean; password?: string };
     scrobble?: {
       lastfm?: Partial<ScrobbleLastfmForm>;
       listenbrainz?: Partial<ScrobbleListenbrainzForm>;
